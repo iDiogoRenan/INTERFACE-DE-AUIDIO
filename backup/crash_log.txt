@@ -1,0 +1,77 @@
+
+============================================================
+[2026-05-05 10:51:15] CRASH NÃO TRATADO:
+Traceback (most recent call last):
+  File "D:\CD DUBLAGEM PROJETO\INTERFACE DE AUIDIO\_patch_accent_fix.py", line 364, in run
+    import torch
+  File "C:\Users\Relic\AppData\Local\Programs\Python\Python311\Lib\site-packages\torch\__init__.py", line 285, in <module>
+    _load_dll_libraries()
+  File "C:\Users\Relic\AppData\Local\Programs\Python\Python311\Lib\site-packages\torch\__init__.py", line 268, in _load_dll_libraries
+    raise err
+OSError: [WinError 1114] Uma rotina de inicialização da biblioteca de vínculo dinâmico (DLL) falhou. Error loading "C:\Users\Relic\AppData\Local\Programs\Python\Python311\Lib\site-packages\torch\lib\c10.dll" or one of its dependencies.
+
+
+============================================================
+[2026-05-05 15:33:40] CRASH NÃO TRATADO:
+Traceback (most recent call last):
+  File "D:\CD DUBLAGEM PROJETO\INTERFACE DE AUIDIO\DUBLAGEM_MASTER_PRO_v14_ACCENT_FIX.py", line 743, in _run_dub_multi
+    self._set_botoes_ativos(False)
+  File "D:\CD DUBLAGEM PROJETO\INTERFACE DE AUIDIO\DUBLAGEM_MASTER_PRO_v14_ACCENT_FIX.py", line 769, in _set_botoes_ativos
+    self.btn_tudo.setEnabled(ativo)
+    ^^^^^^^^^^^^^
+AttributeError: 'MainWindow' object has no attribute 'btn_tudo'
+
+
+============================================================
+[2026-05-05 15:33:49] CRASH NÃO TRATADO:
+Traceback (most recent call last):
+  File "D:\CD DUBLAGEM PROJETO\INTERFACE DE AUIDIO\DUBLAGEM_MASTER_PRO_v14_ACCENT_FIX.py", line 743, in _run_dub_multi
+    self._set_botoes_ativos(False)
+  File "D:\CD DUBLAGEM PROJETO\INTERFACE DE AUIDIO\DUBLAGEM_MASTER_PRO_v14_ACCENT_FIX.py", line 769, in _set_botoes_ativos
+    self.btn_tudo.setEnabled(ativo)
+    ^^^^^^^^^^^^^
+AttributeError: 'MainWindow' object has no attribute 'btn_tudo'
+
+
+============================================================
+[2026-05-05 17:34:37] CRASH NÃO TRATADO:
+Traceback (most recent call last):
+  File "D:\CD DUBLAGEM PROJETO\INTERFACE DE AUIDIO\_test_completo.py", line 64, in <module>
+    assert not val.btn_redublar.isEnabled()
+               ^^^^^^^^^^^^^^^^
+AttributeError: 'ValidacaoWidget' object has no attribute 'btn_redublar'
+
+
+============================================================
+[2026-05-05 17:35:08] CRASH NÃO TRATADO:
+Traceback (most recent call last):
+  File "D:\CD DUBLAGEM PROJETO\INTERFACE DE AUIDIO\DUBLAGEM_MASTER_PRO_v14_ACCENT_FIX.py", line 755, in _redublar_de_validacao
+    self._val_worker = SingleDubbingWorkerV14(
+                       ^^^^^^^^^^^^^^^^^^^^^^^
+TypeError: SingleDubbingWorkerV14.__init__() got an unexpected keyword argument 'models'
+
+
+============================================================
+[2026-05-05 18:26:06] CRASH NÃO TRATADO:
+Traceback (most recent call last):
+  File "D:\CD DUBLAGEM PROJETO\INTERFACE DE AUIDIO\_test_missing_en.py", line 46, in <module>
+    print(f"Label Status: {val.lbl_status.text()}")
+  File "C:\Users\Relic\AppData\Local\Programs\Python\Python311\Lib\encodings\cp1252.py", line 19, in encode
+    return codecs.charmap_encode(input,self.errors,encoding_table)[0]
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+UnicodeEncodeError: 'charmap' codec can't encode character '\U0001f4c4' in position 14: character maps to <undefined>
+
+
+============================================================
+[2026-05-06 20:04:34] ERRO NA INICIALIZAÇÃO:
+Traceback (most recent call last):
+  File "D:\CD DUBLAGEM PROJETO\INTERFACE DE AUIDIO\DUBLAGEM_MASTER_PRO_v14_ACCENT_FIX.py", line 1093, in <module>
+    w = MainWindow()
+        ^^^^^^^^^^^^
+  File "D:\CD DUBLAGEM PROJETO\INTERFACE DE AUIDIO\DUBLAGEM_MASTER_PRO_v14_ACCENT_FIX.py", line 535, in __init__
+    self._build_ui()
+  File "D:\CD DUBLAGEM PROJETO\INTERFACE DE AUIDIO\DUBLAGEM_MASTER_PRO_v14_ACCENT_FIX.py", line 705, in _build_ui
+    self.cmb_source_lang = QComboBox()
+                           ^^^^^^^^^
+UnboundLocalError: cannot access local variable 'QComboBox' where it is not associated with a value
+
