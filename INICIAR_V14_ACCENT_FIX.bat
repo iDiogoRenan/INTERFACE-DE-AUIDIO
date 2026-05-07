@@ -2,12 +2,15 @@
 title Dublador Master Pro v14.1 - Anti-Corte Final
 cd /d "%~dp0"
 
-:: Python do venv correto (torch128 RTX 50)
-set VENV_PYTHON=D:\CD DUBLAGEM PROJETO\venv\Scripts\python.exe
+:: Ambiente local do projeto
+set VENV_PYTHON=%~dp0.venv\Scripts\python.exe
+set FFMPEG_DIR=%~dp0.venv\ffmpeg
+set PATH=%FFMPEG_DIR%;%PATH%
 
 echo ============================================================
 echo  Dublador Master Pro v14.1 - Anti-Sotaque + Anti-Corte Final
 echo  Venv: %VENV_PYTHON%
+echo  FFmpeg: %FFMPEG_DIR%\ffmpeg.exe
 echo ============================================================
 echo.
 
@@ -16,7 +19,14 @@ if not exist "%VENV_PYTHON%" (
     echo [ERRO] Venv nao encontrado em:
     echo    %VENV_PYTHON%
     echo.
-    echo Verifique se a pasta D:\CD DUBLAGEM PROJETO\venv existe.
+    echo Execute a preparacao do ambiente antes de iniciar.
+    pause
+    exit /b 1
+)
+
+if not exist "%FFMPEG_DIR%\ffmpeg.exe" (
+    echo [ERRO] FFmpeg nao encontrado em:
+    echo    %FFMPEG_DIR%\ffmpeg.exe
     pause
     exit /b 1
 )
@@ -25,7 +35,9 @@ if not exist "%VENV_PYTHON%" (
 echo Verificando ambiente...
 "%VENV_PYTHON%" -c "import torch; print('  torch:', torch.__version__, '| CUDA:', torch.cuda.is_available())" 2>nul
 if errorlevel 1 (
-    echo  [AVISO] torch nao disponivel neste venv
+    echo  [ERRO] torch nao disponivel neste venv
+    pause
+    exit /b 1
 )
 echo.
 echo Iniciando programa...
