@@ -75,3 +75,19 @@ Traceback (most recent call last):
                            ^^^^^^^^^
 UnboundLocalError: cannot access local variable 'QComboBox' where it is not associated with a value
 
+
+============================================================
+[2026-05-07 17:31:37] CRASH NÃO TRATADO:
+Traceback (most recent call last):
+  File "E:\INTERFACE-DE-AUIDIO\DUBLAGEM_MASTER_PRO_v14_ACCENT_FIX.py", line 148, in run
+    import torch
+ModuleNotFoundError: No module named 'torch'
+
+
+============================================================
+[2026-05-07 17:35:35] CRASH NÃO TRATADO:
+Traceback (most recent call last):
+  File "E:\INTERFACE-DE-AUIDIO\DUBLAGEM_MASTER_PRO_v14_ACCENT_FIX.py", line 149, in run
+    from deep_translator import GoogleTranslator
+ModuleNotFoundError: No module named 'deep_translator'
+

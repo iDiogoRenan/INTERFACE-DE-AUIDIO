@@ -1,0 +1,2 @@
+[2026-05-07 17:31:48] ARQUIVO: torch ausente | MOTIVO: No module named 'torch'
+[2026-05-07 17:35:44] ARQUIVO: whisper ausente | MOTIVO: No module named 'whisper'
