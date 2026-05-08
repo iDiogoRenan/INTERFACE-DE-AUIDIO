@@ -2,8 +2,8 @@ use crate::{
     audio,
     error::{AppError, AppResult},
     speech::{
-        models::resolve_speech_model_paths, runtime::SpeechRuntime, SynthesisCancellationCheck,
-        SynthesisHooks, SynthesisProgressCallback, SynthesisRequest, Transcriber,
+        runtime::SpeechRuntime, SynthesisCancellationCheck, SynthesisHooks,
+        SynthesisProgressCallback, SynthesisRequest, Transcriber,
     },
     state::AppState,
     translation::{legacy_ptbr_postprocess, TranslationProvider},
@@ -156,31 +156,29 @@ async fn run_job(
         None,
         "validacao e carga de modelos",
         MODEL_LOADING_TIMEOUT,
-        async move {
-            let model_paths = tauri::async_runtime::spawn_blocking(move || {
-                resolve_speech_model_paths(requested_model_dir.as_deref())
-            })
-            .await
-            .map_err(|error| AppError::Internal(error.to_string()))??;
-            let transcriber = speech.transcriber(model_paths.whisper_model_path).await?;
-            let synthesizer = speech.synthesizer(model_paths.omnivoice_model_dir).await?;
-            Ok((transcriber, synthesizer))
-        },
+        speech.engines(requested_model_dir),
     )
     .await?;
-    let Some((transcriber, synthesizer)) = speech_engines else {
+    let Some(speech_engines) = speech_engines else {
         emit_cancelled(&app, job_id, None)?;
         return Ok(());
+    };
+    let runtime_message = if speech_engines.reused_runtime {
+        "Runtime ML residente reutilizado; modelos ja estavam carregados."
+    } else {
+        "Runtime ML carregado e mantido residente enquanto o app estiver aberto."
     };
 
     emit_stage(
         &app,
         job_id,
         JobStage::Queued,
-        "Job de dublagem iniciado.",
+        runtime_message,
         Some(2),
         None,
     )?;
+    let transcriber = speech_engines.transcriber;
+    let synthesizer = speech_engines.synthesizer;
 
     for (index, input_path) in request.input_paths.iter().enumerate() {
         let file_name = input_path

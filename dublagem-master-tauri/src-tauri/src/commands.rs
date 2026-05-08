@@ -2,7 +2,6 @@ use crate::{
     audio, config,
     error::{AppError, AppResult},
     jobs,
-    speech::models::resolve_speech_model_paths,
     state::AppState,
 };
 use dublagem_domain::{
@@ -79,10 +78,9 @@ pub async fn transcribe_audio(
     target_language: dublagem_domain::LanguageCode,
 ) -> AppResult<dublagem_domain::TranscriptionResult> {
     let config = config::load_config(&app)?;
-    let model_paths = resolve_speech_model_paths(config.model_dir.as_deref())?;
     let transcriber = state
         .speech
-        .transcriber(model_paths.whisper_model_path)
+        .transcriber_for_model_dir(config.model_dir)
         .await?;
     transcriber
         .transcribe(&path, source_language, target_language)
@@ -128,10 +126,9 @@ pub async fn generate_voice_pool(
     output_dir: PathBuf,
 ) -> AppResult<Vec<PathBuf>> {
     let config = config::load_config(&app)?;
-    let model_paths = resolve_speech_model_paths(config.model_dir.as_deref())?;
     let synthesizer = state
         .speech
-        .synthesizer(model_paths.omnivoice_model_dir)
+        .synthesizer_for_model_dir(config.model_dir)
         .await?;
     synthesizer.generate_voice_pool(&output_dir).await
 }
