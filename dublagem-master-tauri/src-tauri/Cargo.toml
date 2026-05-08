@@ -22,7 +22,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = [] }
+tauri = { version = "2", features = ["protocol-asset"] }
 tauri-plugin-opener = "2"
 tauri-plugin-dialog = "2"
 dublagem-domain = { path = "crates/domain" }
@@ -41,11 +41,28 @@ uuid = { version = "1", features = ["serde", "v4"] }
 whisper-rs = { version = "0.16", optional = true }
 candle-core = { version = "0.10", optional = true }
 candle-nn = { version = "0.10", optional = true }
+omnivoice-infer = { path = "../vendor/omnivoice-rs/crates/omnivoice-infer", optional = true }
 
 [dev-dependencies]
 tempfile = "3"
 
 [features]
-default = []
-ml = ["dep:whisper-rs", "dep:candle-core", "dep:candle-nn"]
+default = ["ml", "cuda"]
+ml = [
+    "dep:whisper-rs",
+    "dep:candle-core",
+    "dep:candle-nn",
+    "dep:omnivoice-infer",
+]
+cuda = [
+    "ml",
+    "whisper-rs/cuda",
+    "candle-core/cuda",
+    "candle-nn/cuda",
+    "omnivoice-infer/cuda",
+]
 
+[patch.crates-io]
+candle-kernels = { path = "../vendor/candle-kernels" }
+esaxx-rs = { path = "../vendor/esaxx-rs" }
+whisper-rs-sys = { path = "../vendor/whisper-rs-sys" }

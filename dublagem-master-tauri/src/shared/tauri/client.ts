@@ -31,6 +31,7 @@ export const tauriClient = {
   scanAudioFolder: (inputDir: string, outputDir: string | null) =>
     command<AudioFileEntry[]>("scan_audio_folder", { inputDir, outputDir }),
   getAudioMetadata: (path: string) => command<AudioMetadata>("get_audio_metadata", { path }),
+  prepareAudioPreview: (source: string) => command<string>("prepare_audio_preview", { source }),
   transcribeAudio: (path: string, sourceLanguage: LanguageCode, targetLanguage: LanguageCode) =>
     command<TranscriptionResult>("transcribe_audio", { path, sourceLanguage, targetLanguage }),
   translateText: (request: TranslationRequest) =>

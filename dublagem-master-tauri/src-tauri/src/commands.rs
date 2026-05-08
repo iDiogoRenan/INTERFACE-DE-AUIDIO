@@ -2,16 +2,22 @@ use crate::{
     audio, config,
     error::{AppError, AppResult},
     jobs,
-    speech::VoiceSynthesizer,
+    speech::{
+        models::resolve_speech_model_paths, omnivoice::OmniVoiceCandleSynthesizer,
+        whisper::WhisperRsTranscriber, Transcriber, VoiceSynthesizer,
+    },
     state::AppState,
-    translation::TranslationProvider,
 };
 use dublagem_domain::{
     AppConfig, AudioFileEntry, AudioMetadata, DubbingRequest, JobId, QualityReport,
     TranslationRequest, TranslationResult,
 };
-use std::path::PathBuf;
-use tauri::{AppHandle, State};
+use sha2::Digest;
+use std::{
+    path::{Path, PathBuf},
+    time::UNIX_EPOCH,
+};
+use tauri::{AppHandle, Manager, State};
 
 #[tauri::command]
 pub fn load_config(app: AppHandle) -> AppResult<AppConfig> {
@@ -37,6 +43,31 @@ pub fn get_audio_metadata(path: PathBuf) -> AppResult<AudioMetadata> {
 }
 
 #[tauri::command]
+pub fn prepare_audio_preview(app: AppHandle, source: PathBuf) -> AppResult<PathBuf> {
+    if !source.is_file() || !audio::is_audio_file(&source) {
+        return Err(AppError::InvalidPath(source));
+    }
+
+    let metadata = std::fs::metadata(&source)?;
+    let preview_dir = app
+        .path()
+        .app_cache_dir()
+        .map_err(|error| AppError::InvalidConfig(error.to_string()))?
+        .join("audio-preview");
+    std::fs::create_dir_all(&preview_dir)?;
+
+    let target = preview_dir.join(preview_file_name(&source, &metadata));
+    let should_copy = std::fs::metadata(&target)
+        .map(|target_metadata| target_metadata.len() != metadata.len())
+        .unwrap_or(true);
+    if should_copy {
+        std::fs::copy(&source, &target)?;
+    }
+
+    Ok(target)
+}
+
+#[tauri::command]
 pub fn inspect_audio_quality(path: PathBuf) -> AppResult<QualityReport> {
     let samples = audio::read_wav_mono_f32(&path)?;
     Ok(audio::quality_report(&samples))
@@ -44,18 +75,17 @@ pub fn inspect_audio_quality(path: PathBuf) -> AppResult<QualityReport> {
 
 #[tauri::command]
 pub async fn transcribe_audio(
-    state: State<'_, AppState>,
+    app: AppHandle,
     path: PathBuf,
     source_language: dublagem_domain::LanguageCode,
     target_language: dublagem_domain::LanguageCode,
 ) -> AppResult<dublagem_domain::TranscriptionResult> {
-    crate::speech::Transcriber::transcribe(
-        state.transcriber.as_ref(),
-        &path,
-        source_language,
-        target_language,
-    )
-    .await
+    let config = config::load_config(&app)?;
+    let model_paths = resolve_speech_model_paths(config.model_dir.as_deref())?;
+    let transcriber = WhisperRsTranscriber::new(Some(model_paths.whisper_model_path));
+    transcriber
+        .transcribe(&path, source_language, target_language)
+        .await
 }
 
 #[tauri::command]
@@ -91,11 +121,11 @@ pub fn reject_file(source: PathBuf, rejected_dir: PathBuf) -> AppResult<PathBuf>
 }
 
 #[tauri::command]
-pub async fn generate_voice_pool(
-    state: State<'_, AppState>,
-    output_dir: PathBuf,
-) -> AppResult<Vec<PathBuf>> {
-    state.synthesizer.generate_voice_pool(&output_dir).await
+pub async fn generate_voice_pool(app: AppHandle, output_dir: PathBuf) -> AppResult<Vec<PathBuf>> {
+    let config = config::load_config(&app)?;
+    let model_paths = resolve_speech_model_paths(config.model_dir.as_deref())?;
+    let synthesizer = OmniVoiceCandleSynthesizer::new(Some(model_paths.omnivoice_model_dir));
+    synthesizer.generate_voice_pool(&output_dir).await
 }
 
 fn copy_to_dir(source: PathBuf, target_dir: PathBuf) -> AppResult<PathBuf> {
@@ -109,4 +139,48 @@ fn copy_to_dir(source: PathBuf, target_dir: PathBuf) -> AppResult<PathBuf> {
     let target = target_dir.join(file_name);
     std::fs::copy(&source, &target)?;
     Ok(target)
+}
+
+fn preview_file_name(source: &Path, metadata: &std::fs::Metadata) -> String {
+    let mut hasher = sha2::Sha256::new();
+    hasher.update(source.to_string_lossy().as_bytes());
+    hasher.update(metadata.len().to_le_bytes());
+    if let Ok(modified) = metadata.modified() {
+        if let Ok(duration) = modified.duration_since(UNIX_EPOCH) {
+            hasher.update(duration.as_nanos().to_le_bytes());
+        }
+    }
+    let digest = hasher.finalize();
+    let fingerprint = digest
+        .iter()
+        .take(8)
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let extension = source
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(sanitize_component)
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "audio".to_string());
+    let stem = source
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .map(sanitize_component)
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "preview".to_string());
+
+    format!("{stem}-{fingerprint}.{extension}")
+}
+
+fn sanitize_component(value: &str) -> String {
+    value
+        .chars()
+        .map(|char| {
+            if char.is_ascii_alphanumeric() || matches!(char, '-' | '_') {
+                char
+            } else {
+                '_'
+            }
+        })
+        .collect()
 }

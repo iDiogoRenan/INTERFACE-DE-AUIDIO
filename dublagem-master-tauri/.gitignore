@@ -20,6 +20,9 @@ voice_pool_ptbr
 rejeitados_revisao_manual
 src-tauri/target
 src-tauri/gen
+vendor/**/target
+.serena
+.codex-run
 
 # Editor directories and files
 .vscode/*

@@ -16,22 +16,30 @@ pub fn config_path(app: &AppHandle) -> AppResult<PathBuf> {
 pub fn load_config(app: &AppHandle) -> AppResult<AppConfig> {
     let path = config_path(app)?;
     if !path.exists() {
-        return Ok(AppConfig::default());
+        return Ok(with_discovered_models(AppConfig::default()));
     }
 
     let payload = std::fs::read_to_string(path)?;
-    Ok(serde_json::from_str(&payload)?)
+    Ok(with_discovered_models(serde_json::from_str(&payload)?))
 }
 
 pub fn save_config(app: &AppHandle, config: &AppConfig) -> AppResult<AppConfig> {
+    let config = with_discovered_models(config.clone());
     let path = config_path(app)?;
     let parent = path.parent().ok_or_else(|| {
         AppError::InvalidConfig("caminho de configuracao sem diretorio".to_string())
     })?;
     std::fs::create_dir_all(parent)?;
-    let payload = serde_json::to_string_pretty(config)?;
+    let payload = serde_json::to_string_pretty(&config)?;
     std::fs::write(path, payload)?;
-    Ok(config.clone())
+    Ok(config)
+}
+
+fn with_discovered_models(mut config: AppConfig) -> AppConfig {
+    if config.model_dir.is_none() {
+        config.model_dir = crate::speech::models::discover_model_dir();
+    }
+    config
 }
 
 #[cfg(test)]

@@ -27,6 +27,11 @@
   cursor: pointer;
 }
 
+.header button:disabled {
+  cursor: not-allowed;
+  opacity: 0.52;
+}
+
 .player audio {
   width: 100%;
   height: 38px;

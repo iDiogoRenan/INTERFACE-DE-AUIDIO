@@ -1,0 +1,312 @@
+use crate::{
+    error::{AppError, AppResult},
+    speech::missing_model_error,
+};
+use serde::Deserialize;
+use sha2::{Digest, Sha256};
+use std::path::{Path, PathBuf};
+
+const MODEL_MANIFEST_FILE_NAME: &str = "MODEL_MANIFEST.json";
+const WHISPER_MODEL_ID: &str = "whisper-medium-ggml";
+const WHISPER_ENGINE: &str = "whisper-rs";
+const WHISPER_FALLBACK_PATH: &str = "whisper/ggml-medium.bin";
+const OMNIVOICE_MODEL_ID: &str = "omnivoice-candle";
+const OMNIVOICE_ENGINE: &str = "omnivoice-candle";
+const OMNIVOICE_FALLBACK_PATH: &str = "omnivoice";
+const OMNIVOICE_RUNTIME_MANIFEST_FILE_NAME: &str = "omnivoice.artifacts.json";
+const OMNIVOICE_RUNTIME_MANIFEST_JSON: &str = include_str!(
+    "../../../vendor/omnivoice-rs/crates/omnivoice-infer/assets/omnivoice.artifacts.json"
+);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SpeechModelPaths {
+    pub whisper_model_path: PathBuf,
+    pub omnivoice_model_dir: PathBuf,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ModelManifest {
+    schema_version: u32,
+    models: Vec<ModelManifestEntry>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ModelManifestEntry {
+    id: String,
+    engine: String,
+    path: PathBuf,
+    sha256: Option<String>,
+    files: Option<Vec<ModelManifestFile>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ModelManifestFile {
+    path: PathBuf,
+    sha256: String,
+}
+
+pub fn resolve_speech_model_paths(model_dir: Option<&Path>) -> AppResult<SpeechModelPaths> {
+    let model_dir = model_dir.map(Path::to_path_buf).or_else(discover_model_dir);
+
+    let Some(model_dir) = model_dir else {
+        return Err(AppError::SpeechEngineUnavailable(
+            "modelos locais nao provisionados. Execute a migracao para dublagem-master-tauri/models antes de dublar.".to_string(),
+        ));
+    };
+
+    if !model_dir.is_dir() {
+        return Err(AppError::InvalidPath(model_dir.to_path_buf()));
+    }
+
+    let manifest_path = model_dir.join(MODEL_MANIFEST_FILE_NAME);
+    let paths = if manifest_path.is_file() {
+        resolve_from_manifest(&manifest_path)?
+    } else {
+        SpeechModelPaths {
+            whisper_model_path: model_dir.join(WHISPER_FALLBACK_PATH),
+            omnivoice_model_dir: model_dir.join(OMNIVOICE_FALLBACK_PATH),
+        }
+    };
+
+    ensure_file(&paths.whisper_model_path, "whisper-rs ggml medium")?;
+    ensure_dir(&paths.omnivoice_model_dir, "OmniVoice Candle")?;
+    ensure_omnivoice_runtime_manifest(&paths.omnivoice_model_dir)?;
+    Ok(paths)
+}
+
+pub fn discover_model_dir() -> Option<PathBuf> {
+    let model_dir = project_model_dir();
+    model_dir
+        .join(MODEL_MANIFEST_FILE_NAME)
+        .is_file()
+        .then_some(model_dir)
+}
+
+pub fn project_model_dir() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .map(|project_dir| project_dir.join("models"))
+        .unwrap_or_else(|| PathBuf::from("models"))
+}
+
+fn resolve_from_manifest(manifest_path: &Path) -> AppResult<SpeechModelPaths> {
+    let payload = std::fs::read_to_string(manifest_path)?;
+    let manifest: ModelManifest = serde_json::from_str(&payload)?;
+    if manifest.schema_version != 1 {
+        return Err(AppError::InvalidConfig(format!(
+            "manifesto de modelos com schemaVersion {} nao suportado",
+            manifest.schema_version
+        )));
+    }
+
+    let base_dir = manifest_path.parent().ok_or_else(|| {
+        AppError::InvalidConfig("manifesto de modelos sem diretorio base".to_string())
+    })?;
+    let whisper = resolve_entry(&manifest.models, base_dir, WHISPER_MODEL_ID, WHISPER_ENGINE)?;
+    let omnivoice = resolve_entry(
+        &manifest.models,
+        base_dir,
+        OMNIVOICE_MODEL_ID,
+        OMNIVOICE_ENGINE,
+    )?;
+
+    Ok(SpeechModelPaths {
+        whisper_model_path: whisper,
+        omnivoice_model_dir: omnivoice,
+    })
+}
+
+fn resolve_entry(
+    entries: &[ModelManifestEntry],
+    base_dir: &Path,
+    id: &str,
+    engine: &str,
+) -> AppResult<PathBuf> {
+    let entry = entries
+        .iter()
+        .find(|candidate| candidate.id == id && candidate.engine == engine)
+        .ok_or_else(|| {
+            AppError::InvalidConfig(format!(
+                "manifesto de modelos sem entrada {id} para {engine}"
+            ))
+        })?;
+    let path = if entry.path.is_absolute() {
+        entry.path.clone()
+    } else {
+        base_dir.join(&entry.path)
+    };
+
+    if path.is_file() {
+        verify_file_hash(&path, entry.sha256.as_deref())?;
+    }
+    if path.is_dir() {
+        verify_manifest_files(base_dir, entry.files.as_deref())?;
+    }
+
+    Ok(path)
+}
+
+fn verify_manifest_files(base_dir: &Path, files: Option<&[ModelManifestFile]>) -> AppResult<()> {
+    let Some(files) = files else {
+        return Ok(());
+    };
+
+    for file in files {
+        let path = if file.path.is_absolute() {
+            file.path.clone()
+        } else {
+            base_dir.join(&file.path)
+        };
+        if !path.is_file() {
+            return Err(AppError::InvalidPath(path));
+        }
+        verify_file_hash(&path, Some(&file.sha256))?;
+    }
+
+    Ok(())
+}
+
+fn verify_file_hash(path: &Path, expected_sha256: Option<&str>) -> AppResult<()> {
+    let Some(expected_sha256) = expected_sha256 else {
+        return Ok(());
+    };
+    if !is_sha256(expected_sha256) {
+        return Err(AppError::InvalidConfig(format!(
+            "sha256 invalido no manifesto para {}",
+            path.display()
+        )));
+    }
+
+    let mut hasher = Sha256::new();
+    let bytes = std::fs::read(path)?;
+    hasher.update(bytes);
+    let actual = hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    if actual != expected_sha256.to_ascii_lowercase() {
+        return Err(AppError::InvalidConfig(format!(
+            "sha256 divergente para {}",
+            path.display()
+        )));
+    }
+
+    Ok(())
+}
+
+fn is_sha256(value: &str) -> bool {
+    value.len() == 64 && value.chars().all(|char| char.is_ascii_hexdigit())
+}
+
+fn ensure_file(path: &Path, model: &str) -> AppResult<()> {
+    if path.is_file() {
+        return Ok(());
+    }
+    Err(missing_model_error(model, path))
+}
+
+fn ensure_dir(path: &Path, model: &str) -> AppResult<()> {
+    if path.is_dir() {
+        return Ok(());
+    }
+    Err(missing_model_error(model, path))
+}
+
+fn ensure_omnivoice_runtime_manifest(model_dir: &Path) -> AppResult<()> {
+    let manifest_path = model_dir.join(OMNIVOICE_RUNTIME_MANIFEST_FILE_NAME);
+    if manifest_path.is_file() {
+        return Ok(());
+    }
+
+    std::fs::write(manifest_path, OMNIVOICE_RUNTIME_MANIFEST_JSON)?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolves_conventional_model_layout() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let whisper_dir = temp_dir.path().join("whisper");
+        let omnivoice_dir = temp_dir.path().join("omnivoice");
+        std::fs::create_dir_all(&whisper_dir).expect("whisper dir");
+        std::fs::create_dir_all(&omnivoice_dir).expect("omnivoice dir");
+        std::fs::write(whisper_dir.join("ggml-medium.bin"), b"model").expect("whisper model");
+        std::fs::write(omnivoice_dir.join("model.safetensors"), b"model").expect("omni model");
+
+        let paths = resolve_speech_model_paths(Some(temp_dir.path())).expect("model paths");
+
+        assert_eq!(
+            paths.whisper_model_path,
+            temp_dir.path().join("whisper/ggml-medium.bin")
+        );
+        assert_eq!(paths.omnivoice_model_dir, omnivoice_dir);
+    }
+
+    #[test]
+    fn validates_manifest_file_hashes() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let whisper_path = temp_dir.path().join("ggml-medium.bin");
+        let omnivoice_dir = temp_dir.path().join("omnivoice");
+        std::fs::create_dir_all(&omnivoice_dir).expect("omnivoice dir");
+        std::fs::write(&whisper_path, b"model").expect("whisper model");
+        std::fs::write(omnivoice_dir.join("model.safetensors"), b"model").expect("omni model");
+        let sha256 = format!("{:x}", Sha256::digest(b"model"));
+        std::fs::write(
+            temp_dir.path().join(MODEL_MANIFEST_FILE_NAME),
+            format!(
+                r#"{{
+  "schemaVersion": 1,
+  "models": [
+    {{
+      "id": "whisper-medium-ggml",
+      "engine": "whisper-rs",
+      "path": "ggml-medium.bin",
+      "sha256": "{sha256}"
+    }},
+    {{
+      "id": "omnivoice-candle",
+      "engine": "omnivoice-candle",
+      "path": "omnivoice"
+    }}
+  ]
+}}"#
+            ),
+        )
+        .expect("manifest");
+
+        let paths = resolve_speech_model_paths(Some(temp_dir.path())).expect("model paths");
+
+        assert_eq!(paths.whisper_model_path, whisper_path);
+        assert_eq!(paths.omnivoice_model_dir, omnivoice_dir);
+    }
+
+    #[test]
+    fn reports_missing_configuration_before_engine_creation() {
+        let missing_dir = tempfile::tempdir().expect("tempdir");
+        let error =
+            resolve_speech_model_paths(Some(missing_dir.path())).expect_err("missing config");
+
+        assert!(error.to_string().contains("whisper-rs ggml medium"));
+    }
+
+    #[test]
+    fn materializes_omnivoice_runtime_manifest_for_official_snapshot_layout() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let whisper_dir = temp_dir.path().join("whisper");
+        let omnivoice_dir = temp_dir.path().join("omnivoice");
+        std::fs::create_dir_all(&whisper_dir).expect("whisper dir");
+        std::fs::create_dir_all(&omnivoice_dir).expect("omnivoice dir");
+        std::fs::write(whisper_dir.join("ggml-medium.bin"), b"model").expect("whisper model");
+
+        resolve_speech_model_paths(Some(temp_dir.path())).expect("model paths");
+
+        assert!(omnivoice_dir
+            .join(OMNIVOICE_RUNTIME_MANIFEST_FILE_NAME)
+            .is_file());
+    }
+}

@@ -149,6 +149,7 @@ pub struct DubbingRequest {
     pub input_paths: Vec<PathBuf>,
     pub output_dir: PathBuf,
     pub guide_audio: Option<PathBuf>,
+    pub model_dir: Option<PathBuf>,
     pub options: DubbingOptions,
     pub custom_source_text: Option<String>,
     pub custom_target_text: Option<String>,
@@ -157,9 +158,31 @@ pub struct DubbingRequest {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum JobEventKind {
+    Stage,
+    Transcription,
     Progress,
     Log,
     FileComplete,
+    Cancelled,
+    Finished,
+    Failed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum JobStage {
+    Queued,
+    LoadingModels,
+    PreparingFile,
+    Transcribing,
+    Transcribed,
+    Translating,
+    Translated,
+    Synthesizing,
+    WritingOutput,
+    FileComplete,
+    Cancelling,
+    Cancelled,
     Finished,
     Failed,
 }
@@ -169,9 +192,15 @@ pub enum JobEventKind {
 pub struct DubbingJobEvent {
     pub job_id: JobId,
     pub kind: JobEventKind,
+    pub stage: Option<JobStage>,
     pub message: String,
     pub progress: Option<u8>,
     pub file_name: Option<String>,
+    pub file_index: Option<usize>,
+    pub total_files: Option<usize>,
+    pub source_text: Option<String>,
+    pub target_text: Option<String>,
+    pub output_path: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

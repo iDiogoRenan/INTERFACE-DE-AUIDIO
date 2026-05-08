@@ -10,8 +10,8 @@ mod translation;
 
 use commands::{
     approve_file, cancel_job, generate_voice_pool, get_audio_metadata, inspect_audio_quality,
-    load_config, reject_file, save_config, scan_audio_folder, start_dubbing_job, transcribe_audio,
-    translate_text,
+    load_config, prepare_audio_preview, reject_file, save_config, scan_audio_folder,
+    start_dubbing_job, transcribe_audio, translate_text,
 };
 use state::AppState;
 
@@ -26,6 +26,7 @@ pub fn run() {
             save_config,
             scan_audio_folder,
             get_audio_metadata,
+            prepare_audio_preview,
             inspect_audio_quality,
             transcribe_audio,
             translate_text,

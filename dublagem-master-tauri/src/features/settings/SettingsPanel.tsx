@@ -62,6 +62,15 @@ export function SettingsPanel() {
             void patchConfig({ approvedDir });
           }}
         />
+        <PathField
+          label="Modelos"
+          value={config.modelDir}
+          mode="directory"
+          placeholder="Bundle local em models/"
+          onChange={(modelDir) => {
+            void patchConfig({ modelDir });
+          }}
+        />
       </div>
 
       <div className={styles.optionsGrid}>

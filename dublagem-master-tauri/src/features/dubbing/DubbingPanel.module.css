@@ -1,6 +1,6 @@
 .layout {
   display: grid;
-  grid-template-rows: auto minmax(210px, 1fr) auto 8px minmax(140px, 0.65fr);
+  grid-template-rows: auto minmax(210px, 1fr) auto auto minmax(140px, 0.65fr);
   gap: 14px;
   min-height: 0;
 }
@@ -85,16 +85,93 @@
   animation: spin 1s linear infinite;
 }
 
-.progress {
-  overflow: hidden;
+.jobStatus {
+  display: grid;
+  gap: 10px;
   border: 1px solid var(--border);
   background: var(--surface-1);
+  padding: 12px;
+}
+
+.statusHeader {
+  display: flex;
+  align-items: start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.statusHeader div {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.statusHeader span,
+.fileCounter {
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.statusHeader strong {
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 750;
+  line-height: 1.35;
+}
+
+.statusHeader output {
+  min-width: 54px;
+  color: var(--accent);
+  font-size: 18px;
+  font-weight: 800;
+  text-align: right;
+}
+
+.progress {
+  overflow: hidden;
+  block-size: 10px;
+  border: 1px solid var(--border);
+  background: var(--surface-2);
 }
 
 .progress div {
   block-size: 100%;
   background: linear-gradient(90deg, var(--accent), var(--success));
   transition: inline-size 180ms ease;
+}
+
+.stageRail {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.stageRail span {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-width: 0;
+  min-height: 30px;
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 750;
+}
+
+.stageRail span[data-state="active"] {
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
+  color: var(--text);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+
+.stageRail span[data-state="done"] {
+  color: var(--success);
+}
+
+.fileCounter {
+  margin: 0;
 }
 
 .logPanel {

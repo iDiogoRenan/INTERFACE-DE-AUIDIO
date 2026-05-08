@@ -1,12 +1,43 @@
 use crate::error::{AppError, AppResult};
 use dublagem_domain::{AudioFileEntry, AudioFileStatus, AudioMetadata, QualityReport};
 use std::{fs::File, path::Path};
+#[cfg(feature = "ml")]
+use symphonia::core::{
+    audio::SampleBuffer,
+    codecs::{DecoderOptions, CODEC_TYPE_NULL},
+    errors::Error as SymphoniaError,
+};
 use symphonia::core::{
     formats::FormatOptions, io::MediaSourceStream, meta::MetadataOptions, probe::Hint,
 };
 
 pub const AUDIO_EXTENSIONS: &[&str] = &["wav", "mp3", "wem", "ogg", "flac"];
 const FAMILY_MARKER_TOKENS: &[&str] = &["questdialog", "narration", "player"];
+#[cfg(feature = "ml")]
+const WHISPER_SAMPLE_RATE: u32 = 16_000;
+
+#[cfg(feature = "ml")]
+pub struct DecodedAudio {
+    pub samples: Vec<f32>,
+    pub sample_rate: u32,
+}
+
+#[cfg(feature = "ml")]
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AudioTimingProfile {
+    pub total_ms: u32,
+    pub leading_silence_ms: u32,
+    pub trailing_silence_ms: u32,
+    pub voice_ms: u32,
+    pub peak_amplitude: f32,
+}
+
+#[cfg(feature = "ml")]
+impl AudioTimingProfile {
+    pub fn target_voice_duration_seconds(self) -> Option<f32> {
+        (self.voice_ms > 0).then_some(self.voice_ms as f32 / 1000.0)
+    }
+}
 
 pub fn is_audio_file(path: &Path) -> bool {
     path.extension()
@@ -145,6 +176,127 @@ pub fn read_wav_mono_f32(path: &Path) -> AppResult<Vec<f32>> {
     read_wav_samples_fallback(path)
 }
 
+#[cfg(feature = "ml")]
+pub fn read_audio_mono_16khz_f32(path: &Path) -> AppResult<Vec<f32>> {
+    let decoded = decode_audio_mono_f32(path)?;
+    if decoded.sample_rate == WHISPER_SAMPLE_RATE {
+        return Ok(decoded.samples);
+    }
+    Ok(resample_linear_mono(
+        &decoded.samples,
+        decoded.sample_rate,
+        WHISPER_SAMPLE_RATE,
+    ))
+}
+
+#[cfg(feature = "ml")]
+pub fn decode_audio_mono_f32(path: &Path) -> AppResult<DecodedAudio> {
+    let extension = extension(path);
+    if extension == "wem" {
+        return Err(AppError::UnsupportedCodec(
+            "Wwise WEM precisa de decoder Rust validado antes de entrar no pipeline".to_string(),
+        ));
+    }
+
+    let file = File::open(path)?;
+    let media_source = MediaSourceStream::new(Box::new(file), Default::default());
+    let mut hint = Hint::new();
+    if !extension.is_empty() {
+        hint.with_extension(&extension);
+    }
+
+    let probed = symphonia::default::get_probe()
+        .format(
+            &hint,
+            media_source,
+            &FormatOptions::default(),
+            &MetadataOptions::default(),
+        )
+        .map_err(|error| AppError::UnsupportedCodec(error.to_string()))?;
+    let mut format = probed.format;
+    let track = format.default_track().ok_or_else(|| {
+        AppError::UnsupportedCodec("arquivo sem faixa de audio padrao".to_string())
+    })?;
+    if track.codec_params.codec == CODEC_TYPE_NULL {
+        return Err(AppError::UnsupportedCodec(
+            "arquivo sem codec de audio detectavel".to_string(),
+        ));
+    }
+
+    let track_id = track.id;
+    let codec_params = track.codec_params.clone();
+    let mut decoder = symphonia::default::get_codecs()
+        .make(&codec_params, &DecoderOptions::default())
+        .map_err(|error| AppError::UnsupportedCodec(error.to_string()))?;
+    let mut samples = Vec::new();
+    let mut sample_rate = None;
+
+    loop {
+        let packet = match format.next_packet() {
+            Ok(packet) => packet,
+            Err(SymphoniaError::IoError(error))
+                if error.kind() == std::io::ErrorKind::UnexpectedEof =>
+            {
+                break
+            }
+            Err(error) => return Err(AppError::UnsupportedCodec(error.to_string())),
+        };
+        if packet.track_id() != track_id {
+            continue;
+        }
+
+        let audio = match decoder.decode(&packet) {
+            Ok(audio) => audio,
+            Err(SymphoniaError::DecodeError(_)) => continue,
+            Err(error) => return Err(AppError::UnsupportedCodec(error.to_string())),
+        };
+        let spec = *audio.spec();
+        let channels = spec.channels.count();
+        if channels == 0 || spec.rate == 0 {
+            return Err(AppError::UnsupportedCodec(
+                "audio decodificado sem canais ou sample rate".to_string(),
+            ));
+        }
+        if let Some(existing_rate) = sample_rate {
+            if existing_rate != spec.rate {
+                return Err(AppError::UnsupportedCodec(
+                    "mudanca de sample rate no meio do stream nao suportada".to_string(),
+                ));
+            }
+        } else {
+            sample_rate = Some(spec.rate);
+        }
+
+        let mut buffer = SampleBuffer::<f32>::new(audio.capacity() as u64, spec);
+        buffer.copy_interleaved_ref(audio);
+        for frame in buffer.samples().chunks_exact(channels) {
+            let mono = frame.iter().copied().sum::<f32>() / channels as f32;
+            samples.push(mono.clamp(-1.0, 1.0));
+        }
+    }
+
+    if samples.is_empty() {
+        return Err(AppError::UnsupportedCodec(
+            "audio sem amostras decodificaveis".to_string(),
+        ));
+    }
+
+    Ok(DecodedAudio {
+        samples,
+        sample_rate: sample_rate.unwrap_or(WHISPER_SAMPLE_RATE),
+    })
+}
+
+#[cfg(feature = "ml")]
+pub fn audio_timing_profile(path: &Path, pad_ms: u32) -> AppResult<AudioTimingProfile> {
+    let decoded = decode_audio_mono_f32(path)?;
+    Ok(audio_timing_profile_from_samples(
+        &decoded.samples,
+        decoded.sample_rate,
+        pad_ms,
+    ))
+}
+
 pub fn quality_report(samples: &[f32]) -> QualityReport {
     if samples.is_empty() {
         return QualityReport {
@@ -221,6 +373,107 @@ fn read_wav_samples_fallback(path: &Path) -> AppResult<Vec<f32>> {
     Ok(data)
 }
 
+#[cfg(feature = "ml")]
+fn resample_linear_mono(samples: &[f32], source_rate: u32, target_rate: u32) -> Vec<f32> {
+    if samples.is_empty() || source_rate == 0 || source_rate == target_rate {
+        return samples.to_vec();
+    }
+
+    let output_len =
+        ((samples.len() as u128 * target_rate as u128) / source_rate as u128).max(1) as usize;
+    let ratio = source_rate as f64 / target_rate as f64;
+    (0..output_len)
+        .map(|index| {
+            let source_position = index as f64 * ratio;
+            let left = source_position.floor() as usize;
+            let right = (left + 1).min(samples.len() - 1);
+            let fraction = (source_position - left as f64) as f32;
+            samples[left] + (samples[right] - samples[left]) * fraction
+        })
+        .collect()
+}
+
+#[cfg(feature = "ml")]
+fn audio_timing_profile_from_samples(
+    samples: &[f32],
+    sample_rate: u32,
+    pad_ms: u32,
+) -> AudioTimingProfile {
+    if samples.is_empty() || sample_rate == 0 {
+        return AudioTimingProfile {
+            total_ms: 0,
+            leading_silence_ms: 0,
+            trailing_silence_ms: 0,
+            voice_ms: 0,
+            peak_amplitude: 0.95,
+        };
+    }
+
+    let total_ms = samples_to_ms(samples.len(), sample_rate);
+    let peak = samples
+        .iter()
+        .fold(0.0_f32, |current, sample| current.max(sample.abs()))
+        .clamp(0.05, 0.98);
+    let active_range = active_sample_range(samples, peak);
+    let (leading_silence_ms, raw_trailing_silence_ms) = active_range
+        .map(|(start, end)| {
+            (
+                samples_to_ms(start, sample_rate),
+                samples_to_ms(samples.len().saturating_sub(end + 1), sample_rate),
+            )
+        })
+        .unwrap_or((0, 0));
+
+    let guard_ms = final_guard_ms(pad_ms);
+    let trailing_limit = (total_ms.saturating_mul(30) / 100).max(35);
+    let trailing_silence_ms = raw_trailing_silence_ms.max(guard_ms).min(trailing_limit);
+    let leading_limit = total_ms
+        .saturating_sub(trailing_silence_ms)
+        .saturating_sub(80);
+    let leading_silence_ms = leading_silence_ms.min(leading_limit);
+    let voice_ms = total_ms
+        .saturating_sub(leading_silence_ms)
+        .saturating_sub(trailing_silence_ms)
+        .max(80);
+
+    AudioTimingProfile {
+        total_ms,
+        leading_silence_ms,
+        trailing_silence_ms,
+        voice_ms,
+        peak_amplitude: peak,
+    }
+}
+
+#[cfg(feature = "ml")]
+pub fn active_sample_range(samples: &[f32], peak_amplitude: f32) -> Option<(usize, usize)> {
+    let threshold = (peak_amplitude * 10_f32.powf(-35.0 / 20.0)).max(0.0001);
+    let start = samples.iter().position(|sample| sample.abs() > threshold)?;
+    let end = samples
+        .iter()
+        .rposition(|sample| sample.abs() > threshold)?;
+    Some((start, end))
+}
+
+#[cfg(feature = "ml")]
+pub fn final_guard_ms(pad_ms: u32) -> u32 {
+    let candidate = if pad_ms > 0 { pad_ms } else { 120 };
+    candidate.clamp(80, 450)
+}
+
+#[cfg(feature = "ml")]
+pub fn samples_to_ms(sample_count: usize, sample_rate: u32) -> u32 {
+    if sample_rate == 0 {
+        return 0;
+    }
+    (((sample_count as u64 * 1000) + (u64::from(sample_rate) / 2)) / u64::from(sample_rate)) as u32
+}
+
+#[cfg(feature = "ml")]
+pub fn ms_to_samples(duration_ms: u32, sample_rate: u32) -> usize {
+    ((u64::from(duration_ms) * u64::from(sample_rate)) / 1000) as usize
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -250,5 +503,21 @@ mod tests {
         let report = quality_report(&[0.0; 2048]);
         assert!(!report.is_acceptable);
         assert!(report.issues.iter().any(|issue| issue.contains("mudo")));
+    }
+
+    #[cfg(feature = "ml")]
+    #[test]
+    fn timing_profile_preserves_guarded_tail_without_truncating_voice() {
+        let sample_rate = 1000;
+        let mut samples = vec![0.0; 100];
+        samples.extend(vec![0.4; 700]);
+        samples.extend(vec![0.0; 200]);
+
+        let profile = audio_timing_profile_from_samples(&samples, sample_rate, 200);
+
+        assert_eq!(profile.total_ms, 1000);
+        assert_eq!(profile.leading_silence_ms, 100);
+        assert_eq!(profile.trailing_silence_ms, 200);
+        assert_eq!(profile.voice_ms, 700);
     }
 }

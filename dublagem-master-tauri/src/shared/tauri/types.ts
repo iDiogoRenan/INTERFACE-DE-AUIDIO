@@ -7,7 +7,30 @@ export type AudioFileStatus =
   | "rejected"
   | "missing_source"
   | "failed";
-export type JobEventKind = "progress" | "log" | "file_complete" | "finished" | "failed";
+export type JobEventKind =
+  | "stage"
+  | "transcription"
+  | "progress"
+  | "log"
+  | "file_complete"
+  | "cancelled"
+  | "finished"
+  | "failed";
+export type JobStage =
+  | "queued"
+  | "loading_models"
+  | "preparing_file"
+  | "transcribing"
+  | "transcribed"
+  | "translating"
+  | "translated"
+  | "synthesizing"
+  | "writing_output"
+  | "file_complete"
+  | "cancelling"
+  | "cancelled"
+  | "finished"
+  | "failed";
 
 export interface DubbingOptions {
   sourceLanguage: LanguageCode;
@@ -67,6 +90,7 @@ export interface DubbingRequest {
   inputPaths: string[];
   outputDir: string;
   guideAudio: string | null;
+  modelDir: string | null;
   options: DubbingOptions;
   customSourceText: string | null;
   customTargetText: string | null;
@@ -75,9 +99,15 @@ export interface DubbingRequest {
 export interface DubbingJobEvent {
   jobId: string;
   kind: JobEventKind;
+  stage: JobStage | null;
   message: string;
   progress: number | null;
   fileName: string | null;
+  fileIndex: number | null;
+  totalFiles: number | null;
+  sourceText: string | null;
+  targetText: string | null;
+  outputPath: string | null;
 }
 
 export const defaultOptions: DubbingOptions = {

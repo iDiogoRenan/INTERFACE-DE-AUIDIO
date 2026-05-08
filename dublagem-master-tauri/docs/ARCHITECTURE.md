@@ -7,7 +7,7 @@ O aplicativo separa o shell visual do pipeline de áudio. O frontend chama coman
 - `dublagem-domain`: tipos serializáveis compartilhados entre comandos e eventos.
 - `audio`: descoberta de arquivos, famílias, metadados e métricas de qualidade.
 - `translation`: provider oficial do Google Cloud Translation v3.
-- `speech`: fronteiras para `whisper-rs` e OmniVoice/Candle.
+- `speech`: fronteiras para `whisper-rs` e OmniVoice/Candle, ambos executados no caminho CUDA da build padrão.
 - `jobs`: fila assíncrona com progresso por eventos Tauri e cancelamento.
 - `config`: persistência em diretório de configuração da aplicação.
 
@@ -21,8 +21,8 @@ Comandos públicos:
 
 Eventos públicos:
 
-- `job:progress`, `job:log`, `job:file-complete`, `job:finished`, `job:failed`
+- `job:stage`, `job:transcription`, `job:progress`, `job:file-complete`, `job:cancelled`, `job:finished`, `job:failed`
 
 ## Modelos
 
-Whisper e OmniVoice são dependências de runtime. Os pesos não são versionados no repositório e devem ser verificados por hash antes de uso.
+Whisper e OmniVoice são dependências de runtime. Os pesos não são versionados no repositório e devem ser verificados por hash antes de uso. A execução local de dublagem usa GPU por padrão; builds sem `cuda` devem falhar com erro explícito antes de iniciar ASR ou TTS local.

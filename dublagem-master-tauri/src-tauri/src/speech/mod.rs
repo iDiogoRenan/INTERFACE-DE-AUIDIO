@@ -1,8 +1,12 @@
 use crate::error::{AppError, AppResult};
 use async_trait::async_trait;
 use dublagem_domain::{DubbingOptions, LanguageCode, TranscriptionResult, VoiceProfile};
-use std::path::{Path, PathBuf};
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
+pub mod models;
 pub mod omnivoice;
 pub mod whisper;
 
@@ -18,16 +22,64 @@ pub trait Transcriber: Send + Sync {
 
 #[async_trait]
 pub trait VoiceSynthesizer: Send + Sync {
-    async fn synthesize(
-        &self,
-        text: &str,
-        reference_audio: &Path,
-        reference_text: &str,
-        output_path: &Path,
-        options: DubbingOptions,
-    ) -> AppResult<()>;
+    async fn synthesize(&self, request: SynthesisRequest<'_>) -> AppResult<()>;
 
     async fn generate_voice_pool(&self, output_dir: &Path) -> AppResult<Vec<PathBuf>>;
+}
+
+#[cfg_attr(not(feature = "ml"), allow(dead_code))]
+pub struct SynthesisRequest<'a> {
+    pub text: &'a str,
+    pub source_audio: &'a Path,
+    pub reference_audio: &'a Path,
+    pub reference_text: &'a str,
+    pub output_path: &'a Path,
+    pub options: DubbingOptions,
+    pub hooks: SynthesisHooks,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(not(feature = "ml"), allow(dead_code))]
+pub struct SynthesisProgress {
+    pub completed_segments: usize,
+    pub total_segments: usize,
+}
+
+impl SynthesisProgress {
+    #[cfg(feature = "ml")]
+    pub fn new(completed_segments: usize, total_segments: usize) -> Self {
+        Self {
+            completed_segments,
+            total_segments: total_segments.max(1),
+        }
+    }
+}
+
+pub type SynthesisProgressCallback = Arc<dyn Fn(SynthesisProgress) + Send + Sync>;
+pub type SynthesisCancellationCheck = Arc<dyn Fn() -> bool + Send + Sync>;
+
+#[derive(Clone, Default)]
+#[cfg_attr(not(feature = "ml"), allow(dead_code))]
+pub struct SynthesisHooks {
+    pub progress: Option<SynthesisProgressCallback>,
+    pub should_cancel: Option<SynthesisCancellationCheck>,
+}
+
+impl SynthesisHooks {
+    #[cfg(feature = "ml")]
+    pub fn report(&self, completed_segments: usize, total_segments: usize) {
+        if let Some(progress) = &self.progress {
+            progress(SynthesisProgress::new(completed_segments, total_segments));
+        }
+    }
+
+    #[cfg(feature = "ml")]
+    pub fn is_cancelled(&self) -> bool {
+        self.should_cancel
+            .as_ref()
+            .map(|should_cancel| should_cancel())
+            .unwrap_or(false)
+    }
 }
 
 pub fn ptbr_voice_profiles() -> Vec<VoiceProfile> {
@@ -65,8 +117,9 @@ pub fn ptbr_voice_profiles() -> Vec<VoiceProfile> {
     ]
 }
 
-pub fn missing_model_error(model: &str) -> AppError {
+pub fn missing_model_error(model: &str, expected_path: &Path) -> AppError {
     AppError::SpeechEngineUnavailable(format!(
-        "{model} ainda nao foi provisionado em models/. Baixe e registre o modelo antes de executar ML local."
+        "{model} ainda nao foi provisionado. Caminho esperado: {}. Baixe e registre o modelo antes de executar ML local.",
+        expected_path.display()
     ))
 }

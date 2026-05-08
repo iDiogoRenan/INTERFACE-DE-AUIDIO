@@ -27,10 +27,14 @@ cd src-tauri
 cargo fmt --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
+cargo check --workspace --no-default-features
+cargo clippy --workspace --all-targets --no-default-features -- -D warnings
 ```
 
 ## Modelos
 
-O runtime não usa Python. Modelos de ML ficam fora do Git e devem ser registrados por manifesto com hash. A aplicação falha de forma explícita quando Whisper ou OmniVoice ainda não foram provisionados.
+O runtime não usa Python. Modelos de ML ficam fora do Git, em `models/`, e são registrados por `models/MODEL_MANIFEST.json` com hashes dos pesos críticos. Quando esse bundle existe, a configuração aponta para ele automaticamente.
 
-Para compilar a feature opcional `ml`, instale uma distribuição LLVM/libclang e defina `LIBCLANG_PATH` quando o `clang.dll` não estiver no `PATH`.
+A build padrão usa as features `ml` e `cuda`. `whisper-rs` roda com GPU habilitada e o port Rust/Candle do OmniVoice vendorizado em `vendor/omnivoice-rs` usa `cuda:0` com FP16 para síntese local. O snapshot oficial do OmniVoice recebe automaticamente o manifesto `omnivoice.artifacts.json` esperado pelo runtime Candle quando a pasta de modelos ainda não o contém.
+
+No Windows, o build local requer LLVM/libclang, CUDA Toolkit e MSVC Build Tools. O projeto define `LIBCLANG_PATH`, `CUDA_PATH`, `CUDACXX`, `CUDARC_CUDA_VERSION`, `CUDA_COMPUTE_CAP` e `NVCC_CCBIN` em `.cargo/config.toml`; ajuste esses caminhos se LLVM, CUDA ou MSVC forem instalados em outro diretório.

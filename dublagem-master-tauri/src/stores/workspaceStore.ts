@@ -5,7 +5,8 @@ import {
   defaultOptions,
   type AppConfig,
   type AudioFileEntry,
-  type DubbingJobEvent
+  type DubbingJobEvent,
+  type JobStage
 } from "../shared/tauri/types";
 
 export interface LogEntry {
@@ -22,6 +23,13 @@ interface WorkspaceState {
   targetText: string;
   logs: LogEntry[];
   activeJobId: string | null;
+  currentStage: JobStage | null;
+  currentStatus: string;
+  currentFileName: string | null;
+  currentFileIndex: number | null;
+  totalFiles: number | null;
+  isCancelling: boolean;
+  lastOutputPath: string | null;
   progress: number;
   isBusy: boolean;
   load: () => Promise<void>;
@@ -53,6 +61,13 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   targetText: "",
   logs: [],
   activeJobId: null,
+  currentStage: null,
+  currentStatus: "Aguardando job.",
+  currentFileName: null,
+  currentFileIndex: null,
+  totalFiles: null,
+  isCancelling: false,
+  lastOutputPath: null,
   progress: 0,
   isBusy: false,
   load: async () => {
@@ -91,24 +106,49 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       return;
     }
 
-    set({ isBusy: true, progress: 0 });
-    const jobId = await tauriClient.startDubbingJob({
-      inputPaths: [selectedPath],
-      outputDir: config.outputDir,
-      guideAudio: config.guideAudio,
-      options: config.options,
-      customSourceText: sourceText.trim().length > 0 ? sourceText : null,
-      customTargetText: targetText.trim().length > 0 ? targetText : null
+    set({
+      isBusy: true,
+      isCancelling: false,
+      progress: 0,
+      currentStage: "queued",
+      currentStatus: "Enviando job para o backend.",
+      currentFileName: null,
+      currentFileIndex: null,
+      totalFiles: null,
+      lastOutputPath: null
     });
-    set({ activeJobId: jobId });
+    try {
+      const jobId = await tauriClient.startDubbingJob({
+        inputPaths: [selectedPath],
+        outputDir: config.outputDir,
+        guideAudio: config.guideAudio,
+        modelDir: config.modelDir,
+        options: config.options,
+        customSourceText: sourceText.trim().length > 0 ? sourceText : null,
+        customTargetText: targetText.trim().length > 0 ? targetText : null
+      });
+      set({ activeJobId: jobId });
+    } catch (unknownError: unknown) {
+      get().appendLog(errorMessage(unknownError), "error");
+      set({ isBusy: false, isCancelling: false, progress: 0, currentStage: "failed" });
+    }
   },
   cancelJob: async () => {
     const { activeJobId } = get();
     if (!activeJobId) {
       return;
     }
-    await tauriClient.cancelJob(activeJobId);
-    set({ activeJobId: null, isBusy: false });
+    set({
+      isCancelling: true,
+      currentStage: "cancelling",
+      currentStatus: "Cancelamento solicitado. Aguardando o backend encerrar a etapa atual."
+    });
+    try {
+      await tauriClient.cancelJob(activeJobId);
+    } catch (unknownError: unknown) {
+      get().appendLog(errorMessage(unknownError), "error");
+      set({ isCancelling: false });
+    }
   },
   appendLog: (message, level = "info") => {
     set((state) => ({
@@ -129,18 +169,87 @@ async function registerJobListeners(): Promise<void> {
   await listen<DubbingJobEvent>("job:log", (event) => {
     store.getState().appendLog(event.payload.message, "info");
   });
+  await listen<DubbingJobEvent>("job:stage", (event) => {
+    applyJobEvent(event.payload);
+    store.getState().appendLog(event.payload.message, "info");
+  });
+  await listen<DubbingJobEvent>("job:transcription", (event) => {
+    applyJobEvent(event.payload);
+    store.getState().appendLog(event.payload.message, "success");
+  });
   await listen<DubbingJobEvent>("job:progress", (event) => {
-    store.setState({ progress: event.payload.progress ?? 0 });
+    applyJobEvent(event.payload);
   });
   await listen<DubbingJobEvent>("job:file-complete", (event) => {
+    applyJobEvent(event.payload);
     store.getState().appendLog(event.payload.message, "success");
+  });
+  await listen<DubbingJobEvent>("job:cancelled", (event) => {
+    applyJobEvent(event.payload);
+    store.getState().appendLog(event.payload.message, "warning");
+    store.setState({
+      activeJobId: null,
+      isBusy: false,
+      isCancelling: false,
+      currentStage: "cancelled"
+    });
   });
   await listen<DubbingJobEvent>("job:finished", (event) => {
+    applyJobEvent(event.payload);
     store.getState().appendLog(event.payload.message, "success");
-    store.setState({ activeJobId: null, isBusy: false, progress: 100 });
+    store.setState({
+      activeJobId: null,
+      isBusy: false,
+      isCancelling: false,
+      currentStage: "finished",
+      progress: 100
+    });
   });
   await listen<DubbingJobEvent>("job:failed", (event) => {
+    applyJobEvent(event.payload);
     store.getState().appendLog(event.payload.message, "error");
-    store.setState({ activeJobId: null, isBusy: false });
+    store.setState({
+      activeJobId: null,
+      isBusy: false,
+      isCancelling: false,
+      currentStage: "failed"
+    });
   });
+}
+
+function applyJobEvent(payload: DubbingJobEvent): void {
+  const update: Partial<WorkspaceState> = {
+    currentStatus: payload.message
+  };
+
+  if (payload.stage) {
+    update.currentStage = payload.stage;
+  }
+  if (payload.progress !== null) {
+    update.progress = payload.progress;
+  }
+  if (payload.fileName !== null) {
+    update.currentFileName = payload.fileName;
+  }
+  if (payload.fileIndex !== null) {
+    update.currentFileIndex = payload.fileIndex;
+  }
+  if (payload.totalFiles !== null) {
+    update.totalFiles = payload.totalFiles;
+  }
+  if (payload.sourceText !== null) {
+    update.sourceText = payload.sourceText;
+  }
+  if (payload.targetText !== null) {
+    update.targetText = payload.targetText;
+  }
+  if (payload.outputPath !== null) {
+    update.lastOutputPath = payload.outputPath;
+  }
+
+  useWorkspaceStore.setState(update);
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
