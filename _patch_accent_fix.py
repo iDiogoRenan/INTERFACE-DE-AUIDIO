@@ -2,6 +2,8 @@
 # Core INTOCADO do omni11. Adições: palatização (checkbox) + vírgula (checkbox)
 
 import os, re, gc, time, traceback, difflib, unicodedata
+from dataclasses import dataclass
+from typing import Callable, Optional
 import numpy as np
 import soundfile as sf
 import librosa
@@ -18,6 +20,186 @@ VOICE_PROFILES_PTBR = {
     "male_child":   {"instruct": "male, child, high pitch",            "ref_text": "Ei, vamos brincar juntos hoje!"},
     "female_child": {"instruct": "female, child, high pitch",          "ref_text": "Que dia lindo para uma aventura nova!"},
 }
+
+SAMPLE_RATE_TTS = 24000
+REFERENCE_TARGET_SECONDS = 8.0
+REFERENCE_MAX_SECONDS = 10.0
+REFERENCE_MIN_SECONDS = 3.0
+
+
+@dataclass(frozen=True)
+class ShortReference:
+    path: str
+    duration_seconds: float
+    source_duration_seconds: float
+    start_seconds: float
+
+
+def _dtype_label(dtype_obj) -> str:
+    return str(dtype_obj).replace("torch.", "")
+
+
+def descrever_modelo_omnivoice(model) -> tuple[str, str]:
+    try:
+        param = next(model.parameters())
+        return str(param.device), _dtype_label(param.dtype)
+    except Exception:
+        return "modelo existente", "dtype desconhecido"
+
+
+def carregar_omnivoice_otimizado(OmniVoice, torch_module, device: str) -> tuple[object, str, str]:
+    device_map = "cuda:0" if device == "cuda" else device
+    dtype = torch_module.float16 if device == "cuda" else torch_module.float32
+    try:
+        model = OmniVoice.from_pretrained(
+            "k2-fsa/OmniVoice",
+            device_map=device_map,
+            dtype=dtype,
+        )
+    except TypeError:
+        model = OmniVoice.from_pretrained("k2-fsa/OmniVoice")
+        model.to(device)
+    return model, device_map, _dtype_label(dtype)
+
+
+def _limpar_texto_referencia(texto: str) -> str:
+    normalizado = unicodedata.normalize("NFKC", str(texto or ""))
+    caracteres = []
+    for char in normalizado:
+        categoria = unicodedata.category(char)
+        if char.isspace():
+            caracteres.append(" ")
+        elif categoria[0] in {"L", "N"}:
+            caracteres.append(char)
+    return re.sub(r"\s+", " ", "".join(caracteres)).strip()
+
+
+def _concatenar_blocos_de_fala(audio: np.ndarray, blocos: np.ndarray, limite_amostras: int) -> np.ndarray:
+    partes = []
+    total = 0
+    for inicio, fim in blocos:
+        if total >= limite_amostras:
+            break
+        trecho = audio[int(inicio):int(fim)]
+        disponivel = limite_amostras - total
+        if len(trecho) > disponivel:
+            trecho = trecho[:disponivel]
+        if len(trecho) > 0:
+            partes.append(trecho)
+            total += len(trecho)
+    if not partes:
+        return np.array([], dtype=np.float32)
+    return np.concatenate(partes).astype(np.float32, copy=False)
+
+
+def preparar_referencia_curta(
+    caminho_origem: str,
+    caminho_saida: str,
+    sample_rate: int = SAMPLE_RATE_TTS,
+) -> ShortReference:
+    if not os.path.exists(caminho_origem):
+        raise FileNotFoundError(f"Audio de referencia nao encontrado: {caminho_origem}")
+
+    audio_raw, _ = librosa.load(caminho_origem, sr=sample_rate, mono=True)
+    audio = np.asarray(audio_raw, dtype=np.float32).flatten()
+    audio = np.nan_to_num(audio, nan=0.0, posinf=0.0, neginf=0.0)
+    if len(audio) == 0:
+        raise ValueError("Audio de referencia vazio.")
+
+    origem_segundos = len(audio) / sample_rate
+    alvo_amostras = max(1, int(REFERENCE_TARGET_SECONDS * sample_rate))
+    max_amostras = max(1, int(REFERENCE_MAX_SECONDS * sample_rate))
+    min_amostras = max(1, int(REFERENCE_MIN_SECONDS * sample_rate))
+
+    blocos = librosa.effects.split(audio, top_db=40)
+    inicio = int(blocos[0][0]) if len(blocos) else 0
+    fim = min(len(audio), inicio + alvo_amostras)
+    referencia = audio[inicio:fim]
+
+    if len(referencia) < min_amostras and len(blocos):
+        referencia = _concatenar_blocos_de_fala(audio, blocos, alvo_amostras)
+        inicio = int(blocos[0][0])
+
+    if len(referencia) == 0:
+        referencia = audio[:alvo_amostras]
+        inicio = 0
+
+    if len(referencia) > max_amostras:
+        referencia = referencia[:max_amostras]
+
+    if len(referencia) == 0:
+        raise ValueError("Nao foi possivel extrair uma referencia de voz valida.")
+
+    os.makedirs(os.path.dirname(caminho_saida) or ".", exist_ok=True)
+    sf.write(caminho_saida, np.clip(referencia, -0.999, 0.999), sample_rate)
+    duracao_ref = len(referencia) / sample_rate
+    if duracao_ref > REFERENCE_MAX_SECONDS + (1.0 / sample_rate):
+        raise RuntimeError(
+            f"Referencia curta excedeu {REFERENCE_MAX_SECONDS:.1f}s: {duracao_ref:.2f}s"
+        )
+    return ShortReference(
+        path=caminho_saida,
+        duration_seconds=duracao_ref,
+        source_duration_seconds=origem_segundos,
+        start_seconds=inicio / sample_rate,
+    )
+
+
+def transcrever_referencia_curta(
+    whisper_model,
+    caminho_ref: str,
+    source_lang: str,
+    fallback_text: str,
+    log: Optional[Callable[[str, str], None]] = None,
+) -> str:
+    kwargs = {"temperature": 0.0}
+    if source_lang in {"en", "pt", "fr", "sv"}:
+        kwargs["language"] = source_lang
+    texto_ref = ""
+    try:
+        resultado = whisper_model.transcribe(caminho_ref, **kwargs)
+        texto_ref = _limpar_texto_referencia(resultado.get("text", ""))
+    except Exception as exc:
+        if log:
+            log(f"⚠️ Transcricao da referencia curta falhou: {exc}", "warning")
+
+    if not texto_ref:
+        texto_ref = _limpar_texto_referencia(fallback_text)
+    if not texto_ref:
+        raise ValueError("Nao foi possivel obter texto para a referencia curta.")
+    return texto_ref
+
+
+def criar_prompt_referencia_curta(
+    omni_model,
+    whisper_model,
+    caminho_origem: str,
+    caminho_ref_saida: str,
+    source_lang: str,
+    fallback_text: str,
+    log: Callable[[str, str], None],
+) -> tuple[object, ShortReference, str]:
+    referencia = preparar_referencia_curta(caminho_origem, caminho_ref_saida)
+    texto_ref = transcrever_referencia_curta(
+        whisper_model,
+        referencia.path,
+        source_lang,
+        fallback_text,
+        log,
+    )
+    log(
+        (
+            f"Referencia de voz curta: {referencia.duration_seconds:.2f}s "
+            f"(origem {referencia.source_duration_seconds:.2f}s, inicio {referencia.start_seconds:.2f}s)."
+        ),
+        "info",
+    )
+    prompt = omni_model.create_voice_clone_prompt(
+        ref_audio=referencia.path,
+        ref_text=texto_ref,
+        preprocess_prompt=True,
+    )
+    return prompt, referencia, texto_ref
 
 
 def get_duracao_exata(caminho):
@@ -37,22 +219,23 @@ def palatalizar_ptbr(texto):
     """
     Palatização PT-BR: palavras terminadas em ti/te/di/de → tchi/tche/dchi/dche.
     """
-    texto = re.sub(r'tis\b', 'tchis', texto)
-    texto = re.sub(r'Tis\b', 'Tchis', texto)
-    texto = re.sub(r'tes\b', 'tches', texto)
-    texto = re.sub(r'Tes\b', 'Tches', texto)
-    texto = re.sub(r'ti\b',  'tchi',  texto)
-    texto = re.sub(r'Ti\b',  'Tchi',  texto)
-    texto = re.sub(r'te\b',  'tche',  texto)
-    texto = re.sub(r'Te\b',  'Tche',  texto)
-    texto = re.sub(r'dis\b', 'dchis', texto)
-    texto = re.sub(r'Dis\b', 'Dchis', texto)
-    texto = re.sub(r'des\b', 'dches', texto)
-    texto = re.sub(r'Des\b', 'Dches', texto)
-    texto = re.sub(r'di\b',  'dchi',  texto)
-    texto = re.sub(r'Di\b',  'Dchi',  texto)
-    texto = re.sub(r'de\b',  'dche',  texto)
-    texto = re.sub(r'De\b',  'Dche',  texto)
+    letra = r'A-Za-zÀ-ÖØ-öø-ÿ'
+    texto = re.sub(fr'(?<=[{letra}])tis\b', 'chis', texto)
+    texto = re.sub(fr'(?<=[{letra}])Tis\b', 'Chis', texto)
+    texto = re.sub(fr'(?<=[{letra}])tes\b', 'ches', texto)
+    texto = re.sub(fr'(?<=[{letra}])Tes\b', 'Ches', texto)
+    texto = re.sub(fr'(?<=[{letra}])ti\b',  'chi',  texto)
+    texto = re.sub(fr'(?<=[{letra}])Ti\b',  'Chi',  texto)
+    texto = re.sub(fr'(?<=[{letra}])te\b',  'che',  texto)
+    texto = re.sub(fr'(?<=[{letra}])Te\b',  'Che',  texto)
+    texto = re.sub(fr'(?<=[{letra}])dis\b', 'dchis', texto)
+    texto = re.sub(fr'(?<=[{letra}])Dis\b', 'Dchis', texto)
+    texto = re.sub(fr'(?<=[{letra}])des\b', 'dches', texto)
+    texto = re.sub(fr'(?<=[{letra}])Des\b', 'Dches', texto)
+    texto = re.sub(fr'(?<=[{letra}])di\b',  'dchi',  texto)
+    texto = re.sub(fr'(?<=[{letra}])Di\b',  'Dchi',  texto)
+    texto = re.sub(fr'(?<=[{letra}])de\b',  'dche',  texto)
+    texto = re.sub(fr'(?<=[{letra}])De\b',  'Dche',  texto)
     return texto
 
 def sincronizar_virgulas_proporcional(texto_pt, texto_en):
@@ -500,8 +683,10 @@ class GeradorPoolWorker(QThread):
             dev = "cuda" if torch.cuda.is_available() else "cpu"
             if self.models["omni"] is None:
                 self.log("📥 Carregando OmniVoice...", "info")
-                self.models["omni"] = OmniVoice.from_pretrained("k2-fsa/OmniVoice")
-                self.models["omni"].to(dev)
+                self.models["omni"], device_label, dtype_label = carregar_omnivoice_otimizado(OmniVoice, torch, dev)
+            else:
+                device_label, dtype_label = descrever_modelo_omnivoice(self.models["omni"])
+            self.log(f"OmniVoice pronto: device={device_label}, dtype={dtype_label}", "info")
             for nome, perfil in VOICE_PROFILES_PTBR.items():
                 p = os.path.join(self.pasta_pool, f"{nome}.wav")
                 if os.path.exists(p): self.log(f"✅ Já existe: {nome}.wav","info"); continue
@@ -585,27 +770,41 @@ class SingleDubbingWorkerV14(QThread):
                 self.models["whisper"] = whisper.load_model("medium", device=dev)
             if self.models["omni"] is None:
                 self.log("📥 Carregando OmniVoice...","info")
-                self.models["omni"] = OmniVoice.from_pretrained("k2-fsa/OmniVoice")
-                self.models["omni"].to(dev)
+                self.models["omni"], omni_device_label, omni_dtype_label = carregar_omnivoice_otimizado(
+                    OmniVoice,
+                    torch,
+                    dev,
+                )
+            else:
+                omni_device_label, omni_dtype_label = descrever_modelo_omnivoice(self.models["omni"])
+            self.log(f"OmniVoice pronto: device={omni_device_label}, dtype={omni_dtype_label}", "info")
 
             # Áudio Guia
-            txt_guia_fixo = ""
-            temp_guia_path = os.path.join(self._temp_dir, "temp_guia_6min.wav")
+            guia_prompt = None
+            guia_ref_info = None
+            guia_ref_text = ""
+            temp_guia_path = os.path.join(self._temp_dir, "temp_guia_referencia_curta.wav")
             guia_valido = False
 
             if self.pasta_guia and os.path.exists(self.pasta_guia):
                 self.prog(5)
                 self.log("🎙️ Lendo Áudio Guia...","info")
-                y_g, sr_g = librosa.load(self.pasta_guia, sr=24000, duration=360.0)
-                sf.write(temp_guia_path, y_g, sr_g)
-                # auto-detect language for guia
-                res_g = self.models["whisper"].transcribe(temp_guia_path, temperature=0.0)
-                txt_guia_fixo = res_g["text"].strip()
-                guia_valido = True
-                self.log("✅ Áudio guia carregado.","success")
+                try:
+                    guia_prompt, guia_ref_info, guia_ref_text = criar_prompt_referencia_curta(
+                        self.models["omni"],
+                        self.models["whisper"],
+                        self.pasta_guia,
+                        temp_guia_path,
+                        "auto",
+                        "",
+                        self.log,
+                    )
+                    guia_valido = True
+                    self.log("✅ Áudio guia carregado como referencia curta.","success")
+                except Exception as exc:
+                    self.log(f"⚠️ Audio guia ignorado: {exc}", "warning")
 
             temp_gen_path = os.path.join(self._temp_dir, "temp_verificacao.wav")
-            temp_ref_path = os.path.join(self._temp_dir, "temp_ref_trimmed.wav")
 
             total = len(self.paths_en)
             for idx_p, curr_path in enumerate(self.paths_en):
@@ -669,29 +868,46 @@ class SingleDubbingWorkerV14(QThread):
                 if use_custom:
                     self.transcription_ready_signal.emit(txt_en, txt_pt_final)
 
-                # ═══ REF AUDIO — IGUAL AO OMNI11 ═══
-                if not guia_valido:
-                    try:
-                        y_orig_ref, sr_orig_ref = librosa.load(curr_path, sr=24000)
-                        # Clássico omni6_kliff: top_db=40 para a referência
-                        y_trim, _ = librosa.effects.trim(y_orig_ref, top_db=40)
-                        if len(y_trim) < sr_orig_ref * 0.5:
-                            y_trim = y_orig_ref
-                        sf.write(temp_ref_path, y_trim, sr_orig_ref)
-                        ref_audio_uso = temp_ref_path
-                        # O antigo removia todas as pontuações da referência, evitando sons estranhos no começo
-                        ref_text_uso = re.sub(r'[^a-zA-Z\s]', '', txt_en)
-                    except Exception:
-                        ref_audio_uso = curr_path
-                        ref_text_uso = re.sub(r'[^a-zA-Z\s]', '', txt_en)
+                # ═══ REFERÊNCIA CURTA — evita condicionar o modelo com clipes longos ═══
+                if guia_valido and guia_prompt is not None:
+                    voice_clone_prompt = guia_prompt
+                    ref_info = guia_ref_info
+                    ref_text_uso = guia_ref_text
                 else:
-                    ref_audio_uso = temp_guia_path
-                    ref_text_uso = txt_guia_fixo
+                    temp_ref_path = os.path.join(self._temp_dir, f"temp_ref_curta_{idx_p}_{ts}.wav")
+                    try:
+                        voice_clone_prompt, ref_info, ref_text_uso = criar_prompt_referencia_curta(
+                            self.models["omni"],
+                            self.models["whisper"],
+                            curr_path,
+                            temp_ref_path,
+                            self.source_lang,
+                            txt_en,
+                            self.log,
+                        )
+                    except Exception as exc:
+                        motivo = f"Falha ao preparar referencia curta: {exc}"
+                        self.log(f"❌ {motivo}", "error")
+                        self.file_done_signal.emit(False, motivo, "", nome, txt_en, txt_pt_final)
+                        self.prog(int(((idx_p + 1) / total) * 100))
+                        continue
 
                 self.prog(40)
                 duracao_tts_alvo = calcular_duracao_tts_alvo(curr_path, self.pad_ms)
                 if duracao_tts_alvo:
                     self.log(f"Alvo nativo de duracao TTS: {duracao_tts_alvo:.2f}s (sem esticar depois).", "info")
+                ref_dur = ref_info.duration_seconds if ref_info is not None else 0.0
+                self.log(
+                    (
+                        "Config geracao: "
+                        f"ref={ref_dur:.2f}s, alvo={duracao_tts_alvo or 0.0:.2f}s, "
+                        f"device={omni_device_label}, dtype={omni_dtype_label}, "
+                        "num_step=48, audio_chunk=15s."
+                    ),
+                    "info",
+                )
+                if ref_text_uso:
+                    self.log(f"Texto da referencia curta: {ref_text_uso[:120]}", "info")
 
                 # ═══ GERAÇÃO — IGUAL AO OMNI11 ═══
                 audio_final_aprovado = None
@@ -709,8 +925,7 @@ class SingleDubbingWorkerV14(QThread):
 
                         kwargs_geracao = dict(
                             text=texto_tts,
-                            ref_audio=ref_audio_uso,
-                            ref_text=ref_text_uso,
+                            voice_clone_prompt=voice_clone_prompt,
                             language=self.target_lang,
                             num_step=48,
                             guidance_scale=2.0,

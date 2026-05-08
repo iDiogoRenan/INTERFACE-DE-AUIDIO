@@ -3,6 +3,8 @@
 import sys, os
 sys.stdout = open(sys.stdout.fileno(), mode='w', encoding='utf-8', buffering=1)
 sys.path.insert(0, os.path.dirname(__file__))
+ffmpeg_dir = os.path.join(os.path.dirname(__file__), ".venv", "ffmpeg")
+os.environ["PATH"] = ffmpeg_dir + os.pathsep + os.environ.get("PATH", "")
 from _patch_accent_fix import palatalizar_ptbr
 
 casos = [
@@ -45,3 +47,5 @@ for entrada, esperado, desc in casos:
 
 print()
 print('TODOS OK' if all_ok else 'FALHOU — verificar')
+if not all_ok:
+    sys.exit(1)
