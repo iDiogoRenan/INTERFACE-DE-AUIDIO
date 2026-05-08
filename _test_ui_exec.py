@@ -8,8 +8,12 @@ Teste de execução da UI — verifica que:
 5. _set_botoes_ativos funciona sem AttributeError
 """
 import sys, os
+import shutil
+import tempfile
 os.environ["QT_QPA_PLATFORM"] = "offscreen"  # headless
 sys.path.insert(0, os.path.dirname(__file__))
+ffmpeg_dir = os.path.join(os.path.dirname(__file__), ".venv", "ffmpeg")
+os.environ["PATH"] = ffmpeg_dir + os.pathsep + os.environ.get("PATH", "")
 sys.stdout = open(sys.stdout.fileno(), mode='w', encoding='utf-8', buffering=1)
 
 from PyQt6.QtWidgets import QApplication
@@ -115,6 +119,70 @@ if ok:
         print("8. [OK] Checkboxes existem e começam OFF por padrão")
     except Exception as e:
         print(f"8. [ERRO] {e}"); ok = False
+
+if ok:
+    try:
+        expected = {
+            "_ancientstonegolem_9000_boss_00_00001.wav": "ancientstonegolem",
+            "dragon_common_dragon_boss_9000_narration_00005.wav": "dragon_common_dragon_boss",
+            "ndw_adult_1_questdialog_hello_00664.wav": "ndw_adult_1",
+            "ngw_adult_1_questdialog_main_ngw_adult_1_00897.wav": "ngw_adult_1",
+            "nhm_adult_citizen_9_questdialog_faction_01302.wav": "nhm_adult_citizen_9",
+            "unique_kliff_0090_0120_player_00000.wav": "unique_kliff",
+        }
+        for file_name, family in expected.items():
+            assert mod.audio_family_from_filename(file_name) == family
+        print("9. [OK] Famílias de filtro extraídas dos nomes esperados")
+    except Exception as e:
+        print(f"9. [ERRO] {e}"); ok = False
+
+if ok:
+    tmpdir = tempfile.mkdtemp()
+    try:
+        names = [
+            "_ancientstonegolem_9000_boss_00_00001.wav",
+            "unique_kliff_0090_0120_player_00000.wav",
+            "unique_kliff_0090_0120_player_00001.wav",
+        ]
+        for name in names:
+            open(os.path.join(tmpdir, name), "wb").close()
+        win.exp.set_folders(tmpdir, "")
+        assert win.exp.tree.indentation() == 0
+        assert not win.exp.tree.rootIsDecorated()
+        assert win.exp.tree.topLevelItemCount() == 3
+        win.exp._set_family_visible("unique_kliff", False)
+        assert win.exp.tree.topLevelItemCount() == 1
+        win.exp.update_status("unique_kliff_0090_0120_player_00000.wav", True, "")
+        assert win.exp.tree.topLevelItemCount() == 1
+        win.exp._show_all_families()
+        assert win.exp.tree.topLevelItemCount() == 3
+        print("10. [OK] Sidebar filtra famílias sem perder estado de status")
+    except Exception as e:
+        print(f"10. [ERRO] {e}"); ok = False
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+if ok:
+    try:
+        player = mod.AudioPlayer("Teste")
+        player._on_duration_changed(90000)
+        player._on_position_changed(15000)
+        assert player.slider.maximum() == 90000
+        assert player.slider.value() == 15000
+        assert player.lbl_time.text() == "0:15 / 1:30"
+        print("11. [OK] AudioPlayer atualiza slider e tempo por sinais Qt")
+    except Exception as e:
+        print(f"11. [ERRO] {e}"); ok = False
+
+if ok:
+    try:
+        assert mod.current_language_code(win.cmb_source_lang, "auto") == "auto"
+        assert mod.current_language_code(win.cmb_target_lang, "pt") == "pt"
+        assert "\U0001F1FA\U0001F1F8" not in win.txt_en.placeholderText()
+        assert "\U0001F1E7\U0001F1F7" not in win.txt_pt.placeholderText()
+        print("12. [OK] Idiomas usam dados internos e não dependem de emoji de bandeira")
+    except Exception as e:
+        print(f"12. [ERRO] {e}"); ok = False
 
 print()
 if ok:

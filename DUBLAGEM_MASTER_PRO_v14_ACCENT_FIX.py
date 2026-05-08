@@ -23,16 +23,24 @@ from _patch_accent_fix import (
     VOICE_PROFILES_PTBR,
     get_duracao_exata,
 )
+from ui_language import (
+    SOURCE_LANGUAGE_CODES,
+    TARGET_LANGUAGE_CODES,
+    configure_language_combo,
+    current_language_code,
+    language_badge,
+)
 
-import pygame
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QTabWidget,
     QPushButton, QLabel, QFileDialog, QProgressBar, QMessageBox,
     QLineEdit, QGroupBox, QSplitter, QTreeWidget, QTreeWidgetItem,
-    QTextEdit, QSlider, QListWidget, QListWidgetItem, QSpinBox, QDoubleSpinBox
+    QTextEdit, QSlider, QListWidget, QListWidgetItem, QSpinBox, QDoubleSpinBox,
+    QHeaderView, QMenu, QStyle
 )
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer, QUrl
 from PyQt6.QtGui import QFont, QColor, QTextCursor, QTextCharFormat
+from PyQt6.QtMultimedia import QAudioOutput, QMediaPlayer
 
 APP_VERSION = "14.1 (Anti-Sotaque + Anti-Corte Final)"
 
@@ -125,6 +133,46 @@ def get_audio_info(caminho: str) -> dict:
             dur = librosa.get_duration(path=caminho)
             return {"duration": dur, "sr": librosa.get_samplerate(caminho), "channels": 1}
         except: return None
+
+
+AUDIO_EXTENSIONS = (".wav", ".mp3", ".wem", ".ogg", ".flac")
+FAMILY_MARKER_TOKENS = {"questdialog", "narration", "player"}
+
+
+def _is_sequence_token(token: str) -> bool:
+    return token.isdigit() and (len(token) > 1 or token.startswith("0"))
+
+
+def audio_family_from_filename(filename: str) -> str:
+    stem = Path(filename).stem.lower().strip("_")
+    tokens = [token for token in stem.split("_") if token]
+    if not tokens:
+        return "outros"
+
+    marker_indexes = [
+        index for index, token in enumerate(tokens)
+        if token in FAMILY_MARKER_TOKENS
+    ]
+    if marker_indexes:
+        family_tokens = tokens[:marker_indexes[0]]
+    else:
+        first_sequence = next(
+            (index for index, token in enumerate(tokens) if _is_sequence_token(token)),
+            len(tokens),
+        )
+        family_tokens = tokens[:first_sequence]
+
+    while family_tokens and _is_sequence_token(family_tokens[-1]):
+        family_tokens.pop()
+
+    return "_".join(family_tokens) if family_tokens else "outros"
+
+
+def sorted_audio_files(folder: str) -> list[str]:
+    return sorted(
+        file_name for file_name in os.listdir(folder)
+        if file_name.lower().endswith(AUDIO_EXTENSIONS)
+    )
 
 # ─────────────────────────────────────────────────────────────────────────────
 # WORKERS
@@ -251,26 +299,26 @@ SingleDubbingWorker = SingleDubbingWorkerV14
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# PYGAME AUDIO PLAYER
+# QT AUDIO PLAYER
 # ─────────────────────────────────────────────────────────────────────────────
-if not pygame.mixer.get_init(): pygame.mixer.init()
-
 class AudioPlayer(QWidget):
+    error_signal = pyqtSignal(str)
     active_player = None
 
     def __init__(self, label_text="Áudio", parent=None):
         super().__init__(parent)
         self._path = ""
-        self._is_playing = False
-        self._is_paused = False
-        self._dur = 0.0
-        self._seek = 0.0
-        self._start_ticks = 0
-        self._vol = 0.8
-        
-        self._timer = QTimer(self)
-        self._timer.setInterval(100)
-        self._timer.timeout.connect(self._update_time)
+        self._duration_ms = 0
+        self._is_seeking = False
+
+        self._audio_output = QAudioOutput(self)
+        self._audio_output.setVolume(0.8)
+        self._player = QMediaPlayer(self)
+        self._player.setAudioOutput(self._audio_output)
+        self._player.positionChanged.connect(self._on_position_changed)
+        self._player.durationChanged.connect(self._on_duration_changed)
+        self._player.playbackStateChanged.connect(self._on_playback_state_changed)
+        self._player.errorOccurred.connect(self._on_error)
 
         self._build_ui(label_text)
 
@@ -278,26 +326,33 @@ class AudioPlayer(QWidget):
         main = QVBoxLayout(self)
         main.setSpacing(4)
         main.setContentsMargins(0, 0, 0, 0)
-        
+
         hdr = QHBoxLayout()
         lbl = QLabel(label_text)
         lbl.setStyleSheet("color: #58a6ff; font-weight: bold; font-size: 12px;")
         hdr.addWidget(lbl)
         self.lbl_info = QLabel("Nenhum arquivo")
         self.lbl_info.setStyleSheet("color: #8b949e; font-size: 11px;")
+        self.lbl_info.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         hdr.addWidget(self.lbl_info, 1)
         main.addLayout(hdr)
 
         ctrl = QHBoxLayout()
-        self.btn_play = QPushButton("▶")
+        ctrl.setSpacing(6)
+        self.btn_play = QPushButton()
+        self.btn_play.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_MediaPlay))
+        self.btn_play.setToolTip("Reproduzir")
+        self.btn_play.setFixedWidth(34)
         self.btn_play.clicked.connect(self.toggle_play)
         self.btn_play.setEnabled(False)
         ctrl.addWidget(self.btn_play)
 
         self.slider = QSlider(Qt.Orientation.Horizontal)
-        self.slider.setRange(0, 1000)
-        self.slider.sliderReleased.connect(self._do_seek)
-        self.slider.sliderPressed.connect(self._press_seek)
+        self.slider.setRange(0, 0)
+        self.slider.setEnabled(False)
+        self.slider.sliderPressed.connect(self._begin_seek)
+        self.slider.sliderMoved.connect(self._preview_seek)
+        self.slider.sliderReleased.connect(self._commit_seek)
         ctrl.addWidget(self.slider, 1)
 
         self.lbl_time = QLabel("0:00 / 0:00")
@@ -306,97 +361,131 @@ class AudioPlayer(QWidget):
         main.addLayout(ctrl)
 
     def load(self, path):
-        if not path or not os.path.exists(path): return
-        if AudioPlayer.active_player is self: self.stop()
+        if not path or not os.path.exists(path):
+            return
+        if AudioPlayer.active_player is self:
+            self.stop()
         self._path = path
+        self._duration_ms = 0
         self.btn_play.setEnabled(True)
-        self._seek = 0.0
-        self.slider.setValue(0)
+        self.slider.setEnabled(True)
+        self._set_slider_range(0)
+        self.lbl_info.setStyleSheet("color: #8b949e; font-size: 11px;")
+
         info = get_audio_info(path)
-        self._dur = info.get("duration", 0) if info else 0.0
-        self.lbl_info.setText(f"{os.path.basename(path)} | {self._dur:.1f}s")
+        if info:
+            self._duration_ms = int(float(info.get("duration", 0.0)) * 1000)
+            self._set_slider_range(self._duration_ms)
+            self.lbl_info.setText(f"{os.path.basename(path)} | {self._duration_ms / 1000:.1f}s")
+        else:
+            self.lbl_info.setText(os.path.basename(path))
+        self.lbl_info.setToolTip(path)
+        self._set_source(path)
         self._update_lbl(0)
 
     def clear(self, msg="Nenhum arquivo"):
-        if AudioPlayer.active_player is self: self.stop()
+        if AudioPlayer.active_player is self:
+            self.stop()
         self._path = ""
+        self._duration_ms = 0
+        self._player.setSource(QUrl())
         self.btn_play.setEnabled(False)
-        self._seek = 0.0
-        self.slider.setValue(0)
-        self._dur = 0.0
+        self.slider.setEnabled(False)
+        self._set_slider_range(0)
         self.lbl_info.setText(msg)
+        self.lbl_info.setStyleSheet("color: #8b949e; font-size: 11px;")
+        self.lbl_info.setToolTip("")
         self._update_lbl(0)
 
     def toggle_play(self):
-        if not self._path: return
-        self.pause() if self._is_playing else self.play()
+        if not self._path:
+            return
+        if self._player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
+            self.pause()
+        else:
+            self.play()
 
     def play(self):
         if AudioPlayer.active_player and AudioPlayer.active_player is not self:
             AudioPlayer.active_player.stop()
         AudioPlayer.active_player = self
-        pygame.mixer.music.set_volume(self._vol)
-        if self._is_paused:
-            pygame.mixer.music.unpause()
-        else:
-            try:
-                pygame.mixer.music.load(self._path)
-                pygame.mixer.music.play(start=self._seek)
-            except Exception as e: print(e); return
-            
-        self._start_ticks = pygame.time.get_ticks() - int(self._seek * 1000)
-        self._is_playing = True
-        self._is_paused = False
-        self.btn_play.setText("⏸")
-        self._timer.start()
+        self._player.play()
 
     def pause(self):
-        if self._is_playing:
-            pygame.mixer.music.pause()
-            self._is_playing = False
-            self._is_paused = True
-            self.btn_play.setText("▶")
-            self._timer.stop()
+        if self._player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
+            self._player.pause()
 
     def stop(self):
         if AudioPlayer.active_player is self:
-            pygame.mixer.music.stop()
-            pygame.mixer.music.unload()
             AudioPlayer.active_player = None
-        self._is_playing = self._is_paused = False
-        self.btn_play.setText("▶")
-        self._timer.stop()
-        self._seek = 0.0
-        self.slider.setValue(0)
-        self._update_lbl(0)
+        self._player.stop()
+        self._set_position(0)
 
-    def _press_seek(self):
-        self._was_playing = self._is_playing
-        if self._is_playing: self.pause()
+    def _set_source(self, path):
+        self._player.setSource(QUrl.fromLocalFile(os.path.abspath(path)))
 
-    def _do_seek(self):
-        self._seek = (self.slider.value() / 1000.0) * self._dur
-        self._is_paused = False
-        self._update_lbl(self._seek)
-        if getattr(self, '_was_playing', False): self.play()
-
-    def _update_time(self):
-        if not self._is_playing: return
-        import pygame
-        if not self._is_paused and not pygame.mixer.music.get_busy():
-            self.stop()
-            return
-        curr = (pygame.time.get_ticks() - self._start_ticks) / 1000.0
-        if curr >= self._dur and self._dur > 0: curr = self._dur
+    def _set_slider_range(self, duration_ms):
         self.slider.blockSignals(True)
-        self.slider.setValue(int((curr / max(self._dur, 0.1)) * 1000))
+        self.slider.setRange(0, max(0, int(duration_ms)))
+        self.slider.setValue(0)
         self.slider.blockSignals(False)
-        self._update_lbl(curr)
-        self._seek = curr
 
-    def _update_lbl(self, pos):
-        m, s = int(pos//60), int(pos%60)
-        dm, ds = int(self._dur//60), int(self._dur%60)
+    def _set_position(self, position_ms):
+        self.slider.blockSignals(True)
+        self.slider.setValue(max(0, min(int(position_ms), self.slider.maximum())))
+        self.slider.blockSignals(False)
+        self._update_lbl(position_ms)
+
+    def _begin_seek(self):
+        self._is_seeking = True
+
+    def _preview_seek(self, position_ms):
+        self._update_lbl(position_ms)
+
+    def _commit_seek(self):
+        position_ms = self.slider.value()
+        self._player.setPosition(position_ms)
+        self._is_seeking = False
+        self._set_position(position_ms)
+
+    def _on_position_changed(self, position_ms):
+        if self._is_seeking:
+            return
+        self._set_position(position_ms)
+
+    def _on_duration_changed(self, duration_ms):
+        if duration_ms <= 0:
+            return
+        self._duration_ms = int(duration_ms)
+        current_value = self.slider.value()
+        self.slider.blockSignals(True)
+        self.slider.setRange(0, self._duration_ms)
+        self.slider.setValue(min(current_value, self._duration_ms))
+        self.slider.blockSignals(False)
+        self._update_lbl(self.slider.value())
+
+    def _on_playback_state_changed(self, state):
+        is_playing = state == QMediaPlayer.PlaybackState.PlayingState
+        icon = QStyle.StandardPixmap.SP_MediaPause if is_playing else QStyle.StandardPixmap.SP_MediaPlay
+        self.btn_play.setIcon(self.style().standardIcon(icon))
+        self.btn_play.setToolTip("Pausar" if is_playing else "Reproduzir")
+        if state == QMediaPlayer.PlaybackState.StoppedState and AudioPlayer.active_player is self:
+            AudioPlayer.active_player = None
+
+    def _on_error(self, _error, error_text):
+        if not error_text:
+            return
+        msg = f"Falha ao reproduzir {os.path.basename(self._path)}: {error_text}"
+        self.lbl_info.setText(msg)
+        self.lbl_info.setStyleSheet("color: #f85149; font-size: 11px;")
+        self.error_signal.emit(msg)
+        print(msg, file=sys.stderr)
+
+    def _update_lbl(self, pos_ms):
+        pos = max(0, int(pos_ms)) / 1000.0
+        dur = max(0, int(self._duration_ms)) / 1000.0
+        m, s = int(pos // 60), int(pos % 60)
+        dm, ds = int(dur // 60), int(dur % 60)
         self.lbl_time.setText(f"{m}:{s:02d} / {dm}:{ds:02d}")
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -410,15 +499,37 @@ class FileExplorer(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(0,0,0,0)
-        lbl = QLabel("📁 Explorador do Projeto")
+        layout.setContentsMargins(4, 4, 4, 4)
+        layout.setSpacing(4)
+
+        header = QHBoxLayout()
+        header.setSpacing(6)
+        lbl = QLabel("Explorador do Projeto")
         lbl.setStyleSheet("color:#58a6ff; font-weight:bold;")
-        layout.addWidget(lbl)
+        header.addWidget(lbl, 1)
+        self.btn_filter = QPushButton("Filtro")
+        self.btn_filter.setToolTip("Exibir ou ocultar famílias de áudio")
+        self.btn_filter.setFixedWidth(70)
+        self.btn_filter.clicked.connect(self._show_filter_menu)
+        header.addWidget(self.btn_filter)
+        layout.addLayout(header)
+
+        self.lbl_folder = QLabel("Nenhuma pasta")
+        self.lbl_folder.setStyleSheet("color:#8b949e; font-size:10px;")
+        self.lbl_folder.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        layout.addWidget(self.lbl_folder)
+
         self.tree = QTreeWidget()
         self.tree.setHeaderLabels(["Arquivo", "Status"])
-        self.tree.setColumnWidth(0, 160)
-        
-        # Permitir arrastar e selecionar multiplos
+        self.tree.setRootIsDecorated(False)
+        self.tree.setIndentation(0)
+        self.tree.setItemsExpandable(False)
+        self.tree.setUniformRowHeights(True)
+        self.tree.setAlternatingRowColors(True)
+        self.tree.header().setStretchLastSection(False)
+        self.tree.header().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        self.tree.header().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+
         self.tree.setSelectionMode(QTreeWidget.SelectionMode.ExtendedSelection)
         self.tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.tree.customContextMenuRequested.connect(self._show_menu)
@@ -428,11 +539,12 @@ class FileExplorer(QWidget):
         self._in = ""
         self._out = ""
         self._status = {}
+        self._families = []
+        self._hidden_families = set()
         
     def _show_menu(self, pos):
         items = self.tree.selectedItems()
         if not items: return
-        from PyQt6.QtWidgets import QMenu
         menu = QMenu(self)
         menu.setStyleSheet("QMenu { background-color: #161b22; color: #c9d1d9; border: 1px solid #30363d; } QMenu::item:selected { background-color: #1f6feb; }")
         
@@ -465,31 +577,102 @@ class FileExplorer(QWidget):
             return False
         return os.path.isfile(os.path.join(self._out, name))
 
+    def _show_filter_menu(self):
+        menu = QMenu(self)
+        menu.setStyleSheet("QMenu { background-color: #161b22; color: #c9d1d9; border: 1px solid #30363d; } QMenu::item:selected { background-color: #1f6feb; }")
+
+        show_all = menu.addAction("Exibir tudo")
+        show_all.triggered.connect(self._show_all_families)
+        menu.addSeparator()
+
+        if not self._families:
+            empty = menu.addAction("Nenhuma família encontrada")
+            empty.setEnabled(False)
+        for family in self._families:
+            action = menu.addAction(family)
+            action.setCheckable(True)
+            action.setChecked(family not in self._hidden_families)
+            action.triggered.connect(
+                lambda checked, family_name=family: self._set_family_visible(family_name, checked)
+            )
+
+        menu.exec(self.btn_filter.mapToGlobal(self.btn_filter.rect().bottomLeft()))
+
+    def _show_all_families(self):
+        self._hidden_families.clear()
+        self.refresh()
+
+    def _set_family_visible(self, family, visible):
+        if visible:
+            self._hidden_families.discard(family)
+        else:
+            self._hidden_families.add(family)
+        self.refresh()
+
+    def _status_for(self, file_name):
+        st = self._status.get(file_name)
+        if not st and self._has_dubbed_output(file_name):
+            st = "Pronto"
+        return st or "Pendente"
+
+    def _status_color(self, status):
+        if "Pronto" in status:
+            return "#3fb950"
+        if status.startswith("Falha") or status.startswith("Erro"):
+            return "#f85149"
+        return "#8b949e"
+
+    def _refresh_filter_button(self, visible_count, total_count):
+        hidden_count = len(self._hidden_families.intersection(self._families))
+        self.btn_filter.setText(f"Filtro ({hidden_count})" if hidden_count else "Filtro")
+        self.btn_filter.setToolTip(
+            f"{visible_count}/{total_count} áudios visíveis; {hidden_count} família(s) ocultas."
+        )
+
     def refresh(self):
+        selected_paths = {
+            item.data(0, Qt.ItemDataRole.UserRole)
+            for item in self.tree.selectedItems()
+            if item.data(0, Qt.ItemDataRole.UserRole)
+        }
         self.tree.clear()
-        if self._in and os.path.isdir(self._in):
-            root = QTreeWidgetItem(self.tree, [os.path.basename(self._in), "Origem"])
-            root.setForeground(0, QColor("#58a6ff"))
-            try:
-                for f in sorted(os.listdir(self._in)):
-                    if f.lower().endswith((".wav", ".mp3", ".wem", ".ogg", ".flac")):
-                        st = self._status.get(f)
-                        if not st and self._has_dubbed_output(f):
-                            st = "✅ Pronto"
-                        if not st:
-                            st = "Pendente"
-                        color = "#3fb950" if "✅" in st else "#f85149" if "❌" in st else "#8b949e"
-                        it = QTreeWidgetItem(root, [f, st])
-                        it.setForeground(1, QColor(color))
-                        it.setData(0, Qt.ItemDataRole.UserRole, os.path.join(self._in, f))
-                        if "✅" in st:
-                            it.setToolTip(1, "Já existe dublagem na pasta Destino.")
-                root.setExpanded(True)
-            except Exception as e:
-                print(f"Erro ao ler diretório: {e}")
+        if not self._in or not os.path.isdir(self._in):
+            self._families = []
+            self.lbl_folder.setText("Nenhuma pasta")
+            self._refresh_filter_button(0, 0)
+            return
+
+        self.lbl_folder.setText(os.path.basename(self._in))
+        self.lbl_folder.setToolTip(self._in)
+
+        try:
+            files = sorted_audio_files(self._in)
+            families = sorted({audio_family_from_filename(file_name) for file_name in files})
+            self._families = families
+            visible_count = 0
+
+            for file_name in files:
+                family = audio_family_from_filename(file_name)
+                if family in self._hidden_families:
+                    continue
+                status = self._status_for(file_name)
+                path = os.path.join(self._in, file_name)
+                item = QTreeWidgetItem(self.tree, [file_name, status])
+                item.setData(0, Qt.ItemDataRole.UserRole, path)
+                item.setData(0, Qt.ItemDataRole.UserRole + 1, family)
+                item.setForeground(1, QColor(self._status_color(status)))
+                item.setToolTip(0, f"{family}\n{path}")
+                if status == "Pronto":
+                    item.setToolTip(1, "Já existe dublagem na pasta Destino.")
+                if path in selected_paths:
+                    item.setSelected(True)
+                visible_count += 1
+            self._refresh_filter_button(visible_count, len(files))
+        except Exception as e:
+            print(f"Erro ao ler diretório: {e}")
 
     def update_status(self, name, ok, motivo):
-        self._status[name] = "✅ Pronto" if ok else f"❌ {motivo[:25]}"
+        self._status[name] = "Pronto" if ok else f"Falha: {motivo[:25]}"
         self.refresh()
 
     def _on_click(self, item):
@@ -511,7 +694,9 @@ QLineEdit:focus, QTextEdit:focus { border: 1px solid #58a6ff; }
 QProgressBar { border: 1px solid #30363d; border-radius: 4px; background-color: #161b22; text-align: center; color: white; }
 QProgressBar::chunk { background-color: #1f6feb; border-radius: 3px; }
 QTreeWidget, QListWidget { background: #161b22; border: 1px solid #30363d; border-radius: 6px; }
+QTreeWidget::item { padding: 2px 4px; }
 QTreeWidget::item:selected, QListWidget::item:selected { background: #1f6feb; }
+QHeaderView::section { background: #161b22; color: #c9d1d9; border: 0; border-bottom: 1px solid #30363d; padding: 3px 4px; }
 QSpinBox, QDoubleSpinBox { background: #161b22; border: 1px solid #30363d; border-radius: 4px; padding: 4px; color: white; }
 """
 
@@ -641,6 +826,8 @@ class MainWindow(QMainWindow):
         # Injetar players dedicados (AudioPlayerWidget ja definido neste modulo)
         self._val_play_en = AudioPlayer("🎵 Original EN")
         self._val_play_pt = AudioPlayer("🔊 Dublado PT")
+        self._val_play_en.error_signal.connect(lambda msg: self._log(f"[VAL] {msg}", "error"))
+        self._val_play_pt.error_signal.connect(lambda msg: self._log(f"[VAL] {msg}", "error"))
         self.tab_val.inject_players(self._val_play_en, self._val_play_pt)
         self.tabs.addTab(self.tab_val, "✅  Validação Manual")
 
@@ -663,8 +850,10 @@ class MainWindow(QMainWindow):
         # 2. Players
         grp_p = QGroupBox("🎵 Áudios")
         pl = QVBoxLayout(grp_p)
-        self.play_en = AudioPlayer("🇺🇸 Original")
-        self.play_pt = AudioPlayer("🇧🇷 Resultado")
+        self.play_en = AudioPlayer(f"{language_badge('en')} Original")
+        self.play_pt = AudioPlayer(f"{language_badge('pt')} Resultado")
+        self.play_en.error_signal.connect(lambda msg: self._log(msg, "error"))
+        self.play_pt.error_signal.connect(lambda msg: self._log(msg, "error"))
         pl.addWidget(self.play_en)
         pl.addWidget(self.play_pt)
         mid.addWidget(grp_p)
@@ -678,8 +867,8 @@ class MainWindow(QMainWindow):
         self.btn_trans.clicked.connect(self._extract)
         tl.addWidget(self.btn_trans)
         
-        self.txt_en = QLineEdit(); self.txt_en.setPlaceholderText("🇺🇸 EN Original...")
-        self.txt_pt = QLineEdit(); self.txt_pt.setPlaceholderText("🇧🇷 PT Editável...")
+        self.txt_en = QLineEdit(); self.txt_en.setPlaceholderText(f"{language_badge('en')} Original...")
+        self.txt_pt = QLineEdit(); self.txt_pt.setPlaceholderText(f"{language_badge('pt')} Editável...")
         tl.addWidget(self.txt_en)
         tl.addWidget(self.txt_pt)
         
@@ -747,12 +936,10 @@ class MainWindow(QMainWindow):
         from PyQt6.QtWidgets import QComboBox, QCheckBox
         row_lang = QHBoxLayout()
         self.cmb_source_lang = QComboBox()
-        self.cmb_source_lang.addItems(["auto (Detectar)", "en (Inglês)", "fr (Francês)", "sv (Sueco)", "pt (Português)"])
-        self.cmb_source_lang.setStyleSheet("QComboBox { background:#161b22; color:#c9d1d9; border:1px solid #30363d; padding:4px; border-radius:4px; }")
+        configure_language_combo(self.cmb_source_lang, SOURCE_LANGUAGE_CODES, "auto")
         
         self.cmb_target_lang = QComboBox()
-        self.cmb_target_lang.addItems(["pt (Português)", "fr (Francês)", "sv (Sueco)", "en (Inglês)"])
-        self.cmb_target_lang.setStyleSheet("QComboBox { background:#161b22; color:#c9d1d9; border:1px solid #30363d; padding:4px; border-radius:4px; }")
+        configure_language_combo(self.cmb_target_lang, TARGET_LANGUAGE_CODES, "pt")
         
         row_lang.addWidget(QLabel("De:"))
         row_lang.addWidget(self.cmb_source_lang, 1)
@@ -918,8 +1105,8 @@ class MainWindow(QMainWindow):
         self.btn_redub.setEnabled(False)
         self.lbl_status.setText("⏳ Extraindo transcrição...")
         
-        s_lang = self.cmb_source_lang.currentText().split(' ')[0]
-        t_lang = self.cmb_target_lang.currentText().split(' ')[0]
+        s_lang = current_language_code(self.cmb_source_lang, "auto")
+        t_lang = current_language_code(self.cmb_target_lang, "pt")
         
         worker = self._track_worker(
             TranscribeWorker(self._current_file, self.models, target_lang=t_lang, source_lang=s_lang),
@@ -979,7 +1166,7 @@ class MainWindow(QMainWindow):
 
     def _redublar_de_validacao(self, src: str, texto_pt: str, modo: str,
                                palatalizar: bool, virgula: bool, trailing: bool, pad_ms: int,
-                               target_lang: str, source_lang: str):
+                               target_lang: str = "pt", source_lang: str = "auto"):
         """Recebe sinal da aba Validação e cria worker dedicado de redublagem."""
         from _patch_accent_fix import SingleDubbingWorkerV14
         if self._is_worker_running(self._val_worker):
@@ -1015,10 +1202,9 @@ class MainWindow(QMainWindow):
         if not pasta_out:
             return QMessageBox.warning(self, "Aviso", "Defina a pasta Destino (PT) primeiro.")
 
-        exts = (".wav", ".mp3", ".wem", ".ogg", ".flac")
         arquivos = sorted([
             os.path.join(pasta_in, f) for f in os.listdir(pasta_in)
-            if f.lower().endswith(exts)
+            if f.lower().endswith(AUDIO_EXTENSIONS)
         ])
         if not arquivos:
             return QMessageBox.warning(self, "Aviso", "Nenhum arquivo de áudio encontrado na pasta Origem.")
@@ -1058,8 +1244,8 @@ class MainWindow(QMainWindow):
         self.lbl_status.setStyleSheet("color:#f0883e;")
         self.prog_bar.setValue(0)
 
-        s_lang = self.cmb_source_lang.currentText().split(' ')[0]
-        t_lang = self.cmb_target_lang.currentText().split(' ')[0]
+        s_lang = current_language_code(self.cmb_source_lang, "auto")
+        t_lang = current_language_code(self.cmb_target_lang, "pt")
 
         worker = self._track_worker(SingleDubbingWorker(
             paths, self.lne_guide.text(), self.models, c_texts,
@@ -1236,10 +1422,6 @@ class MainWindow(QMainWindow):
             self._stop_worker(worker, "Thread", timeout_ms=3000)
         if AudioPlayer.active_player:
             AudioPlayer.active_player.stop()
-        try:
-            pygame.mixer.quit()
-        except Exception:
-            pass
         self._save_cfg()
         event.accept()
 

@@ -1,7 +1,9 @@
 .venv/
 __pycache__/
 *.py[cod]
+_temp_*/
 _run_v14_stdout.log
 _run_v14_stderr.log
 _temp_ffmpeg_smoke.wav
 _temp_full_smoke.wav
+.serena/memories/

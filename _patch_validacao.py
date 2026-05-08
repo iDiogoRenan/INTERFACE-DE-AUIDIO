@@ -7,6 +7,12 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QColor
+from ui_language import (
+    SOURCE_LANGUAGE_CODES,
+    TARGET_LANGUAGE_CODES,
+    configure_language_combo,
+    current_language_code,
+)
 
 class ValidacaoWidget(QWidget):
     """
@@ -129,9 +135,9 @@ class ValidacaoWidget(QWidget):
         cl = QHBoxLayout(grp_cfg)
         
         self.cmb_source_lang = QComboBox()
-        self.cmb_source_lang.addItems(["auto", "en", "fr", "sv", "pt"])
+        configure_language_combo(self.cmb_source_lang, SOURCE_LANGUAGE_CODES, "auto")
         self.cmb_target_lang = QComboBox()
-        self.cmb_target_lang.addItems(["pt", "fr", "sv", "en"])
+        configure_language_combo(self.cmb_target_lang, TARGET_LANGUAGE_CODES, "pt")
         cl.addWidget(QLabel("Origem:"))
         cl.addWidget(self.cmb_source_lang)
         cl.addWidget(QLabel("Destino:"))
@@ -239,7 +245,12 @@ class ValidacaoWidget(QWidget):
                 if os.path.exists(p):
                     en_paths.append(p)
         if en_paths:
-            self.batch_transcribe_request.emit(en_paths, self._pasta_dublados, self.cmb_target_lang.currentText(), self.cmb_source_lang.currentText())
+            self.batch_transcribe_request.emit(
+                en_paths,
+                self._pasta_dublados,
+                current_language_code(self.cmb_target_lang, "pt"),
+                current_language_code(self.cmb_source_lang, "auto"),
+            )
             
         if self.lista.count() > 0: self.lista.setCurrentRow(0)
 
@@ -282,7 +293,11 @@ class ValidacaoWidget(QWidget):
         src = self._arquivo_en
         if not src or not os.path.exists(src):
             return QMessageBox.warning(self, "Aviso", "Áudio EN original não encontrado para transcrição.")
-        self.transcribe_request.emit(src, self.cmb_target_lang.currentText(), self.cmb_source_lang.currentText())
+        self.transcribe_request.emit(
+            src,
+            current_language_code(self.cmb_target_lang, "pt"),
+            current_language_code(self.cmb_source_lang, "auto"),
+        )
         self.lbl_status.setText("⏳ Extraindo transcrição...")
         self.lbl_status.setStyleSheet("color:#f0883e;")
         self._set_acoes_ativas(False)
@@ -335,7 +350,8 @@ class ValidacaoWidget(QWidget):
             src, self.txt_pt.toPlainText().strip(), modo,
             self.chk_palatalizar.isChecked(), self.chk_virgula.isChecked(),
             self.chk_trailing.isChecked(), 200,
-            self.cmb_target_lang.currentText(), self.cmb_source_lang.currentText()
+            current_language_code(self.cmb_target_lang, "pt"),
+            current_language_code(self.cmb_source_lang, "auto"),
         )
         self.lbl_status.setText("⏳ Redublando..."); self.lbl_status.setStyleSheet("color:#f0883e;")
         self.prog_bar.setValue(0)

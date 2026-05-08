@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """Testes completos: UI principal + aba de Validação."""
-import sys, os, tempfile, shutil
+import sys, os, tempfile, shutil, wave
 os.environ["QT_QPA_PLATFORM"] = "offscreen"
 sys.path.insert(0, os.path.dirname(__file__))
+ffmpeg_dir = os.path.join(os.path.dirname(__file__), ".venv", "ffmpeg")
+os.environ["PATH"] = ffmpeg_dir + os.pathsep + os.environ.get("PATH", "")
 sys.stdout = open(sys.stdout.fileno(), mode='w', encoding='utf-8', buffering=1)
 
 from PyQt6.QtWidgets import QApplication
@@ -11,6 +13,14 @@ import unittest.mock as mock
 app = QApplication(sys.argv)
 
 ok = True
+
+
+def write_silent_wav(path: str) -> None:
+    with wave.open(path, "wb") as audio:
+        audio.setnchannels(1)
+        audio.setsampwidth(2)
+        audio.setframerate(16000)
+        audio.writeframes(b"\x00" * 3200)
 
 # ─── Carregar MainWindow ──────────────────────────────────────────────────────
 try:
@@ -50,6 +60,11 @@ except AssertionError as e:
 
 # ─── Testes do ValidacaoWidget ────────────────────────────────────────────────
 val = win.tab_val
+for injected_player in (getattr(val, "_player_en", None), getattr(val, "_player_pt", None)):
+    if injected_player:
+        injected_player.load = lambda _path: None
+        injected_player.clear = lambda _msg="": None
+        injected_player.toggle_play = lambda: None
 try:
     for attr in ['lista', 'btn_aprovar', 'btn_rejeitar', 'btn_redub', 'btn_proximo',
                  'lne_dublados', 'lne_final', 'lbl_stats', 'txt_pt',
@@ -80,7 +95,7 @@ except Exception as e:
 try:
     tmpdir = tempfile.mkdtemp()
     for nome in ["audio_001.wav", "audio_002.wav", "audio_003.wav"]:
-        open(os.path.join(tmpdir, nome), 'wb').write(b'RIFF' + b'\x00'*40)
+        write_silent_wav(os.path.join(tmpdir, nome))
     val.definir_pasta_dublados(tmpdir)
     val._carregar_lista()
     assert val.lista.count() == 3, f"Esperado 3 itens, got {val.lista.count()}"
@@ -155,11 +170,16 @@ except Exception as e:
 try:
     # Mockar SingleDubbingWorkerV14 para nao tentar rodar GPU
     import _patch_accent_fix as paf
+    class FakeSignal:
+        def connect(self, _slot): pass
+
     class FakeWorker:
-        progress_signal = type('S', (), {'connect': lambda s,f: None})()
-        file_done_signal = type('S', (), {'connect': lambda s,f: None})()
-        log_signal = type('S', (), {'connect': lambda s,f: None})()
+        progress_signal = FakeSignal()
+        file_done_signal = FakeSignal()
+        log_signal = FakeSignal()
+        finished = FakeSignal()
         def start(self): pass
+        def deleteLater(self): pass
     with mock.patch.object(paf, 'SingleDubbingWorkerV14', return_value=FakeWorker()):
         win._redublar_de_validacao(
             os.path.join(tmpdir, "audio_003.wav"), "", "classico", False, False, False, 200
@@ -173,13 +193,23 @@ except Exception as e:
     traceback.print_exc()
     ok = False
 
+try:
+    from ui_language import current_language_code
+    assert current_language_code(win.cmb_source_lang, "auto") == "auto"
+    assert current_language_code(win.cmb_target_lang, "pt") == "pt"
+    assert current_language_code(val.cmb_source_lang, "auto") == "auto"
+    assert current_language_code(val.cmb_target_lang, "pt") == "pt"
+    print("15. [OK] Combos de idioma usam currentData com fallback seguro")
+except Exception as e:
+    print(f"15. [ERRO] {e}"); ok = False
+
 # ─── Cleanup ──────────────────────────────────────────────────────────────────
 shutil.rmtree(tmpdir, ignore_errors=True)
 shutil.rmtree(tmpfinal, ignore_errors=True)
 
 print()
 if ok:
-    print("=== TODOS OS 14 TESTES PASSARAM ===")
+    print("=== TODOS OS 15 TESTES PASSARAM ===")
 else:
     print("=== FALHOU ===")
     sys.exit(1)
