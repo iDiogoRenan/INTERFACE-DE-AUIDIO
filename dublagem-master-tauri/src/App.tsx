@@ -5,6 +5,7 @@ import { DubbingPanel } from "./features/dubbing/DubbingPanel";
 import { ProjectExplorer } from "./features/project-explorer/ProjectExplorer";
 import { SettingsPanel } from "./features/settings/SettingsPanel";
 import { ValidationPanel } from "./features/validation/ValidationPanel";
+import { APP_DISPLAY_NAME } from "./shared/app/metadata";
 import { useWorkspaceStore } from "./stores/workspaceStore";
 import styles from "./App.module.css";
 
@@ -21,13 +22,17 @@ function App() {
     });
   }, [appendLog, load]);
 
+  useEffect(() => {
+    document.title = APP_DISPLAY_NAME;
+  }, []);
+
   return (
     <main className={styles.shell}>
       <ProjectExplorer />
       <Tabs.Root className={styles.workspace} defaultValue="dubbing">
         <header className={styles.topbar}>
           <div>
-            <h1>Dublagem Master</h1>
+            <h1>{APP_DISPLAY_NAME}</h1>
             <p>Pipeline local em Rust para transcrição, tradução, síntese e validação.</p>
           </div>
           <Tabs.List className={styles.tabs}>

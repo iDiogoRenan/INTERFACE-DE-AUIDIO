@@ -1,4 +1,4 @@
-# Dublagem Master
+# NSG Gaming Dub 1.0
 
 Aplicativo desktop Tauri v2 para transcrição, tradução, síntese de voz e validação manual de áudios de dublagem.
 

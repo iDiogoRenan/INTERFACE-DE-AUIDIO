@@ -1,8 +1,8 @@
 [package]
 name = "dublagem-master-tauri"
-version = "0.1.0"
-description = "Dublagem Master desktop application"
-authors = ["Dublagem Master"]
+version = "1.0.0"
+description = "NSG Gaming Dub desktop application"
+authors = ["NSG Gaming"]
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
