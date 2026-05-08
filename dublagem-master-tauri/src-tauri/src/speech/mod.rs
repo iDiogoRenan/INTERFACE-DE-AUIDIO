@@ -8,6 +8,7 @@ use std::{
 
 pub mod models;
 pub mod omnivoice;
+pub mod runtime;
 pub mod whisper;
 
 #[async_trait]
@@ -32,7 +33,6 @@ pub struct SynthesisRequest<'a> {
     pub text: &'a str,
     pub source_audio: &'a Path,
     pub reference_audio: &'a Path,
-    pub reference_text: &'a str,
     pub output_path: &'a Path,
     pub options: DubbingOptions,
     pub hooks: SynthesisHooks,

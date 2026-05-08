@@ -1,6 +1,9 @@
 use crate::error::{AppError, AppResult};
-use dublagem_domain::{AudioFileEntry, AudioFileStatus, AudioMetadata, QualityReport};
-use std::{fs::File, path::Path};
+use dublagem_domain::{
+    AudioFileEntry, AudioFileStatus, AudioMetadata, CachedTranscription, QualityReport,
+};
+use serde::{Deserialize, Serialize};
+use std::{collections::BTreeMap, fs::File, path::Path};
 #[cfg(feature = "ml")]
 use symphonia::core::{
     audio::SampleBuffer,
@@ -12,6 +15,7 @@ use symphonia::core::{
 };
 
 pub const AUDIO_EXTENSIONS: &[&str] = &["wav", "mp3", "wem", "ogg", "flac"];
+const TRANSCRIPTION_CACHE_FILE: &str = "transcricoes_cache.json";
 const FAMILY_MARKER_TOKENS: &[&str] = &["questdialog", "narration", "player"];
 #[cfg(feature = "ml")]
 const WHISPER_SAMPLE_RATE: u32 = 16_000;
@@ -59,6 +63,7 @@ pub fn scan_audio_folder(
     }
 
     let mut entries = Vec::new();
+    let transcription_cache = load_transcription_cache(output_dir);
     for entry in std::fs::read_dir(input_dir)? {
         let entry = entry?;
         let path = entry.path();
@@ -68,17 +73,41 @@ pub fn scan_audio_folder(
 
         let name = entry.file_name().to_string_lossy().to_string();
         let status = status_for_file(&name, output_dir);
+        let transcription = transcription_cache.get(&name).cloned();
         entries.push(AudioFileEntry {
             family: audio_family_from_filename(&name),
             metadata: get_audio_metadata(&path).ok(),
             name,
             path,
             status,
+            transcription,
         });
     }
 
     entries.sort_by(|left, right| left.name.cmp(&right.name));
     Ok(entries)
+}
+
+pub fn save_transcription_cache(
+    output_dir: &Path,
+    file_name: &str,
+    source_text: &str,
+    target_text: &str,
+) -> AppResult<()> {
+    std::fs::create_dir_all(output_dir)?;
+    let path = output_dir.join(TRANSCRIPTION_CACHE_FILE);
+    let mut cache = if path.exists() {
+        read_transcription_cache_file(&path)?
+    } else {
+        BTreeMap::new()
+    };
+    cache.insert(
+        file_name.to_string(),
+        TranscriptionCacheEntry::from_texts(source_text, target_text),
+    );
+    let payload = serde_json::to_string_pretty(&cache)?;
+    std::fs::write(path, payload)?;
+    Ok(())
 }
 
 pub fn get_audio_metadata(path: &Path) -> AppResult<AudioMetadata> {
@@ -347,6 +376,67 @@ fn status_for_file(name: &str, output_dir: Option<&Path>) -> AudioFileStatus {
         .unwrap_or(AudioFileStatus::Pending)
 }
 
+fn load_transcription_cache(output_dir: Option<&Path>) -> BTreeMap<String, CachedTranscription> {
+    output_dir
+        .map(|dir| dir.join(TRANSCRIPTION_CACHE_FILE))
+        .filter(|path| path.is_file())
+        .and_then(|path| read_transcription_cache_file(&path).ok())
+        .map(|cache| {
+            cache
+                .into_iter()
+                .filter_map(|(name, entry)| entry.into_cached().map(|cached| (name, cached)))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn read_transcription_cache_file(
+    path: &Path,
+) -> AppResult<BTreeMap<String, TranscriptionCacheEntry>> {
+    let payload = std::fs::read_to_string(path)?;
+    Ok(serde_json::from_str(&payload)?)
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TranscriptionCacheEntry {
+    #[serde(default)]
+    source_text: String,
+    #[serde(default)]
+    target_text: String,
+    #[serde(default)]
+    en: String,
+    #[serde(default)]
+    pt: String,
+}
+
+impl TranscriptionCacheEntry {
+    fn from_texts(source_text: &str, target_text: &str) -> Self {
+        Self {
+            source_text: source_text.to_string(),
+            target_text: target_text.to_string(),
+            en: source_text.to_string(),
+            pt: target_text.to_string(),
+        }
+    }
+
+    fn into_cached(self) -> Option<CachedTranscription> {
+        let source_text = first_non_empty([self.source_text, self.en])?;
+        let target_text = first_non_empty([self.target_text, self.pt])?;
+        Some(CachedTranscription {
+            source_text,
+            target_text,
+        })
+    }
+}
+
+fn first_non_empty(values: [String; 2]) -> Option<String> {
+    values
+        .into_iter()
+        .map(|value| value.trim().to_string())
+        .find(|value| !value.is_empty())
+}
+
 fn extension(path: &Path) -> String {
     path.extension()
         .and_then(|extension| extension.to_str())
@@ -477,6 +567,60 @@ pub fn ms_to_samples(duration_ms: u32, sample_rate: u32) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn loads_legacy_transcription_cache_for_scanned_files() {
+        let input_dir = tempfile::tempdir().expect("input tempdir");
+        let output_dir = tempfile::tempdir().expect("output tempdir");
+        let file_name = "line_cache.wav";
+
+        std::fs::write(input_dir.path().join(file_name), b"not real wav").expect("input audio");
+        std::fs::write(output_dir.path().join(file_name), b"dubbed audio").expect("output audio");
+        std::fs::write(
+            output_dir.path().join(TRANSCRIPTION_CACHE_FILE),
+            r#"{"line_cache.wav":{"en":"Original cached text.","pt":"Texto traduzido em cache."}}"#,
+        )
+        .expect("legacy cache");
+
+        let files = scan_audio_folder(input_dir.path(), Some(output_dir.path())).expect("scan");
+
+        let file = files
+            .iter()
+            .find(|entry| entry.name == file_name)
+            .expect("cached file entry");
+        assert_eq!(file.status, AudioFileStatus::Dubbed);
+        let transcription = file.transcription.as_ref().expect("cached transcription");
+        assert_eq!(transcription.source_text, "Original cached text.");
+        assert_eq!(transcription.target_text, "Texto traduzido em cache.");
+    }
+
+    #[test]
+    fn saves_transcription_cache_in_legacy_and_frontend_shapes() {
+        let output_dir = tempfile::tempdir().expect("output tempdir");
+
+        save_transcription_cache(
+            output_dir.path(),
+            "line_saved.wav",
+            "Fresh source text.",
+            "Texto destino novo.",
+        )
+        .expect("save transcription cache");
+
+        let cache_payload =
+            std::fs::read_to_string(output_dir.path().join(TRANSCRIPTION_CACHE_FILE))
+                .expect("cache payload");
+        assert!(cache_payload.contains("\"sourceText\""));
+        assert!(cache_payload.contains("\"targetText\""));
+        assert!(cache_payload.contains("\"en\""));
+        assert!(cache_payload.contains("\"pt\""));
+
+        let cache = load_transcription_cache(Some(output_dir.path()));
+        let transcription = cache
+            .get("line_saved.wav")
+            .expect("saved cached transcription");
+        assert_eq!(transcription.source_text, "Fresh source text.");
+        assert_eq!(transcription.target_text, "Texto destino novo.");
+    }
 
     #[test]
     fn extracts_audio_families_from_known_game_names() {

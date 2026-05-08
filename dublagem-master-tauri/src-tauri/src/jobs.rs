@@ -1,9 +1,9 @@
 use crate::{
+    audio,
     error::{AppError, AppResult},
     speech::{
-        models::resolve_speech_model_paths, omnivoice::OmniVoiceCandleSynthesizer,
-        whisper::WhisperRsTranscriber, SynthesisCancellationCheck, SynthesisHooks,
-        SynthesisProgressCallback, SynthesisRequest, Transcriber, VoiceSynthesizer,
+        models::resolve_speech_model_paths, runtime::SpeechRuntime, SynthesisCancellationCheck,
+        SynthesisHooks, SynthesisProgressCallback, SynthesisRequest, Transcriber,
     },
     state::AppState,
     translation::{legacy_ptbr_postprocess, TranslationProvider},
@@ -11,7 +11,12 @@ use crate::{
 use dublagem_domain::{
     DubbingJobEvent, DubbingRequest, JobEventKind, JobId, JobStage, TranslationRequest,
 };
-use std::{collections::HashMap, future::Future, path::Path, sync::Arc};
+use std::{
+    collections::HashMap,
+    future::Future,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 use tauri::{AppHandle, Emitter};
 use tokio::sync::Mutex;
 use tokio::time::{timeout as tokio_timeout, Duration};
@@ -61,6 +66,7 @@ impl JobManager {
 #[derive(Debug, Clone)]
 struct FileContext {
     file_name: String,
+    file_path: PathBuf,
     file_index: usize,
     total_files: usize,
 }
@@ -84,9 +90,18 @@ pub async fn start_dubbing_job(
     let cancellation = state.jobs.register(job_id).await;
     let jobs = Arc::clone(&state.jobs);
     let translator = Arc::clone(&state.translator);
+    let speech = Arc::clone(&state.speech);
 
     tauri::async_runtime::spawn(async move {
-        let result = run_job(app.clone(), job_id, cancellation, request, translator).await;
+        let result = run_job(
+            app.clone(),
+            job_id,
+            cancellation,
+            request,
+            translator,
+            speech,
+        )
+        .await;
         jobs.finish(job_id).await;
 
         if let Err(error) = result {
@@ -114,6 +129,7 @@ async fn run_job(
     cancellation: CancellationToken,
     request: DubbingRequest,
     translator: Arc<dyn TranslationProvider>,
+    speech: Arc<SpeechRuntime>,
 ) -> AppResult<()> {
     if request.input_paths.is_empty() {
         return Err(AppError::InvalidConfig(
@@ -133,32 +149,29 @@ async fn run_job(
     )?;
 
     let requested_model_dir = request.model_dir.clone();
-    let model_paths = cancellable_phase(
+    let speech_engines = cancellable_phase(
         &app,
         job_id,
         &cancellation,
         None,
-        "validacao de modelos",
+        "validacao e carga de modelos",
         MODEL_LOADING_TIMEOUT,
         async move {
-            tauri::async_runtime::spawn_blocking(move || {
+            let model_paths = tauri::async_runtime::spawn_blocking(move || {
                 resolve_speech_model_paths(requested_model_dir.as_deref())
             })
             .await
-            .map_err(|error| AppError::Internal(error.to_string()))?
+            .map_err(|error| AppError::Internal(error.to_string()))??;
+            let transcriber = speech.transcriber(model_paths.whisper_model_path).await?;
+            let synthesizer = speech.synthesizer(model_paths.omnivoice_model_dir).await?;
+            Ok((transcriber, synthesizer))
         },
     )
     .await?;
-    let Some(model_paths) = model_paths else {
+    let Some((transcriber, synthesizer)) = speech_engines else {
         emit_cancelled(&app, job_id, None)?;
         return Ok(());
     };
-    let transcriber: Arc<dyn Transcriber> = Arc::new(WhisperRsTranscriber::new(Some(
-        model_paths.whisper_model_path,
-    )));
-    let synthesizer: Arc<dyn VoiceSynthesizer> = Arc::new(OmniVoiceCandleSynthesizer::new(Some(
-        model_paths.omnivoice_model_dir,
-    )));
 
     emit_stage(
         &app,
@@ -177,6 +190,7 @@ async fn run_job(
             .to_string();
         let context = FileContext {
             file_name,
+            file_path: input_path.clone(),
             file_index: index,
             total_files: total,
         };
@@ -260,7 +274,6 @@ async fn run_job(
                 text: &target_text,
                 source_audio: input_path,
                 reference_audio,
-                reference_text: &source_text,
                 output_path: &output_path,
                 options: request.options,
                 hooks: synthesis_hooks,
@@ -287,6 +300,12 @@ async fn run_job(
             "Arquivo de saida escrito.",
             Some(context.progress(92)),
             Some(&context),
+        )?;
+        audio::save_transcription_cache(
+            &request.output_dir,
+            &context.file_name,
+            &source_text,
+            &target_text,
         )?;
         emit(
             &app,
@@ -674,6 +693,7 @@ fn event(
         message: message.into(),
         progress,
         file_name: context.map(|item| item.file_name.clone()),
+        file_path: context.map(|item| item.file_path.clone()),
         file_index: context.map(|item| item.file_index + 1),
         total_files: context.map(|item| item.total_files),
         source_text: None,

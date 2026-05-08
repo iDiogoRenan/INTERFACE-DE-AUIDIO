@@ -48,10 +48,10 @@ export function DubbingPanel() {
 
   return (
     <div className={styles.layout}>
-      <div className={styles.players}>
+      <section className={styles.players} aria-label="Players de áudio">
         <AudioPlayer title="Origem" path={selectedPath} />
         <AudioPlayer title="Resultado" path={lastOutputPath} />
-      </div>
+      </section>
 
       <section className={styles.editorGrid}>
         <label>
@@ -136,7 +136,7 @@ export function DubbingPanel() {
         </p>
       </section>
 
-      <section className={styles.logPanel}>
+      <section className={styles.logPanel} aria-label="Log de execução">
         {logs.map((entry) => (
           <p key={entry.id} data-level={entry.level}>
             {entry.message}

@@ -1,6 +1,6 @@
 .panel {
   display: grid;
-  grid-template-rows: auto auto minmax(0, 1fr);
+  grid-template-rows: var(--workspace-header-block-size, 88px) auto minmax(0, 1fr);
   min-width: 300px;
   border-right: 1px solid var(--border);
   background: var(--surface-0);
@@ -10,6 +10,7 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
+  min-block-size: 100%;
   padding: 18px;
   border-bottom: 1px solid var(--border);
 }
@@ -42,7 +43,7 @@
   grid-template-columns: 18px minmax(0, 1fr);
   align-items: center;
   gap: 8px;
-  margin: 14px;
+  margin: 18px 14px 14px;
   padding: 8px;
   border: 1px solid var(--border);
   background: var(--surface-1);

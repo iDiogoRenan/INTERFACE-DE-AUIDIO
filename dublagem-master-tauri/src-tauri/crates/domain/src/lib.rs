@@ -122,6 +122,14 @@ pub struct AudioFileEntry {
     pub family: String,
     pub status: AudioFileStatus,
     pub metadata: Option<AudioMetadata>,
+    pub transcription: Option<CachedTranscription>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CachedTranscription {
+    pub source_text: String,
+    pub target_text: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -196,6 +204,7 @@ pub struct DubbingJobEvent {
     pub message: String,
     pub progress: Option<u8>,
     pub file_name: Option<String>,
+    pub file_path: Option<PathBuf>,
     pub file_index: Option<usize>,
     pub total_files: Option<usize>,
     pub source_text: Option<String>,

@@ -14,11 +14,15 @@ use dublagem_domain::DubbingOptions;
 use dublagem_domain::LanguageCode;
 #[cfg(feature = "ml")]
 use omnivoice_infer::{
-    contracts::{DecodedAudio, GenerationRequest, ReferenceAudioInput, WaveformInput},
+    contracts::{
+        DecodedAudio, GenerationRequest, ReferenceAudioInput, VoiceClonePrompt, WaveformInput,
+    },
     pipeline::Phase3Pipeline,
     DTypeSpec, DeviceSpec, OmniVoiceError, RuntimeOptions,
 };
 use std::path::{Path, PathBuf};
+#[cfg(feature = "ml")]
+use std::sync::{Arc, Mutex};
 
 #[cfg(feature = "ml")]
 const SYNTHESIS_SEGMENT_TARGET_SECONDS: f32 = 8.0;
@@ -40,15 +44,16 @@ const REFERENCE_MAX_SECONDS: f32 = 10.0;
 #[cfg(feature = "ml")]
 struct ShortReferencePrompt {
     audio: ReferenceAudioInput,
-    text: String,
 }
+
+#[cfg(feature = "ml")]
+type SharedPhase3Pipeline = Arc<Mutex<Phase3Pipeline>>;
 
 #[cfg(feature = "ml")]
 struct OwnedSynthesisRequest {
     text: String,
     source_audio: PathBuf,
     reference_audio: PathBuf,
-    reference_text: String,
     output_path: PathBuf,
     options: DubbingOptions,
     hooks: SynthesisHooks,
@@ -61,7 +66,6 @@ impl OwnedSynthesisRequest {
             text: request.text.to_string(),
             source_audio: request.source_audio.to_path_buf(),
             reference_audio: request.reference_audio.to_path_buf(),
-            reference_text: request.reference_text.to_string(),
             output_path: request.output_path.to_path_buf(),
             options: request.options,
             hooks: request.hooks,
@@ -72,11 +76,25 @@ impl OwnedSynthesisRequest {
 #[derive(Debug, Clone, Default)]
 pub struct OmniVoiceCandleSynthesizer {
     model_dir: Option<PathBuf>,
+    #[cfg(feature = "ml")]
+    pipeline: Option<SharedPhase3Pipeline>,
 }
 
 impl OmniVoiceCandleSynthesizer {
-    pub fn new(model_dir: Option<PathBuf>) -> Self {
-        Self { model_dir }
+    #[cfg(feature = "ml")]
+    pub async fn preload(model_dir: PathBuf) -> AppResult<Self> {
+        let pipeline = load_shared_pipeline(model_dir.clone()).await?;
+        Ok(Self {
+            model_dir: Some(model_dir),
+            pipeline: Some(pipeline),
+        })
+    }
+
+    #[cfg(not(feature = "ml"))]
+    pub async fn preload(model_dir: PathBuf) -> AppResult<Self> {
+        Ok(Self {
+            model_dir: Some(model_dir),
+        })
     }
 }
 
@@ -90,6 +108,11 @@ impl VoiceSynthesizer for OmniVoiceCandleSynthesizer {
             ));
         };
 
+        #[cfg(feature = "ml")]
+        if let Some(pipeline) = &self.pipeline {
+            return synthesize_with_pipeline(Arc::clone(pipeline), request).await;
+        }
+
         synthesize_with_model(model_dir, request).await
     }
 
@@ -102,6 +125,11 @@ impl VoiceSynthesizer for OmniVoiceCandleSynthesizer {
         };
 
         std::fs::create_dir_all(output_dir)?;
+        #[cfg(feature = "ml")]
+        if let Some(pipeline) = &self.pipeline {
+            return generate_pool_with_pipeline(Arc::clone(pipeline), output_dir).await;
+        }
+
         generate_pool_with_model(model_dir, output_dir).await
     }
 }
@@ -111,9 +139,29 @@ async fn synthesize_with_model(model_dir: &Path, request: SynthesisRequest<'_>) 
     let model_dir = model_dir.to_path_buf();
     let request = OwnedSynthesisRequest::from_request(request);
 
-    tauri::async_runtime::spawn_blocking(move || synthesize_blocking(model_dir, request))
-        .await
-        .map_err(|error| AppError::Internal(error.to_string()))?
+    tauri::async_runtime::spawn_blocking(move || {
+        let pipeline = load_pipeline(model_dir)?;
+        synthesize_blocking_with_pipeline(&pipeline, request)
+    })
+    .await
+    .map_err(|error| AppError::Internal(error.to_string()))?
+}
+
+#[cfg(feature = "ml")]
+async fn synthesize_with_pipeline(
+    pipeline: SharedPhase3Pipeline,
+    request: SynthesisRequest<'_>,
+) -> AppResult<()> {
+    let request = OwnedSynthesisRequest::from_request(request);
+
+    tauri::async_runtime::spawn_blocking(move || {
+        let pipeline = pipeline
+            .lock()
+            .map_err(|error| AppError::Internal(error.to_string()))?;
+        synthesize_blocking_with_pipeline(&pipeline, request)
+    })
+    .await
+    .map_err(|error| AppError::Internal(error.to_string()))?
 }
 
 #[cfg(not(feature = "ml"))]
@@ -130,42 +178,67 @@ async fn generate_pool_with_model(model_dir: &Path, output_dir: &Path) -> AppRes
 
     tauri::async_runtime::spawn_blocking(move || {
         let pipeline = load_pipeline(model_dir)?;
-        let mut paths = Vec::new();
-
-        for profile in ptbr_voice_profiles() {
-            let output_path = output_dir.join(format!("{}.wav", profile.id));
-            if output_path.is_file() {
-                paths.push(output_path);
-                continue;
-            }
-
-            let mut request = GenerationRequest::new_text_only(profile.reference_text);
-            request.languages = vec![Some("pt".to_string())];
-            request.instructs = vec![Some(profile.instruct)];
-            request.generation_config.num_step = 32;
-            request.generation_config.guidance_scale = 2.0;
-            request.generation_config.position_temperature = 1.0;
-            request.generation_config.class_temperature = 0.0;
-            request.generation_config.postprocess_output = true;
-
-            let audio = pipeline
-                .generate(&request)
-                .map_err(map_omnivoice_error)?
-                .into_iter()
-                .next()
-                .ok_or_else(|| {
-                    AppError::SpeechEngineUnavailable(
-                        "OmniVoice nao gerou audio para o perfil PT-BR.".to_string(),
-                    )
-                })?;
-            audio.write_wav(&output_path).map_err(map_omnivoice_error)?;
-            paths.push(output_path);
-        }
-
-        Ok(paths)
+        generate_pool_blocking(&pipeline, output_dir)
     })
     .await
     .map_err(|error| AppError::Internal(error.to_string()))?
+}
+
+#[cfg(feature = "ml")]
+async fn generate_pool_with_pipeline(
+    pipeline: SharedPhase3Pipeline,
+    output_dir: &Path,
+) -> AppResult<Vec<PathBuf>> {
+    let output_dir = output_dir.to_path_buf();
+
+    tauri::async_runtime::spawn_blocking(move || {
+        let pipeline = pipeline
+            .lock()
+            .map_err(|error| AppError::Internal(error.to_string()))?;
+        generate_pool_blocking(&pipeline, output_dir)
+    })
+    .await
+    .map_err(|error| AppError::Internal(error.to_string()))?
+}
+
+#[cfg(feature = "ml")]
+fn generate_pool_blocking(
+    pipeline: &Phase3Pipeline,
+    output_dir: PathBuf,
+) -> AppResult<Vec<PathBuf>> {
+    let mut paths = Vec::new();
+
+    for profile in ptbr_voice_profiles() {
+        let output_path = output_dir.join(format!("{}.wav", profile.id));
+        if output_path.is_file() {
+            paths.push(output_path);
+            continue;
+        }
+
+        let mut request = GenerationRequest::new_text_only(profile.reference_text);
+        request.languages = vec![Some("pt".to_string())];
+        request.instructs = vec![Some(profile.instruct)];
+        request.generation_config.num_step = 32;
+        request.generation_config.guidance_scale = 2.0;
+        request.generation_config.position_temperature = 1.0;
+        request.generation_config.class_temperature = 0.0;
+        request.generation_config.postprocess_output = true;
+
+        let audio = pipeline
+            .generate(&request)
+            .map_err(map_omnivoice_error)?
+            .into_iter()
+            .next()
+            .ok_or_else(|| {
+                AppError::SpeechEngineUnavailable(
+                    "OmniVoice nao gerou audio para o perfil PT-BR.".to_string(),
+                )
+            })?;
+        audio.write_wav(&output_path).map_err(map_omnivoice_error)?;
+        paths.push(output_path);
+    }
+
+    Ok(paths)
 }
 
 #[cfg(not(feature = "ml"))]
@@ -183,7 +256,10 @@ async fn generate_pool_with_model(_model_dir: &Path, output_dir: &Path) -> AppRe
 }
 
 #[cfg(feature = "ml")]
-fn synthesize_blocking(model_dir: PathBuf, request: OwnedSynthesisRequest) -> AppResult<()> {
+fn synthesize_blocking_with_pipeline(
+    pipeline: &Phase3Pipeline,
+    request: OwnedSynthesisRequest,
+) -> AppResult<()> {
     let timing = audio_timing_profile(&request.source_audio, request.options.pad_ms)?;
     let target_duration = timing.target_voice_duration_seconds();
     let segments = synthesis_segments(&request.text, target_duration);
@@ -194,9 +270,10 @@ fn synthesize_blocking(model_dir: PathBuf, request: OwnedSynthesisRequest) -> Ap
     }
     request.hooks.report(0, segments.len());
 
-    let pipeline = load_pipeline(model_dir)?;
-    let short_reference =
-        prepare_short_reference(&request.reference_audio, &request.reference_text, timing)?;
+    let short_reference = prepare_short_reference(&request.reference_audio)?;
+    let voice_clone_prompt = pipeline
+        .create_voice_clone_prompt_from_audio(&short_reference.audio, None, true, None)
+        .map_err(map_omnivoice_error)?;
     let durations = segment_durations(&segments, target_duration);
     let mut segment_audio = Vec::with_capacity(segments.len());
 
@@ -206,11 +283,10 @@ fn synthesize_blocking(model_dir: PathBuf, request: OwnedSynthesisRequest) -> Ap
         }
 
         let audio = synthesize_segment(
-            &pipeline,
+            pipeline,
             segment,
             durations[index],
-            &short_reference.audio,
-            &short_reference.text,
+            &voice_clone_prompt,
             request.options,
         )?;
         segment_audio.push(audio);
@@ -237,14 +313,12 @@ fn synthesize_segment(
     pipeline: &Phase3Pipeline,
     text: &str,
     target_duration_seconds: Option<f32>,
-    reference_audio: &ReferenceAudioInput,
-    reference_text: &str,
+    voice_clone_prompt: &VoiceClonePrompt,
     options: DubbingOptions,
 ) -> AppResult<DecodedAudio> {
     let mut request = generation_request(
         text.to_string(),
-        reference_audio,
-        reference_text,
+        voice_clone_prompt,
         target_duration_seconds,
         options,
         SYNTHESIS_NUM_STEPS,
@@ -288,18 +362,25 @@ fn load_pipeline(model_dir: PathBuf) -> AppResult<Phase3Pipeline> {
 }
 
 #[cfg(feature = "ml")]
+async fn load_shared_pipeline(model_dir: PathBuf) -> AppResult<SharedPhase3Pipeline> {
+    tauri::async_runtime::spawn_blocking(move || {
+        load_pipeline(model_dir).map(|pipeline| Arc::new(Mutex::new(pipeline)))
+    })
+    .await
+    .map_err(|error| AppError::Internal(error.to_string()))?
+}
+
+#[cfg(feature = "ml")]
 fn generation_request(
     text: String,
-    reference_audio: &ReferenceAudioInput,
-    reference_text: &str,
+    voice_clone_prompt: &VoiceClonePrompt,
     target_duration_seconds: Option<f32>,
     options: DubbingOptions,
     num_step: usize,
 ) -> GenerationRequest {
     let mut request = GenerationRequest::new_text_only(text);
     request.languages = vec![language_for_omnivoice(options.target_language)];
-    request.ref_audios = vec![Some(reference_audio.clone())];
-    request.ref_texts = vec![non_empty_string(reference_text)];
+    request.voice_clone_prompts = vec![Some(voice_clone_prompt.clone())];
     request.durations = vec![target_duration_seconds];
     request.generation_config.num_step = num_step;
     request.generation_config.guidance_scale = 2.0;
@@ -316,11 +397,7 @@ fn generation_request(
 }
 
 #[cfg(feature = "ml")]
-fn prepare_short_reference(
-    reference_audio: &Path,
-    source_text: &str,
-    timing: AudioTimingProfile,
-) -> AppResult<ShortReferencePrompt> {
+fn prepare_short_reference(reference_audio: &Path) -> AppResult<ShortReferencePrompt> {
     let decoded = decode_audio_mono_f32(reference_audio)?;
     let peak = decoded
         .samples
@@ -362,40 +439,9 @@ fn prepare_short_reference(
         ));
     }
 
-    let duration_seconds = samples.len() as f32 / decoded.sample_rate as f32;
-    let text = reference_text_excerpt(
-        source_text,
-        duration_seconds,
-        timing
-            .target_voice_duration_seconds()
-            .unwrap_or(duration_seconds),
-    );
-
     Ok(ShortReferencePrompt {
         audio: ReferenceAudioInput::Waveform(WaveformInput::mono(samples, decoded.sample_rate)),
-        text,
     })
-}
-
-#[cfg(feature = "ml")]
-fn reference_text_excerpt(
-    source_text: &str,
-    reference_seconds: f32,
-    source_voice_seconds: f32,
-) -> String {
-    let words = source_text.split_whitespace().collect::<Vec<_>>();
-    if words.is_empty() {
-        return String::new();
-    }
-
-    let ratio = if source_voice_seconds > f32::EPSILON {
-        (reference_seconds / source_voice_seconds).clamp(0.03, 1.0)
-    } else {
-        1.0
-    };
-    let word_count =
-        ((words.len() as f32 * ratio).ceil() as usize).clamp(4.min(words.len()), words.len());
-    words[..word_count].join(" ")
 }
 
 #[cfg(feature = "ml")]
@@ -600,12 +646,6 @@ fn sanitize_sample(sample: f32) -> f32 {
 #[cfg(feature = "ml")]
 fn language_for_omnivoice(language: LanguageCode) -> Option<String> {
     language.as_bcp47().map(str::to_string)
-}
-
-#[cfg(feature = "ml")]
-fn non_empty_string(value: &str) -> Option<String> {
-    let trimmed = value.trim();
-    (!trimmed.is_empty()).then(|| trimmed.to_string())
 }
 
 #[cfg(feature = "ml")]

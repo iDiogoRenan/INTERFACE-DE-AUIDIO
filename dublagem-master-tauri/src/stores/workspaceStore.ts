@@ -15,12 +15,18 @@ export interface LogEntry {
   message: string;
 }
 
+interface TranscriptionDraft {
+  sourceText: string;
+  targetText: string;
+}
+
 interface WorkspaceState {
   config: AppConfig;
   files: AudioFileEntry[];
   selectedPath: string | null;
   sourceText: string;
   targetText: string;
+  transcriptionDrafts: Record<string, TranscriptionDraft>;
   logs: LogEntry[];
   activeJobId: string | null;
   currentStage: JobStage | null;
@@ -59,6 +65,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   selectedPath: null,
   sourceText: "",
   targetText: "",
+  transcriptionDrafts: {},
   logs: [],
   activeJobId: null,
   currentStage: null,
@@ -82,22 +89,49 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     set({ config: saved });
   },
   scan: async () => {
-    const { config } = get();
+    const { config, selectedPath } = get();
     if (!config.inputDir) {
       get().appendLog("Selecione a pasta de origem antes de escanear.", "warning");
       return;
     }
     const files = await tauriClient.scanAudioFolder(config.inputDir, config.outputDir);
-    set({ files, selectedPath: files[0]?.path ?? null });
+    const nextSelectedPath = files.some((file) => file.path === selectedPath)
+      ? selectedPath
+      : (files[0]?.path ?? null);
+    const transcriptionDrafts = {
+      ...draftsFromFiles(files),
+      ...get().transcriptionDrafts
+    };
+    set({
+      files,
+      selectedPath: nextSelectedPath,
+      lastOutputPath: outputPathForSelection(nextSelectedPath, files, config),
+      transcriptionDrafts,
+      ...draftStateForPath(nextSelectedPath, transcriptionDrafts, files)
+    });
   },
   selectFile: (path) => {
-    set({ selectedPath: path });
+    set((state) => ({
+      selectedPath: path,
+      lastOutputPath: outputPathForSelection(path, state.files, state.config),
+      ...draftStateForPath(path, state.transcriptionDrafts, state.files)
+    }));
   },
   setSourceText: (sourceText) => {
-    set({ sourceText });
+    set((state) => ({
+      sourceText,
+      transcriptionDrafts: upsertDraft(state.transcriptionDrafts, state.selectedPath, {
+        sourceText
+      })
+    }));
   },
   setTargetText: (targetText) => {
-    set({ targetText });
+    set((state) => ({
+      targetText,
+      transcriptionDrafts: upsertDraft(state.transcriptionDrafts, state.selectedPath, {
+        targetText
+      })
+    }));
   },
   startDubbing: async () => {
     const { config, selectedPath, sourceText, targetText } = get();
@@ -218,6 +252,8 @@ async function registerJobListeners(): Promise<void> {
 }
 
 function applyJobEvent(payload: DubbingJobEvent): void {
+  const state = useWorkspaceStore.getState();
+  const eventPath = payload.filePath ?? state.selectedPath;
   const update: Partial<WorkspaceState> = {
     currentStatus: payload.message
   };
@@ -237,17 +273,110 @@ function applyJobEvent(payload: DubbingJobEvent): void {
   if (payload.totalFiles !== null) {
     update.totalFiles = payload.totalFiles;
   }
+
+  const transcriptionPatch: Partial<TranscriptionDraft> = {};
   if (payload.sourceText !== null) {
-    update.sourceText = payload.sourceText;
+    transcriptionPatch.sourceText = payload.sourceText;
   }
   if (payload.targetText !== null) {
+    transcriptionPatch.targetText = payload.targetText;
+  }
+  if (Object.keys(transcriptionPatch).length > 0) {
+    update.transcriptionDrafts = upsertDraft(
+      state.transcriptionDrafts,
+      eventPath,
+      transcriptionPatch
+    );
+  }
+
+  const shouldHydrateSelectedEditor = eventPath === state.selectedPath;
+  if (shouldHydrateSelectedEditor && payload.sourceText !== null) {
+    update.sourceText = payload.sourceText;
+  }
+  if (shouldHydrateSelectedEditor && payload.targetText !== null) {
     update.targetText = payload.targetText;
   }
-  if (payload.outputPath !== null) {
+  if (shouldHydrateSelectedEditor && payload.outputPath !== null) {
     update.lastOutputPath = payload.outputPath;
+  }
+  if (eventPath && payload.outputPath !== null) {
+    update.files = state.files.map((file) =>
+      file.path === eventPath ? { ...file, status: "dubbed" } : file
+    );
   }
 
   useWorkspaceStore.setState(update);
+}
+
+function outputPathForSelection(
+  selectedPath: string | null,
+  files: AudioFileEntry[],
+  config: AppConfig
+): string | null {
+  if (!selectedPath || !config.outputDir) {
+    return null;
+  }
+
+  const selectedFile = files.find((file) => file.path === selectedPath);
+  if (selectedFile?.status !== "dubbed") {
+    return null;
+  }
+
+  return joinNativePath(config.outputDir, selectedFile.name);
+}
+
+function joinNativePath(directory: string, fileName: string): string {
+  const separator = directory.includes("\\") ? "\\" : "/";
+  return `${directory.replace(/[\\/]+$/u, "")}${separator}${fileName}`;
+}
+
+function draftsFromFiles(files: AudioFileEntry[]): Record<string, TranscriptionDraft> {
+  return files.reduce<Record<string, TranscriptionDraft>>((drafts, file) => {
+    if (file.transcription) {
+      drafts[file.path] = {
+        sourceText: file.transcription.sourceText,
+        targetText: file.transcription.targetText
+      };
+    }
+    return drafts;
+  }, {});
+}
+
+function draftStateForPath(
+  path: string | null,
+  drafts: Record<string, TranscriptionDraft>,
+  files: AudioFileEntry[] = []
+): Pick<WorkspaceState, "sourceText" | "targetText"> {
+  if (!path) {
+    return { sourceText: "", targetText: "" };
+  }
+
+  const cached = files.find((file) => file.path === path)?.transcription;
+  return (
+    drafts[path] ??
+    (cached
+      ? { sourceText: cached.sourceText, targetText: cached.targetText }
+      : { sourceText: "", targetText: "" })
+  );
+}
+
+function upsertDraft(
+  drafts: Record<string, TranscriptionDraft>,
+  path: string | null,
+  patch: Partial<TranscriptionDraft>
+): Record<string, TranscriptionDraft> {
+  if (!path) {
+    return drafts;
+  }
+
+  const current = drafts[path] ?? { sourceText: "", targetText: "" };
+  return {
+    ...drafts,
+    [path]: {
+      ...current,
+      ...patch
+    }
+  };
 }
 
 function errorMessage(error: unknown): string {

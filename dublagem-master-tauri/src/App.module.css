@@ -1,8 +1,11 @@
 .shell {
+  --workspace-header-block-size: 88px;
+
   display: grid;
   grid-template-columns: 340px minmax(0, 1fr);
   width: 100vw;
-  height: 100vh;
+  height: 100dvh;
+  min-height: 0;
   overflow: hidden;
   background: var(--surface-0);
   color: var(--text);
@@ -20,6 +23,7 @@
   align-items: center;
   justify-content: space-between;
   gap: 18px;
+  min-block-size: var(--workspace-header-block-size);
   border-bottom: 1px solid var(--border);
   background: var(--surface-1);
   padding: 18px 22px;
@@ -67,7 +71,13 @@
 }
 
 .content {
+  display: grid;
+  grid-template-rows: minmax(0, 1fr);
   min-height: 0;
-  overflow: hidden;
+  overflow: auto;
   padding: 18px;
+}
+
+.content[hidden] {
+  display: none;
 }

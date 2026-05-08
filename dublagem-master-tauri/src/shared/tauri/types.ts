@@ -66,6 +66,12 @@ export interface AudioFileEntry {
   family: string;
   status: AudioFileStatus;
   metadata: AudioMetadata | null;
+  transcription: CachedTranscription | null;
+}
+
+export interface CachedTranscription {
+  sourceText: string;
+  targetText: string;
 }
 
 export interface TranscriptionResult {
@@ -103,6 +109,7 @@ export interface DubbingJobEvent {
   message: string;
   progress: number | null;
   fileName: string | null;
+  filePath: string | null;
   fileIndex: number | null;
   totalFiles: number | null;
   sourceText: string | null;

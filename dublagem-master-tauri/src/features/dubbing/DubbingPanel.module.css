@@ -1,7 +1,9 @@
 .layout {
   display: grid;
-  grid-template-rows: auto minmax(210px, 1fr) auto auto minmax(140px, 0.65fr);
+  grid-template-rows: auto minmax(150px, 1fr) auto auto minmax(96px, 0.55fr);
   gap: 14px;
+  block-size: 100%;
+  min-block-size: 100%;
   min-height: 0;
 }
 
@@ -26,7 +28,7 @@
 }
 
 .editorGrid textarea {
-  min-height: 180px;
+  min-height: 140px;
   resize: none;
   border: 1px solid var(--border);
   background: var(--surface-1);
@@ -201,5 +203,29 @@
 @keyframes spin {
   to {
     transform: rotate(360deg);
+  }
+}
+
+@media (max-height: 760px) {
+  .layout {
+    grid-template-rows: auto minmax(112px, 1fr) auto auto minmax(74px, 0.45fr);
+    gap: 10px;
+  }
+
+  .editorGrid textarea {
+    min-height: 112px;
+  }
+
+  .jobStatus {
+    gap: 8px;
+    padding: 10px;
+  }
+
+  .stageRail {
+    gap: 6px;
+  }
+
+  .stageRail span {
+    min-height: 28px;
   }
 }
