@@ -1,0 +1,42 @@
+.player {
+  display: grid;
+  gap: 10px;
+  border: 1px solid var(--border);
+  background: var(--surface-1);
+  padding: 12px;
+}
+
+.header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 750;
+  text-transform: uppercase;
+}
+
+.header button {
+  display: grid;
+  width: 32px;
+  height: 32px;
+  place-items: center;
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  color: var(--text);
+  cursor: pointer;
+}
+
+.player audio {
+  width: 100%;
+  height: 38px;
+}
+
+.empty {
+  display: grid;
+  min-height: 38px;
+  place-items: center;
+  border: 1px dashed var(--border);
+  color: var(--text-muted);
+  font-size: 12px;
+}

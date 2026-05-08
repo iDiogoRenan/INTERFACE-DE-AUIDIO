@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "models": [
+    {
+      "id": "whisper-medium-ggml",
+      "engine": "whisper-rs",
+      "path": "models/whisper/ggml-medium.bin",
+      "sha256": "replace-with-real-sha256"
+    },
+    {
+      "id": "omnivoice-candle",
+      "engine": "omnivoice-candle",
+      "path": "models/omnivoice",
+      "sha256": "replace-with-real-sha256"
+    }
+  ]
+}

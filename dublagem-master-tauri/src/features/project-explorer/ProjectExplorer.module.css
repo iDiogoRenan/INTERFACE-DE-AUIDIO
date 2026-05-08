@@ -1,0 +1,107 @@
+.panel {
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr);
+  min-width: 300px;
+  border-right: 1px solid var(--border);
+  background: var(--surface-0);
+}
+
+.header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 18px;
+  border-bottom: 1px solid var(--border);
+}
+
+.header h2 {
+  margin: 2px 0 0;
+  font-size: 18px;
+}
+
+.kicker {
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 750;
+  text-transform: uppercase;
+}
+
+.iconButton {
+  display: grid;
+  width: 36px;
+  height: 36px;
+  place-items: center;
+  border: 1px solid var(--border);
+  background: var(--surface-1);
+  color: var(--text);
+  cursor: pointer;
+}
+
+.filter {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  margin: 14px;
+  padding: 8px;
+  border: 1px solid var(--border);
+  background: var(--surface-1);
+  color: var(--text-muted);
+}
+
+.filter select {
+  min-width: 0;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  outline: none;
+}
+
+.list {
+  min-height: 0;
+  overflow: auto;
+  padding: 0 10px 12px;
+}
+
+.item,
+.selectedItem {
+  display: grid;
+  grid-template-columns: 20px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-height: 42px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+  text-align: left;
+}
+
+.item:hover,
+.selectedItem {
+  border-color: var(--border-strong);
+  background: var(--surface-1);
+}
+
+.fileName {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.status {
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.status[data-status="dubbed"],
+.status[data-status="approved"] {
+  color: var(--success);
+}
+
+.status[data-status="failed"],
+.status[data-status="rejected"] {
+  color: var(--danger);
+}

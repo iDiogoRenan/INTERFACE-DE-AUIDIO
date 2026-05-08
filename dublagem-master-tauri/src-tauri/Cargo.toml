@@ -1,0 +1,51 @@
+[package]
+name = "dublagem-master-tauri"
+version = "0.1.0"
+description = "Dublagem Master desktop application"
+authors = ["Dublagem Master"]
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[workspace]
+members = [".", "crates/domain"]
+resolver = "2"
+
+[lib]
+# The `_lib` suffix may seem redundant but it is necessary
+# to make the lib name unique and wouldn't conflict with the bin name.
+# This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
+name = "dublagem_master_tauri_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-opener = "2"
+tauri-plugin-dialog = "2"
+dublagem-domain = { path = "crates/domain" }
+async-trait = "0.1"
+chrono = { version = "0.4", features = ["serde"] }
+directories = "6"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+symphonia = { version = "0.5", features = ["flac", "mp3", "ogg", "pcm", "vorbis", "wav"] }
+thiserror = "2"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
+tokio-util = "0.7"
+uuid = { version = "1", features = ["serde", "v4"] }
+whisper-rs = { version = "0.16", optional = true }
+candle-core = { version = "0.10", optional = true }
+candle-nn = { version = "0.10", optional = true }
+
+[dev-dependencies]
+tempfile = "3"
+
+[features]
+default = []
+ml = ["dep:whisper-rs", "dep:candle-core", "dep:candle-nn"]
+
