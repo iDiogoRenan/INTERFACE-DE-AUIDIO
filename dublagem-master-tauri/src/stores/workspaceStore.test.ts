@@ -51,6 +51,7 @@ describe("workspaceStore transcription hydration", () => {
       sourceText: "",
       targetText: "",
       transcriptionDrafts: {},
+      transcriptionBaselines: {},
       activeJobId: null,
       currentStage: null,
       currentStatus: "Aguardando job.",
@@ -126,6 +127,34 @@ describe("workspaceStore transcription hydration", () => {
     await useWorkspaceStore.getState().scan();
 
     expect(useWorkspaceStore.getState().selectedPath).toBe(cachedDubbedFile.path);
+    expect(useWorkspaceStore.getState().sourceText).toBe("Hello from cache.");
+    expect(useWorkspaceStore.getState().targetText).toBe("Ola do cache.");
+  });
+
+  it("sends the edited cached transcription when redubbing a processed file", async () => {
+    useWorkspaceStore.setState({ files: [cachedDubbedFile], selectedPath: null });
+    useWorkspaceStore.getState().selectFile(cachedDubbedFile.path);
+    useWorkspaceStore.getState().setTargetText("Texto revisado para nova sintese.");
+
+    await useWorkspaceStore.getState().startDubbing();
+
+    expect(clientMocks.startDubbingJob).toHaveBeenCalledWith(
+      expect.objectContaining({
+        inputPaths: [cachedDubbedFile.path],
+        customSourceText: "Hello from cache.",
+        customTargetText: "Texto revisado para nova sintese."
+      })
+    );
+  });
+
+  it("reverts edited transcription fields to the selected file baseline", () => {
+    useWorkspaceStore.setState({ files: [cachedDubbedFile], selectedPath: null });
+    useWorkspaceStore.getState().selectFile(cachedDubbedFile.path);
+    useWorkspaceStore.getState().setSourceText("Edited source text.");
+    useWorkspaceStore.getState().setTargetText("Texto editado.");
+
+    useWorkspaceStore.getState().revertTranscription();
+
     expect(useWorkspaceStore.getState().sourceText).toBe("Hello from cache.");
     expect(useWorkspaceStore.getState().targetText).toBe("Ola do cache.");
   });

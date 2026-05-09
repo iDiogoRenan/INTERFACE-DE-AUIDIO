@@ -13,6 +13,7 @@ test("keeps dubbing controls and job status reachable in a short window", async 
   await page.goto("/");
 
   await expect(page.getByRole("button", { name: /Dublar selecionado/u })).toBeVisible();
+  await expect(page.getByRole("button", { name: /Reverter transcrição/u })).toBeVisible();
   await expect(page.getByText("Fila sem arquivo ativo")).toBeVisible();
 });
 

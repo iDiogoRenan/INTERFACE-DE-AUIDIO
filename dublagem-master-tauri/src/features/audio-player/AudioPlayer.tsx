@@ -1,7 +1,14 @@
 import { convertFileSrc } from "@tauri-apps/api/core";
-import { Pause, Play } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { Pause, Play, RotateCcw, ScanLine } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { isTauriRuntime, tauriClient } from "../../shared/tauri/client";
+import {
+  buildWaveformPeaks,
+  drawWaveform,
+  formatClockTime,
+  type WaveformPeak,
+  type WaveformTheme
+} from "./audioWaveform";
 import styles from "./AudioPlayer.module.css";
 
 interface AudioPlayerProps {
@@ -15,26 +22,102 @@ interface PreviewState {
   error: string | null;
 }
 
+interface WaveformState {
+  source: string;
+  peaks: WaveformPeak[];
+  durationSeconds: number;
+  error: string | null;
+}
+
 interface PlaybackError {
   path: string;
   message: string;
 }
 
+const waveformBars = 240;
+const waveformTheme: WaveformTheme = {
+  background: "#16202a",
+  centerLine: "#344453",
+  grid: "#516273",
+  progress: "#e35d52",
+  waveform: "#61b7ef",
+  playhead: "#f0b64a",
+  text: "#c6d0d9"
+};
+
 export function AudioPlayer({ title, path }: AudioPlayerProps) {
   const audioRef = useRef<HTMLAudioElement | null>(null);
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const [isPlaying, setIsPlaying] = useState(false);
+  const [currentTime, setCurrentTime] = useState(0);
+  const [nativeDuration, setNativeDuration] = useState(0);
   const [preview, setPreview] = useState<PreviewState | null>(null);
+  const [waveform, setWaveform] = useState<WaveformState | null>(null);
   const [playbackError, setPlaybackError] = useState<PlaybackError | null>(null);
   const currentPreview = preview?.path === path ? preview : null;
   const source = currentPreview?.source ?? null;
+  const currentWaveform = waveform?.source === source ? waveform : null;
+  const durationSeconds = currentWaveform?.durationSeconds ?? nativeDuration;
+  const progress = durationSeconds > 0 ? currentTime / durationSeconds : 0;
   const error =
-    playbackError?.path === path ? playbackError.message : (currentPreview?.error ?? null);
+    playbackError?.path === path
+      ? playbackError.message
+      : (currentPreview?.error ?? currentWaveform?.error ?? null);
+
+  const statusLabel = useMemo(() => {
+    if (!path) {
+      return "Sem arquivo";
+    }
+    if (!source) {
+      return error ?? "Preparando preview";
+    }
+    if (!currentWaveform) {
+      return "Analisando forma de onda";
+    }
+    if (currentWaveform.error) {
+      return "Preview carregado";
+    }
+    return "Waveform pronta";
+  }, [currentWaveform, error, path, source]);
+
+  const renderWaveform = useCallback(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) {
+      return;
+    }
+
+    drawWaveform({
+      canvas,
+      peaks: currentWaveform?.peaks ?? [],
+      progress,
+      durationSeconds,
+      devicePixelRatio: window.devicePixelRatio,
+      theme: waveformTheme
+    });
+  }, [currentWaveform, durationSeconds, progress]);
 
   useEffect(() => {
     let cancelled = false;
     audioRef.current?.pause();
 
+    void Promise.resolve().then(() => {
+      if (cancelled) {
+        return;
+      }
+
+      setCurrentTime(0);
+      setNativeDuration(0);
+      setIsPlaying(false);
+      setPlaybackError(null);
+      setWaveform(null);
+    });
+
     if (!path) {
+      void Promise.resolve().then(() => {
+        if (!cancelled) {
+          setPreview(null);
+        }
+      });
       return () => {
         cancelled = true;
       };
@@ -81,11 +164,80 @@ export function AudioPlayer({ title, path }: AudioPlayerProps) {
     };
   }, [path]);
 
+  useEffect(() => {
+    if (!source) {
+      return;
+    }
+
+    let cancelled = false;
+    const audioContext = new AudioContext();
+
+    void fetch(source)
+      .then((response) => {
+        if (!response.ok) {
+          throw new Error(`Falha ao carregar preview (${String(response.status)})`);
+        }
+        return response.arrayBuffer();
+      })
+      .then((buffer) => audioContext.decodeAudioData(buffer))
+      .then((audioBuffer) => {
+        if (cancelled) {
+          return;
+        }
+
+        setWaveform({
+          source,
+          peaks: buildWaveformPeaks(audioBuffer.getChannelData(0), waveformBars),
+          durationSeconds: audioBuffer.duration,
+          error: null
+        });
+      })
+      .catch((unknownError: unknown) => {
+        if (!cancelled) {
+          setWaveform({
+            source,
+            peaks: [],
+            durationSeconds: nativeDuration,
+            error: errorMessage(unknownError)
+          });
+        }
+      })
+      .finally(() => {
+        void audioContext.close();
+      });
+
+    return () => {
+      cancelled = true;
+      void audioContext.close();
+    };
+  }, [nativeDuration, source]);
+
+  useEffect(() => {
+    renderWaveform();
+  }, [renderWaveform]);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) {
+      return;
+    }
+
+    const observer = new ResizeObserver(() => {
+      renderWaveform();
+    });
+    observer.observe(canvas);
+
+    return () => {
+      observer.disconnect();
+    };
+  }, [renderWaveform]);
+
   async function toggle(): Promise<void> {
     const audio = audioRef.current;
     if (!audio || !source) {
       return;
     }
+
     if (audio.paused) {
       try {
         setPlaybackError(null);
@@ -100,32 +252,113 @@ export function AudioPlayer({ title, path }: AudioPlayerProps) {
     }
   }
 
+  function restart(): void {
+    const audio = audioRef.current;
+    if (!audio) {
+      return;
+    }
+
+    audio.currentTime = 0;
+    setCurrentTime(0);
+  }
+
+  function seek(clientX: number): void {
+    const audio = audioRef.current;
+    const canvas = canvasRef.current;
+    if (!audio || !canvas || durationSeconds <= 0) {
+      return;
+    }
+
+    const rect = canvas.getBoundingClientRect();
+    const ratio = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
+    const nextTime = durationSeconds * ratio;
+    audio.currentTime = nextTime;
+    setCurrentTime(nextTime);
+  }
+
   const isAudioPlaying = Boolean(source && isPlaying);
   const Icon = isAudioPlaying ? Pause : Play;
 
   return (
     <section className={styles.player}>
       <div className={styles.header}>
-        <span>{title}</span>
-        <button
-          type="button"
-          aria-label={isAudioPlaying ? "Pausar audio" : "Tocar audio"}
-          disabled={!source}
-          onClick={() => {
-            void toggle();
-          }}
-        >
-          <Icon size={16} />
-        </button>
+        <div className={styles.titleBlock}>
+          <span>{title}</span>
+          <strong>{statusLabel}</strong>
+        </div>
+        <div className={styles.transport}>
+          <button
+            type="button"
+            aria-label={isAudioPlaying ? "Pausar audio" : "Tocar audio"}
+            disabled={!source}
+            onClick={() => {
+              void toggle();
+            }}
+          >
+            <Icon size={16} />
+          </button>
+          <button type="button" aria-label="Voltar ao inicio" disabled={!source} onClick={restart}>
+            <RotateCcw size={15} />
+          </button>
+        </div>
       </div>
+
+      <div className={styles.waveformShell}>
+        <canvas
+          ref={canvasRef}
+          className={styles.waveform}
+          role="slider"
+          aria-label={`Linha do tempo do audio ${title}`}
+          aria-valuemin={0}
+          aria-valuemax={Math.round(durationSeconds * 1000)}
+          aria-valuenow={Math.round(currentTime * 1000)}
+          tabIndex={source ? 0 : -1}
+          onClick={(event) => {
+            seek(event.clientX);
+          }}
+          onKeyDown={(event) => {
+            handleSeekKey(event, durationSeconds, currentTime, (nextTime) => {
+              const audio = audioRef.current;
+              if (!audio) {
+                return;
+              }
+              audio.currentTime = nextTime;
+              setCurrentTime(nextTime);
+            });
+          }}
+        />
+        {!source ? <div className={styles.empty}>{error ?? "Nenhum audio selecionado"}</div> : null}
+      </div>
+
+      <div className={styles.footer}>
+        <span className={styles.timeReadout}>
+          {formatClockTime(currentTime)} / {formatClockTime(durationSeconds)}
+        </span>
+        <span className={styles.formatBadge}>
+          <ScanLine size={14} />
+          {currentWaveform?.peaks.length
+            ? `${String(currentWaveform.peaks.length)} peaks`
+            : "sem picos"}
+        </span>
+      </div>
+
       {source ? (
         <audio
           key={source}
           ref={audioRef}
           src={source}
-          controls
+          preload="metadata"
+          onLoadedMetadata={(event) => {
+            setNativeDuration(event.currentTarget.duration);
+          }}
+          onTimeUpdate={(event) => {
+            setCurrentTime(event.currentTarget.currentTime);
+          }}
           onPause={() => {
             setIsPlaying(false);
+          }}
+          onPlay={() => {
+            setIsPlaying(true);
           }}
           onEnded={() => {
             setIsPlaying(false);
@@ -137,13 +370,45 @@ export function AudioPlayer({ title, path }: AudioPlayerProps) {
             });
           }}
         />
-      ) : path ? (
-        <div className={styles.empty}>{error ?? "Preparando audio..."}</div>
-      ) : (
-        <div className={styles.empty}>Nenhum audio selecionado</div>
-      )}
+      ) : null}
     </section>
   );
+}
+
+function handleSeekKey(
+  event: React.KeyboardEvent<HTMLCanvasElement>,
+  durationSeconds: number,
+  currentTime: number,
+  onSeek: (timeSeconds: number) => void
+): void {
+  if (durationSeconds <= 0) {
+    return;
+  }
+
+  const stepSeconds = event.shiftKey ? 5 : 1;
+  const keyOffset = seekKeyOffset(event.key, stepSeconds);
+  if (keyOffset === null) {
+    return;
+  }
+
+  event.preventDefault();
+  onSeek(Math.max(0, Math.min(durationSeconds, currentTime + keyOffset)));
+}
+
+function seekKeyOffset(key: string, stepSeconds: number): number | null {
+  if (key === "ArrowLeft") {
+    return -stepSeconds;
+  }
+  if (key === "ArrowRight") {
+    return stepSeconds;
+  }
+  if (key === "Home") {
+    return Number.NEGATIVE_INFINITY;
+  }
+  if (key === "End") {
+    return Number.POSITIVE_INFINITY;
+  }
+  return null;
 }
 
 function errorMessage(error: unknown): string {

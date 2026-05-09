@@ -1,7 +1,8 @@
-import { CheckCircle2, Circle, Loader2, Mic2, Square, Wand2 } from "lucide-react";
+import { CheckCircle2, Circle, Loader2, Mic2, RotateCcw, Square, Undo2, Wand2 } from "lucide-react";
 import { AudioPlayer } from "../audio-player/AudioPlayer";
 import { useWorkspaceStore } from "../../stores/workspaceStore";
 import type { JobStage } from "../../shared/tauri/types";
+import { dubbingActionCopy } from "./dubbingAction";
 import styles from "./DubbingPanel.module.css";
 
 const pipelineStages: { stage: JobStage; label: string }[] = [
@@ -28,11 +29,14 @@ const stageOrder = new Map<JobStage, number>([
 
 export function DubbingPanel() {
   const config = useWorkspaceStore((state) => state.config);
+  const files = useWorkspaceStore((state) => state.files);
   const selectedPath = useWorkspaceStore((state) => state.selectedPath);
   const sourceText = useWorkspaceStore((state) => state.sourceText);
   const targetText = useWorkspaceStore((state) => state.targetText);
+  const transcriptionBaselines = useWorkspaceStore((state) => state.transcriptionBaselines);
   const setSourceText = useWorkspaceStore((state) => state.setSourceText);
   const setTargetText = useWorkspaceStore((state) => state.setTargetText);
+  const revertTranscription = useWorkspaceStore((state) => state.revertTranscription);
   const startDubbing = useWorkspaceStore((state) => state.startDubbing);
   const cancelJob = useWorkspaceStore((state) => state.cancelJob);
   const isBusy = useWorkspaceStore((state) => state.isBusy);
@@ -45,6 +49,14 @@ export function DubbingPanel() {
   const totalFiles = useWorkspaceStore((state) => state.totalFiles);
   const lastOutputPath = useWorkspaceStore((state) => state.lastOutputPath);
   const logs = useWorkspaceStore((state) => state.logs);
+  const selectedFile = files.find((file) => file.path === selectedPath) ?? null;
+  const primaryAction = dubbingActionCopy(selectedFile?.status ?? null);
+  const PrimaryActionIcon = primaryAction.intent === "redub" ? RotateCcw : Wand2;
+  const transcriptionBaseline = selectedPath ? transcriptionBaselines[selectedPath] : undefined;
+  const canRevertTranscription =
+    transcriptionBaseline !== undefined &&
+    (sourceText !== transcriptionBaseline.sourceText ||
+      targetText !== transcriptionBaseline.targetText);
 
   return (
     <div className={styles.layout}>
@@ -53,7 +65,7 @@ export function DubbingPanel() {
         <AudioPlayer title="Resultado" path={lastOutputPath} />
       </section>
 
-      <section className={styles.editorGrid}>
+      <section className={styles.editorGrid} aria-label="Transcrição editável">
         <label>
           <span>Texto origem</span>
           <textarea
@@ -85,14 +97,28 @@ export function DubbingPanel() {
         <div className={styles.actions}>
           <button
             type="button"
+            disabled={isBusy || !canRevertTranscription}
+            onClick={() => {
+              revertTranscription();
+            }}
+          >
+            <Undo2 size={15} />
+            Reverter transcrição
+          </button>
+          <button
+            type="button"
             className={styles.primary}
             disabled={isBusy}
             onClick={() => {
               void startDubbing();
             }}
           >
-            {isBusy ? <Loader2 size={16} className={styles.spin} /> : <Wand2 size={16} />}
-            Dublar selecionado
+            {isBusy ? (
+              <Loader2 size={16} className={styles.spin} />
+            ) : (
+              <PrimaryActionIcon size={16} />
+            )}
+            {isBusy ? primaryAction.busyLabel : primaryAction.idleLabel}
           </button>
           <button
             type="button"

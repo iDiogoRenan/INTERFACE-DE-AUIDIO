@@ -20,13 +20,16 @@ interface TranscriptionDraft {
   targetText: string;
 }
 
+type TranscriptionMap = Record<string, TranscriptionDraft | undefined>;
+
 interface WorkspaceState {
   config: AppConfig;
   files: AudioFileEntry[];
   selectedPath: string | null;
   sourceText: string;
   targetText: string;
-  transcriptionDrafts: Record<string, TranscriptionDraft>;
+  transcriptionDrafts: TranscriptionMap;
+  transcriptionBaselines: TranscriptionMap;
   logs: LogEntry[];
   activeJobId: string | null;
   currentStage: JobStage | null;
@@ -44,6 +47,7 @@ interface WorkspaceState {
   selectFile: (path: string) => void;
   setSourceText: (value: string) => void;
   setTargetText: (value: string) => void;
+  revertTranscription: () => void;
   startDubbing: () => Promise<void>;
   cancelJob: () => Promise<void>;
   appendLog: (message: string, level?: LogEntry["level"]) => void;
@@ -66,6 +70,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   sourceText: "",
   targetText: "",
   transcriptionDrafts: {},
+  transcriptionBaselines: {},
   logs: [],
   activeJobId: null,
   currentStage: null,
@@ -98,24 +103,38 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     const nextSelectedPath = files.some((file) => file.path === selectedPath)
       ? selectedPath
       : (files[0]?.path ?? null);
+    const fileTranscriptions = transcriptionsFromFiles(files);
     const transcriptionDrafts = {
-      ...draftsFromFiles(files),
+      ...fileTranscriptions,
       ...get().transcriptionDrafts
+    };
+    const transcriptionBaselines = {
+      ...get().transcriptionBaselines,
+      ...fileTranscriptions
     };
     set({
       files,
       selectedPath: nextSelectedPath,
       lastOutputPath: outputPathForSelection(nextSelectedPath, files, config),
       transcriptionDrafts,
+      transcriptionBaselines,
       ...draftStateForPath(nextSelectedPath, transcriptionDrafts, files)
     });
   },
   selectFile: (path) => {
-    set((state) => ({
-      selectedPath: path,
-      lastOutputPath: outputPathForSelection(path, state.files, state.config),
-      ...draftStateForPath(path, state.transcriptionDrafts, state.files)
-    }));
+    set((state) => {
+      const transcriptionBaselines = baselineStateForPath(
+        path,
+        state.transcriptionBaselines,
+        state.files
+      );
+      return {
+        selectedPath: path,
+        lastOutputPath: outputPathForSelection(path, state.files, state.config),
+        transcriptionBaselines,
+        ...draftStateForPath(path, state.transcriptionDrafts, state.files)
+      };
+    });
   },
   setSourceText: (sourceText) => {
     set((state) => ({
@@ -131,6 +150,26 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       transcriptionDrafts: upsertDraft(state.transcriptionDrafts, state.selectedPath, {
         targetText
       })
+    }));
+  },
+  revertTranscription: () => {
+    const { selectedPath, transcriptionBaselines } = get();
+    if (!selectedPath) {
+      return;
+    }
+
+    const baseline = transcriptionBaselines[selectedPath];
+    if (!baseline) {
+      return;
+    }
+
+    set((state) => ({
+      sourceText: baseline.sourceText,
+      targetText: baseline.targetText,
+      transcriptionDrafts: {
+        ...state.transcriptionDrafts,
+        [selectedPath]: baseline
+      }
     }));
   },
   startDubbing: async () => {
@@ -287,6 +326,11 @@ function applyJobEvent(payload: DubbingJobEvent): void {
       eventPath,
       transcriptionPatch
     );
+    update.transcriptionBaselines = upsertDraft(
+      state.transcriptionBaselines,
+      eventPath,
+      transcriptionPatch
+    );
   }
 
   const shouldHydrateSelectedEditor = eventPath === state.selectedPath;
@@ -300,8 +344,12 @@ function applyJobEvent(payload: DubbingJobEvent): void {
     update.lastOutputPath = payload.outputPath;
   }
   if (eventPath && payload.outputPath !== null) {
+    const transcriptionBaselines = update.transcriptionBaselines ?? state.transcriptionBaselines;
+    const completedTranscription = transcriptionBaselines[eventPath] ?? null;
     update.files = state.files.map((file) =>
-      file.path === eventPath ? { ...file, status: "dubbed" } : file
+      file.path === eventPath
+        ? { ...file, status: "dubbed", transcription: completedTranscription ?? file.transcription }
+        : file
     );
   }
 
@@ -330,8 +378,8 @@ function joinNativePath(directory: string, fileName: string): string {
   return `${directory.replace(/[\\/]+$/u, "")}${separator}${fileName}`;
 }
 
-function draftsFromFiles(files: AudioFileEntry[]): Record<string, TranscriptionDraft> {
-  return files.reduce<Record<string, TranscriptionDraft>>((drafts, file) => {
+function transcriptionsFromFiles(files: AudioFileEntry[]): TranscriptionMap {
+  return files.reduce<TranscriptionMap>((drafts, file) => {
     if (file.transcription) {
       drafts[file.path] = {
         sourceText: file.transcription.sourceText,
@@ -342,9 +390,28 @@ function draftsFromFiles(files: AudioFileEntry[]): Record<string, TranscriptionD
   }, {});
 }
 
+function baselineStateForPath(
+  path: string,
+  baselines: TranscriptionMap,
+  files: AudioFileEntry[]
+): TranscriptionMap {
+  const cached = files.find((file) => file.path === path)?.transcription;
+  if (!cached) {
+    return baselines;
+  }
+
+  return {
+    ...baselines,
+    [path]: {
+      sourceText: cached.sourceText,
+      targetText: cached.targetText
+    }
+  };
+}
+
 function draftStateForPath(
   path: string | null,
-  drafts: Record<string, TranscriptionDraft>,
+  drafts: TranscriptionMap,
   files: AudioFileEntry[] = []
 ): Pick<WorkspaceState, "sourceText" | "targetText"> {
   if (!path) {
@@ -361,10 +428,10 @@ function draftStateForPath(
 }
 
 function upsertDraft(
-  drafts: Record<string, TranscriptionDraft>,
+  drafts: TranscriptionMap,
   path: string | null,
   patch: Partial<TranscriptionDraft>
-): Record<string, TranscriptionDraft> {
+): TranscriptionMap {
   if (!path) {
     return drafts;
   }

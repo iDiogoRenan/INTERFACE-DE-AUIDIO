@@ -229,3 +229,10 @@
     min-height: 28px;
   }
 }
+
+@media (max-width: 1360px) {
+  .players,
+  .editorGrid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
