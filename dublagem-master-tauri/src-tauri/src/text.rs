@@ -76,6 +76,10 @@ pub fn palatalize_ptbr(text: &str) -> String {
 }
 
 fn palatalize_token(token: &str) -> String {
+    if is_bracketed_control_token(token) {
+        return token.to_string();
+    }
+
     let suffixes = [
         ("tis", "tchis"),
         ("tes", "tches"),
@@ -101,6 +105,10 @@ fn palatalize_token(token: &str) -> String {
     }
 
     token.to_string()
+}
+
+fn is_bracketed_control_token(token: &str) -> bool {
+    token.starts_with('[') && token.ends_with(']')
 }
 
 fn capitalize_ascii(value: &str) -> String {
@@ -141,5 +149,13 @@ mod tests {
             "batchi noitche pedchi modche"
         );
         assert_eq!(palatalize_ptbr("de te di ti"), "de te di ti");
+    }
+
+    #[test]
+    fn keeps_bracketed_omnivoice_tags_unchanged() {
+        assert_eq!(
+            palatalize_ptbr("[question-en] bati [surprise-oh]"),
+            "[question-en] batchi [surprise-oh]"
+        );
     }
 }

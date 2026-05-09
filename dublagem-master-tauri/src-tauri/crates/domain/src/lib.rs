@@ -1,8 +1,25 @@
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use uuid::Uuid;
 
 pub type JobId = Uuid;
+
+pub const OMNIVOICE_NATIVE_TAGS: &[&str] = &[
+    "[laughter]",
+    "[sigh]",
+    "[confirmation-en]",
+    "[question-en]",
+    "[question-ah]",
+    "[question-oh]",
+    "[question-ei]",
+    "[question-yi]",
+    "[surprise-ah]",
+    "[surprise-oh]",
+    "[surprise-wa]",
+    "[surprise-yo]",
+    "[dissatisfaction-hnn]",
+];
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -41,6 +58,94 @@ pub enum DubbingMode {
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+pub enum VoiceMode {
+    #[default]
+    Clone,
+    Design,
+    Auto,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NativeSynthesisSettings {
+    pub voice_mode: VoiceMode,
+    pub instruct: Option<String>,
+    pub speed: Option<f32>,
+    pub duration_seconds: Option<f32>,
+    pub num_step: u32,
+    pub guidance_scale: f32,
+    pub position_temperature: f32,
+    pub class_temperature: f32,
+    pub denoise: bool,
+    pub preprocess_prompt: bool,
+    pub postprocess_output: bool,
+}
+
+impl Default for NativeSynthesisSettings {
+    fn default() -> Self {
+        Self {
+            voice_mode: VoiceMode::Clone,
+            instruct: None,
+            speed: None,
+            duration_seconds: None,
+            num_step: 48,
+            guidance_scale: 2.0,
+            position_temperature: 1.0,
+            class_temperature: 0.0,
+            denoise: true,
+            preprocess_prompt: true,
+            postprocess_output: true,
+        }
+    }
+}
+
+impl NativeSynthesisSettings {
+    pub fn validate(&self) -> Result<(), String> {
+        validate_optional_range("speed", self.speed, 0.5, 2.0)?;
+        validate_optional_range("durationSeconds", self.duration_seconds, 0.25, 60.0)?;
+        validate_range("numStep", self.num_step as f32, 8.0, 128.0)?;
+        validate_range("guidanceScale", self.guidance_scale, 0.0, 10.0)?;
+        validate_range("positionTemperature", self.position_temperature, 0.0, 10.0)?;
+        validate_range("classTemperature", self.class_temperature, 0.0, 10.0)?;
+
+        if matches!(self.voice_mode, VoiceMode::Design)
+            && self
+                .instruct
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .is_none()
+        {
+            return Err("voiceMode design requer instruct preenchido".to_string());
+        }
+
+        Ok(())
+    }
+}
+
+fn validate_optional_range(
+    name: &str,
+    value: Option<f32>,
+    minimum: f32,
+    maximum: f32,
+) -> Result<(), String> {
+    if let Some(value) = value {
+        validate_range(name, value, minimum, maximum)?;
+    }
+    Ok(())
+}
+
+fn validate_range(name: &str, value: f32, minimum: f32, maximum: f32) -> Result<(), String> {
+    if !value.is_finite() || value < minimum || value > maximum {
+        return Err(format!(
+            "{name} deve ficar entre {minimum:.2} e {maximum:.2}"
+        ));
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum AudioFileStatus {
     #[default]
     Pending,
@@ -51,7 +156,7 @@ pub enum AudioFileStatus {
     Failed,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DubbingOptions {
     pub source_language: LanguageCode,
@@ -62,6 +167,8 @@ pub struct DubbingOptions {
     pub trailing_period: bool,
     pub pad_ms: u32,
     pub omni_temperature: f32,
+    #[serde(default)]
+    pub native_synthesis: NativeSynthesisSettings,
 }
 
 impl Default for DubbingOptions {
@@ -75,6 +182,7 @@ impl Default for DubbingOptions {
             trailing_period: false,
             pad_ms: 200,
             omni_temperature: 0.0,
+            native_synthesis: NativeSynthesisSettings::default(),
         }
     }
 }
@@ -161,6 +269,73 @@ pub struct DubbingRequest {
     pub options: DubbingOptions,
     pub custom_source_text: Option<String>,
     pub custom_target_text: Option<String>,
+    #[serde(default)]
+    pub line_overrides: Vec<LineSynthesisOverride>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LineSynthesisOverride {
+    pub line_index: usize,
+    pub target_text: String,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    pub settings: NativeSynthesisSettings,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SynthesisLinePreviewRequest {
+    pub source_audio: PathBuf,
+    pub text: String,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    pub settings: NativeSynthesisSettings,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectMetadata {
+    pub version: u16,
+    #[serde(default)]
+    pub files: BTreeMap<String, ProjectFileMetadata>,
+}
+
+impl ProjectMetadata {
+    pub fn v1() -> Self {
+        Self {
+            version: 1,
+            files: BTreeMap::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectFileMetadata {
+    #[serde(default)]
+    pub source_text: Option<String>,
+    #[serde(default)]
+    pub target_text: Option<String>,
+    #[serde(default)]
+    pub baseline_source_text: Option<String>,
+    #[serde(default)]
+    pub baseline_target_text: Option<String>,
+    #[serde(default)]
+    pub lines: BTreeMap<String, ProjectLineMetadata>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectLineMetadata {
+    #[serde(default)]
+    pub tags: Vec<String>,
+    #[serde(default)]
+    pub character_id: Option<String>,
+    #[serde(default)]
+    pub notes: Option<String>,
+    #[serde(default)]
+    pub settings: NativeSynthesisSettings,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

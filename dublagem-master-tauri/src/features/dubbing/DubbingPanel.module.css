@@ -1,9 +1,18 @@
 .layout {
   display: grid;
-  grid-template-rows: auto minmax(150px, 1fr) auto auto minmax(96px, 0.55fr);
+  grid-template-columns: minmax(0, 1fr) 290px;
+  grid-template-rows: minmax(0, 1fr) auto minmax(86px, 0.34fr);
   gap: 14px;
   block-size: 100%;
   min-block-size: 100%;
+  min-height: 0;
+}
+
+.mainColumn {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  gap: 14px;
+  min-width: 0;
   min-height: 0;
 }
 
@@ -14,29 +23,141 @@
   gap: 14px;
 }
 
-.editorGrid label {
-  display: grid;
-  grid-template-rows: auto minmax(0, 1fr);
-  gap: 8px;
+.editorGrid {
+  min-height: 0;
 }
 
-.editorGrid span {
+.lineEditor {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  min-height: 0;
+  border: 1px solid var(--border);
+  background: var(--surface-1);
+}
+
+.lineEditor header,
+.properties header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 36px;
+  border-bottom: 1px solid var(--border);
+  padding: 0 10px;
+}
+
+.editorHeading {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.editorHeading > span,
+.properties header strong,
+.controlGroup > span,
+.numberField span {
   color: var(--text-muted);
-  font-size: 12px;
-  font-weight: 750;
+  font-size: 11px;
+  font-weight: 800;
   text-transform: uppercase;
 }
 
-.editorGrid textarea {
-  min-height: 140px;
-  resize: none;
-  border: 1px solid var(--border);
-  background: var(--surface-1);
+.editorHeading > output,
+.properties header span {
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 750;
+}
+
+.selectedTags {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 5px;
+  min-width: 0;
+}
+
+.selectedTags button {
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--border));
+  background: color-mix(in srgb, var(--accent) 14%, var(--surface-2));
   color: var(--text);
-  padding: 12px;
+  cursor: pointer;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 10px;
+  font-weight: 850;
+  line-height: 1;
+  padding: 5px 6px;
+}
+
+.selectedTags button:hover {
+  border-color: var(--accent);
+}
+
+.emptyTagHeader {
+  color: var(--text-muted);
+  font-size: 10px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.tooltipContent {
+  z-index: 60;
+  max-width: 240px;
+  border: 1px solid var(--border-strong);
+  background: var(--surface-2);
+  color: var(--text);
+  padding: 7px 9px;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.3;
+  box-shadow: 0 12px 28px rgb(0 0 0 / 0.35);
+}
+
+.tooltipArrow {
+  fill: var(--surface-2);
+}
+
+.lineList {
+  min-height: 0;
+  overflow: auto;
+  padding: 8px;
+}
+
+.lineRow {
+  display: grid;
+  grid-template-columns: 24px minmax(0, 1fr);
+  align-items: start;
+  gap: 8px;
+  border: 1px solid transparent;
+  padding: 7px;
+}
+
+.lineRow[data-selected="true"] {
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+}
+
+.lineNumber {
+  color: var(--text-muted);
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 12px;
+  padding-top: 9px;
+  text-align: right;
+}
+
+.lineRow textarea {
+  grid-column: 2;
+  min-height: 42px;
+  resize: vertical;
+  border: 1px solid var(--border);
+  background: var(--surface-0);
+  color: var(--text);
+  padding: 7px 8px;
   outline: none;
   font: inherit;
-  line-height: 1.5;
+  font-size: 12px;
+  line-height: 1.35;
 }
 
 .controls {
@@ -54,15 +175,18 @@
   font-size: 13px;
 }
 
-.actions {
+.actions,
+.propertyActions {
   display: flex;
   gap: 10px;
 }
 
 .actions button,
+.propertyActions button,
 .primary {
   display: inline-flex;
   align-items: center;
+  justify-content: center;
   gap: 8px;
   min-height: 38px;
   border: 1px solid var(--border);
@@ -73,7 +197,8 @@
   font-weight: 700;
 }
 
-.actions button:disabled {
+.actions button:disabled,
+.propertyActions button:disabled {
   cursor: not-allowed;
   opacity: 0.45;
 }
@@ -83,12 +208,176 @@
   background: color-mix(in srgb, var(--accent) 18%, var(--surface-2));
 }
 
+.properties {
+  display: grid;
+  align-content: start;
+  gap: 10px;
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+  border: 1px solid var(--border);
+  background: var(--surface-1);
+  padding-bottom: 10px;
+}
+
+.controlGroup,
+.numberField {
+  display: grid;
+  gap: 5px;
+  padding: 0 10px;
+}
+
+.controlGroup input,
+.controlGroup textarea,
+.numberField input,
+.selectTrigger {
+  width: 100%;
+  min-width: 0;
+  border: 1px solid var(--border);
+  background: var(--surface-0);
+  color: var(--text);
+  padding: 7px 8px;
+}
+
+.controlGroup input:disabled {
+  color: var(--text-muted);
+  opacity: 0.7;
+}
+
+.controlGroup textarea {
+  resize: vertical;
+}
+
+.selectTrigger {
+  display: inline-flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 34px;
+  cursor: pointer;
+}
+
+.selectContent {
+  z-index: 20;
+  min-width: var(--radix-select-trigger-width);
+  overflow: hidden;
+  border: 1px solid var(--border-strong);
+  background: var(--surface-2);
+  color: var(--text);
+  box-shadow: 0 12px 28px rgb(0 0 0 / 0.35);
+}
+
+.selectItem {
+  min-height: 32px;
+  cursor: pointer;
+  outline: none;
+  padding: 7px 10px;
+  font-size: 13px;
+}
+
+.selectItem[data-highlighted] {
+  background: color-mix(in srgb, var(--accent) 18%, var(--surface-2));
+}
+
+.rangeRow {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 48px;
+  align-items: center;
+  gap: 8px;
+}
+
+.rangeRow input {
+  padding: 0;
+}
+
+.rangeRow output {
+  color: var(--text);
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 12px;
+  text-align: right;
+}
+
+.durationFacts {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin: 0;
+  padding: 0 10px;
+}
+
+.durationFacts div {
+  border: 1px solid var(--border);
+  background: var(--surface-0);
+  padding: 7px;
+}
+
+.durationFacts dt {
+  color: var(--text-muted);
+  font-size: 10px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.durationFacts dd {
+  margin: 4px 0 0;
+  color: var(--accent);
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 12px;
+  font-weight: 850;
+}
+
+.advanced {
+  display: grid;
+  gap: 8px;
+  border-top: 1px solid var(--border);
+  padding: 10px 0 0;
+}
+
+.advanced summary {
+  cursor: pointer;
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 850;
+  padding: 0 10px;
+  text-transform: uppercase;
+}
+
+.nativeCheckbox {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 10px;
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.nativeCheckbox button {
+  display: grid;
+  width: 18px;
+  height: 18px;
+  place-items: center;
+  border: 1px solid var(--border);
+  background: var(--surface-0);
+  color: var(--accent);
+}
+
+.nativeCheckbox button[data-state="checked"] {
+  border-color: color-mix(in srgb, var(--accent) 65%, var(--border));
+}
+
+.propertyActions {
+  display: grid;
+  grid-template-columns: 1fr;
+  padding: 0 10px;
+}
+
 .spin {
   animation: spin 1s linear infinite;
 }
 
 .jobStatus {
   display: grid;
+  grid-column: 1 / -1;
   gap: 10px;
   border: 1px solid var(--border);
   background: var(--surface-1);
@@ -179,6 +468,7 @@
 .logPanel {
   min-height: 0;
   overflow: auto;
+  grid-column: 1 / -1;
   border: 1px solid var(--border);
   background: var(--surface-1);
   padding: 8px 12px;
@@ -208,25 +498,33 @@
 
 @media (max-height: 760px) {
   .layout {
-    grid-template-rows: auto minmax(112px, 1fr) auto auto minmax(74px, 0.45fr);
+    grid-template-rows: minmax(0, 1fr) auto minmax(70px, 0.24fr);
     gap: 10px;
   }
 
-  .editorGrid textarea {
-    min-height: 112px;
+  .mainColumn,
+  .players,
+  .editorGrid {
+    gap: 10px;
+  }
+
+  .lineRow textarea {
+    min-height: 34px;
   }
 
   .jobStatus {
     gap: 8px;
     padding: 10px;
   }
+}
 
-  .stageRail {
-    gap: 6px;
+@media (max-width: 1420px) {
+  .layout {
+    grid-template-columns: minmax(0, 1fr);
   }
 
-  .stageRail span {
-    min-height: 28px;
+  .properties {
+    grid-row: auto;
   }
 }
 

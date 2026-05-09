@@ -54,5 +54,8 @@ mod tests {
         assert_eq!(options.mode, DubbingMode::Classico);
         assert_eq!(options.pad_ms, 200);
         assert_eq!(options.omni_temperature, 0.0);
+        assert_eq!(options.native_synthesis.num_step, 48);
+        assert_eq!(options.native_synthesis.position_temperature, 1.0);
+        assert!(options.native_synthesis.denoise);
     }
 }

@@ -1,12 +1,13 @@
 use crate::{
     audio, config,
     error::{AppError, AppResult},
-    jobs,
+    jobs, project_metadata,
+    speech::{SynthesisHooks, SynthesisRequest},
     state::AppState,
 };
 use dublagem_domain::{
-    AppConfig, AudioFileEntry, AudioMetadata, DubbingRequest, JobId, QualityReport,
-    TranslationRequest, TranslationResult,
+    AppConfig, AudioFileEntry, AudioMetadata, DubbingRequest, JobId, ProjectMetadata,
+    QualityReport, SynthesisLinePreviewRequest, TranslationRequest, TranslationResult,
 };
 use sha2::Digest;
 use std::{
@@ -23,6 +24,19 @@ pub fn load_config(app: AppHandle) -> AppResult<AppConfig> {
 #[tauri::command]
 pub fn save_config(app: AppHandle, config: AppConfig) -> AppResult<AppConfig> {
     config::save_config(&app, &config)
+}
+
+#[tauri::command]
+pub fn load_project_metadata(output_dir: PathBuf) -> AppResult<ProjectMetadata> {
+    project_metadata::load_project_metadata(&output_dir)
+}
+
+#[tauri::command]
+pub fn save_project_metadata(
+    output_dir: PathBuf,
+    metadata: ProjectMetadata,
+) -> AppResult<ProjectMetadata> {
+    project_metadata::save_project_metadata(&output_dir, metadata)
 }
 
 #[tauri::command]
@@ -105,6 +119,58 @@ pub async fn start_dubbing_job(
 }
 
 #[tauri::command]
+pub async fn preview_synthesis_line(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    request: SynthesisLinePreviewRequest,
+) -> AppResult<PathBuf> {
+    if !request.source_audio.is_file() || !audio::is_audio_file(&request.source_audio) {
+        return Err(AppError::InvalidPath(request.source_audio));
+    }
+    project_metadata::validate_text_native_tags(&request.text)?;
+    project_metadata::validate_native_tags(&request.tags)?;
+    project_metadata::validate_settings(&request.settings)?;
+
+    let config = config::load_config(&app)?;
+    let synthesizer = state
+        .speech
+        .synthesizer_for_model_dir(config.model_dir.clone())
+        .await?;
+    let preview_dir = app
+        .path()
+        .app_cache_dir()
+        .map_err(|error| AppError::InvalidConfig(error.to_string()))?
+        .join("line-preview");
+    std::fs::create_dir_all(&preview_dir)?;
+    let output_path = preview_dir.join(preview_line_file_name(&request));
+    let reference_audio = config
+        .guide_audio
+        .as_deref()
+        .unwrap_or(request.source_audio.as_path());
+    let mut options = config.options.clone();
+    options.native_synthesis = request.settings.clone();
+    let line_overrides = vec![dublagem_domain::LineSynthesisOverride {
+        line_index: 0,
+        target_text: request.text.clone(),
+        tags: request.tags.clone(),
+        settings: request.settings.clone(),
+    }];
+
+    synthesizer
+        .synthesize(SynthesisRequest {
+            text: &request.text,
+            source_audio: &request.source_audio,
+            reference_audio,
+            output_path: &output_path,
+            options,
+            line_overrides: &line_overrides,
+            hooks: SynthesisHooks::default(),
+        })
+        .await?;
+    Ok(output_path)
+}
+
+#[tauri::command]
 pub async fn cancel_job(state: State<'_, AppState>, job_id: JobId) -> AppResult<()> {
     state.jobs.cancel(job_id).await
 }
@@ -175,6 +241,20 @@ fn preview_file_name(source: &Path, metadata: &std::fs::Metadata) -> String {
         .unwrap_or_else(|| "preview".to_string());
 
     format!("{stem}-{fingerprint}.{extension}")
+}
+
+fn preview_line_file_name(request: &SynthesisLinePreviewRequest) -> String {
+    let mut hasher = sha2::Sha256::new();
+    hasher.update(request.source_audio.to_string_lossy().as_bytes());
+    hasher.update(request.text.as_bytes());
+    hasher.update(format!("{:?}", request.settings).as_bytes());
+    let digest = hasher.finalize();
+    let fingerprint = digest
+        .iter()
+        .take(8)
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    format!("line-preview-{fingerprint}.wav")
 }
 
 fn sanitize_component(value: &str) -> String {

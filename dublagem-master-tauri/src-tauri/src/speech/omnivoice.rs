@@ -9,9 +9,9 @@ use crate::audio::{
 use crate::error::{AppError, AppResult};
 use async_trait::async_trait;
 #[cfg(feature = "ml")]
-use dublagem_domain::DubbingOptions;
-#[cfg(feature = "ml")]
-use dublagem_domain::LanguageCode;
+use dublagem_domain::{
+    DubbingOptions, LanguageCode, LineSynthesisOverride, NativeSynthesisSettings, VoiceMode,
+};
 #[cfg(feature = "ml")]
 use omnivoice_infer::{
     contracts::{
@@ -30,8 +30,6 @@ const SYNTHESIS_SEGMENT_TARGET_SECONDS: f32 = 8.0;
 const SYNTHESIS_SEGMENT_MIN_CHARS: usize = 24;
 #[cfg(feature = "ml")]
 const SYNTHESIS_SEGMENT_MAX_CHARS: usize = 180;
-#[cfg(feature = "ml")]
-const SYNTHESIS_NUM_STEPS: usize = 48;
 #[cfg(feature = "ml")]
 const INTERNAL_CHUNK_SECONDS: f32 = 12.0;
 #[cfg(feature = "ml")]
@@ -56,6 +54,7 @@ struct OwnedSynthesisRequest {
     reference_audio: PathBuf,
     output_path: PathBuf,
     options: DubbingOptions,
+    line_overrides: Vec<LineSynthesisOverride>,
     hooks: SynthesisHooks,
 }
 
@@ -68,6 +67,7 @@ impl OwnedSynthesisRequest {
             reference_audio: request.reference_audio.to_path_buf(),
             output_path: request.output_path.to_path_buf(),
             options: request.options,
+            line_overrides: request.line_overrides.to_vec(),
             hooks: request.hooks,
         }
     }
@@ -262,19 +262,26 @@ fn synthesize_blocking_with_pipeline(
 ) -> AppResult<()> {
     let timing = audio_timing_profile(&request.source_audio, request.options.pad_ms)?;
     let target_duration = timing.target_voice_duration_seconds();
-    let segments = synthesis_segments(&request.text, target_duration);
+    let segments = synthesis_segments_for_request(&request, target_duration)?;
     if segments.is_empty() {
         return Err(AppError::InvalidConfig(
             "texto destino vazio; nao ha conteudo para sintese".to_string(),
         ));
     }
     request.hooks.report(0, segments.len());
-
-    let short_reference = prepare_short_reference(&request.reference_audio)?;
-    let voice_clone_prompt = pipeline
-        .create_voice_clone_prompt_from_audio(&short_reference.audio, None, true, None)
-        .map_err(map_omnivoice_error)?;
-    let durations = segment_durations(&segments, target_duration);
+    let voice_clone_prompt = if segments
+        .iter()
+        .any(|segment| matches!(segment.settings.voice_mode, VoiceMode::Clone))
+    {
+        let short_reference = prepare_short_reference(&request.reference_audio)?;
+        Some(
+            pipeline
+                .create_voice_clone_prompt_from_audio(&short_reference.audio, None, true, None)
+                .map_err(map_omnivoice_error)?,
+        )
+    } else {
+        None
+    };
     let mut segment_audio = Vec::with_capacity(segments.len());
 
     for (index, segment) in segments.iter().enumerate() {
@@ -284,10 +291,11 @@ fn synthesize_blocking_with_pipeline(
 
         let audio = synthesize_segment(
             pipeline,
-            segment,
-            durations[index],
-            &voice_clone_prompt,
-            request.options,
+            &segment.text,
+            segment.duration_seconds,
+            voice_clone_prompt_for(&segment.settings, voice_clone_prompt.as_ref())?,
+            &request.options,
+            &segment.settings,
         )?;
         segment_audio.push(audio);
         request.hooks.report(index + 1, segments.len());
@@ -309,19 +317,149 @@ fn synthesize_blocking_with_pipeline(
 }
 
 #[cfg(feature = "ml")]
+#[derive(Debug, Clone)]
+struct SynthesisSegmentPlan {
+    text: String,
+    duration_seconds: Option<f32>,
+    settings: NativeSynthesisSettings,
+}
+
+#[cfg(feature = "ml")]
+fn synthesis_segments_for_request(
+    request: &OwnedSynthesisRequest,
+    target_duration: Option<f32>,
+) -> AppResult<Vec<SynthesisSegmentPlan>> {
+    let lines = if request.line_overrides.is_empty() {
+        vec![SynthesisLinePlan {
+            text: request.text.clone(),
+            duration_seconds: effective_duration(
+                &request.options.native_synthesis,
+                target_duration,
+            ),
+            settings: request.options.native_synthesis.clone(),
+        }]
+    } else {
+        synthesis_line_plans(&request.line_overrides, target_duration)
+    };
+
+    let mut segments = Vec::new();
+    for line in lines {
+        let text_segments = synthesis_segments(&line.text, line.duration_seconds);
+        let durations = segment_durations(&text_segments, line.duration_seconds);
+        segments.extend(text_segments.into_iter().zip(durations).map(
+            |(text, duration_seconds)| SynthesisSegmentPlan {
+                text,
+                duration_seconds,
+                settings: line.settings.clone(),
+            },
+        ));
+    }
+
+    Ok(segments)
+}
+
+#[cfg(feature = "ml")]
+#[derive(Debug, Clone)]
+struct SynthesisLinePlan {
+    text: String,
+    duration_seconds: Option<f32>,
+    settings: NativeSynthesisSettings,
+}
+
+#[cfg(feature = "ml")]
+fn synthesis_line_plans(
+    overrides: &[LineSynthesisOverride],
+    target_duration: Option<f32>,
+) -> Vec<SynthesisLinePlan> {
+    let mut sorted = overrides
+        .iter()
+        .filter(|line| !line.target_text.trim().is_empty())
+        .collect::<Vec<_>>();
+    sorted.sort_by_key(|line| line.line_index);
+    let line_texts = sorted
+        .iter()
+        .map(|line| line.target_text.trim().to_string())
+        .collect::<Vec<_>>();
+    let inferred_durations = segment_durations(&line_texts, target_duration);
+
+    sorted
+        .into_iter()
+        .zip(inferred_durations)
+        .map(|(line, inferred_duration)| {
+            let settings = line.settings.clone();
+            SynthesisLinePlan {
+                text: tagged_synthesis_text(&line.tags, line.target_text.trim()),
+                duration_seconds: effective_duration(&settings, inferred_duration),
+                settings,
+            }
+        })
+        .collect()
+}
+
+#[cfg(feature = "ml")]
+fn tagged_synthesis_text(tags: &[String], text: &str) -> String {
+    let mut missing_tags = Vec::new();
+    for tag in tags {
+        let tag = tag.as_str();
+        if dublagem_domain::OMNIVOICE_NATIVE_TAGS.contains(&tag)
+            && !text.contains(tag)
+            && !missing_tags.contains(&tag)
+        {
+            missing_tags.push(tag);
+        }
+    }
+    if missing_tags.is_empty() {
+        return text.to_string();
+    }
+
+    format!("{} {}", missing_tags.join(" "), text)
+        .trim()
+        .to_string()
+}
+
+#[cfg(feature = "ml")]
+fn effective_duration(
+    settings: &NativeSynthesisSettings,
+    inferred_duration: Option<f32>,
+) -> Option<f32> {
+    settings.duration_seconds.or_else(|| {
+        if settings.speed.is_some() {
+            None
+        } else {
+            inferred_duration
+        }
+    })
+}
+
+#[cfg(feature = "ml")]
+fn voice_clone_prompt_for<'a>(
+    settings: &NativeSynthesisSettings,
+    prompt: Option<&'a VoiceClonePrompt>,
+) -> AppResult<Option<&'a VoiceClonePrompt>> {
+    if !matches!(settings.voice_mode, VoiceMode::Clone) {
+        return Ok(None);
+    }
+
+    prompt.map(Some).ok_or_else(|| {
+        AppError::SpeechEngineUnavailable("prompt de voz clone indisponivel".to_string())
+    })
+}
+
+#[cfg(feature = "ml")]
 fn synthesize_segment(
     pipeline: &Phase3Pipeline,
     text: &str,
     target_duration_seconds: Option<f32>,
-    voice_clone_prompt: &VoiceClonePrompt,
-    options: DubbingOptions,
+    voice_clone_prompt: Option<&VoiceClonePrompt>,
+    options: &DubbingOptions,
+    settings: &NativeSynthesisSettings,
 ) -> AppResult<DecodedAudio> {
     let mut request = generation_request(
         text.to_string(),
         voice_clone_prompt,
         target_duration_seconds,
         options,
-        SYNTHESIS_NUM_STEPS,
+        settings,
     );
     request.generation_config.audio_chunk_duration = INTERNAL_CHUNK_SECONDS;
     request.generation_config.audio_chunk_threshold = INTERNAL_CHUNK_SECONDS;
@@ -373,27 +511,50 @@ async fn load_shared_pipeline(model_dir: PathBuf) -> AppResult<SharedPhase3Pipel
 #[cfg(feature = "ml")]
 fn generation_request(
     text: String,
-    voice_clone_prompt: &VoiceClonePrompt,
+    voice_clone_prompt: Option<&VoiceClonePrompt>,
     target_duration_seconds: Option<f32>,
-    options: DubbingOptions,
-    num_step: usize,
+    options: &DubbingOptions,
+    settings: &NativeSynthesisSettings,
 ) -> GenerationRequest {
     let mut request = GenerationRequest::new_text_only(text);
     request.languages = vec![language_for_omnivoice(options.target_language)];
-    request.voice_clone_prompts = vec![Some(voice_clone_prompt.clone())];
+    request.voice_clone_prompts = vec![voice_clone_prompt.cloned()];
+    request.instructs = vec![design_instruct(settings)];
     request.durations = vec![target_duration_seconds];
-    request.generation_config.num_step = num_step;
-    request.generation_config.guidance_scale = 2.0;
-    request.generation_config.position_temperature = if options.omni_temperature > 0.0 {
+    request.speeds = vec![target_duration_seconds
+        .is_none()
+        .then_some(settings.speed)
+        .flatten()];
+    request.generation_config.num_step = settings.num_step as usize;
+    request.generation_config.guidance_scale = settings.guidance_scale;
+    request.generation_config.position_temperature = if options.omni_temperature > 0.0
+        && (settings.position_temperature - NativeSynthesisSettings::default().position_temperature)
+            .abs()
+            <= f32::EPSILON
+    {
         options.omni_temperature
     } else {
-        1.0
+        settings.position_temperature
     };
-    request.generation_config.class_temperature = 0.0;
-    request.generation_config.preprocess_prompt = true;
-    request.generation_config.postprocess_output = true;
-    request.generation_config.denoise = true;
+    request.generation_config.class_temperature = settings.class_temperature;
+    request.generation_config.preprocess_prompt = settings.preprocess_prompt;
+    request.generation_config.postprocess_output = settings.postprocess_output;
+    request.generation_config.denoise = settings.denoise;
     request
+}
+
+#[cfg(feature = "ml")]
+fn design_instruct(settings: &NativeSynthesisSettings) -> Option<String> {
+    if !matches!(settings.voice_mode, VoiceMode::Design) {
+        return None;
+    }
+
+    settings
+        .instruct
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
 }
 
 #[cfg(feature = "ml")]
@@ -678,5 +839,87 @@ mod tests {
 
         assert_eq!(durations.len(), 2);
         assert!(durations[1].expect("long duration") > durations[0].expect("short duration"));
+    }
+
+    #[test]
+    fn generation_request_maps_design_settings_without_clone_prompt() {
+        let options = DubbingOptions::default();
+        let settings = NativeSynthesisSettings {
+            voice_mode: VoiceMode::Design,
+            instruct: Some("female, young adult, high pitch".to_string()),
+            speed: Some(1.25),
+            duration_seconds: None,
+            num_step: 32,
+            guidance_scale: 2.5,
+            position_temperature: 1.5,
+            class_temperature: 0.2,
+            denoise: false,
+            preprocess_prompt: false,
+            postprocess_output: false,
+        };
+
+        let request = generation_request("Ola".to_string(), None, None, &options, &settings);
+
+        assert_eq!(
+            request.instructs[0].as_deref(),
+            Some("female, young adult, high pitch")
+        );
+        assert!(request.voice_clone_prompts[0].is_none());
+        assert_eq!(request.speeds[0], Some(1.25));
+        assert_eq!(request.generation_config.num_step, 32);
+        assert!(!request.generation_config.denoise);
+    }
+
+    #[test]
+    fn generation_request_prefers_duration_over_speed() {
+        let options = DubbingOptions::default();
+        let settings = NativeSynthesisSettings {
+            speed: Some(1.5),
+            ..NativeSynthesisSettings::default()
+        };
+        let prompt = VoiceClonePrompt::new_empty("referencia");
+
+        let request = generation_request(
+            "Ola".to_string(),
+            Some(&prompt),
+            Some(2.5),
+            &options,
+            &settings,
+        );
+
+        assert!(request.voice_clone_prompts[0].is_some());
+        assert_eq!(request.durations[0], Some(2.5));
+        assert_eq!(request.speeds[0], None);
+    }
+
+    #[test]
+    fn generation_request_preserves_native_tags_for_omnivoice_frontend() {
+        let options = DubbingOptions::default();
+        let settings = NativeSynthesisSettings::default();
+
+        let request = generation_request(
+            "[sigh] Ola [question-ah]?".to_string(),
+            None,
+            None,
+            &options,
+            &settings,
+        );
+
+        assert_eq!(request.texts[0], "[sigh] Ola [question-ah]?");
+    }
+
+    #[test]
+    fn line_metadata_tags_are_applied_to_synthesis_text() {
+        assert_eq!(
+            tagged_synthesis_text(&["[sigh]".to_string()], "Ola mundo."),
+            "[sigh] Ola mundo."
+        );
+        assert_eq!(
+            tagged_synthesis_text(
+                &["[sigh]".to_string(), "[sigh]".to_string()],
+                "[sigh] Ola mundo."
+            ),
+            "[sigh] Ola mundo."
+        );
     }
 }

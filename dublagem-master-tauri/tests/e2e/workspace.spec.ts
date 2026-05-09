@@ -17,6 +17,41 @@ test("keeps dubbing controls and job status reachable in a short window", async 
   await expect(page.getByText("Fila sem arquivo ativo")).toBeVisible();
 });
 
+test("shows native OmniVoice tag and line property controls", async ({ page }) => {
+  await page.setViewportSize({ width: 1600, height: 960 });
+  await page.goto("/");
+
+  await expect(page.getByRole("region", { name: "Paleta de tags OmniVoice" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "[sigh]" })).toBeVisible();
+  await expect(page.getByRole("complementary", { name: "Propriedades da linha" })).toBeVisible();
+  await expect(page.getByText("Ajustes nativos")).toBeVisible();
+});
+
+test("keeps spaces inside line textareas without rendering duplicate text", async ({ page }) => {
+  await page.setViewportSize({ width: 1600, height: 960 });
+  await page.goto("/");
+
+  const sourceEditor = page.locator("section").filter({ hasText: "Texto origem" }).first();
+  const firstLine = sourceEditor.locator("textarea").first();
+  await firstLine.fill("");
+  await firstLine.pressSequentially("palavras com espacos");
+
+  await expect(firstLine).toHaveValue("palavras com espacos");
+
+  const outsideDuplicateCount = await firstLine.evaluate((textarea) => {
+    const row = textarea.closest("label");
+    if (!row) {
+      return 0;
+    }
+
+    return Array.from(row.children).filter((child) => {
+      return child !== textarea && child.textContent?.includes("palavras com espacos");
+    }).length;
+  });
+
+  expect(outsideDuplicateCount).toBe(0);
+});
+
 test("lets the execution log use the remaining desktop height", async ({ page }) => {
   await page.setViewportSize({ width: 1600, height: 960 });
   await page.goto("/");

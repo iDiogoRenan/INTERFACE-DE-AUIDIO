@@ -1,5 +1,7 @@
-import { FileAudio, Filter, RefreshCw } from "lucide-react";
+import * as Tooltip from "@radix-ui/react-tooltip";
+import { FileAudio, Filter, Plus, RefreshCw } from "lucide-react";
 import { useMemo, useState } from "react";
+import { nativeTagDescriptions, nativeTagGroups } from "../../shared/omnivoice/nativeControls";
 import { useWorkspaceStore } from "../../stores/workspaceStore";
 import styles from "./ProjectExplorer.module.css";
 
@@ -8,6 +10,7 @@ export function ProjectExplorer() {
   const selectedPath = useWorkspaceStore((state) => state.selectedPath);
   const selectFile = useWorkspaceStore((state) => state.selectFile);
   const scan = useWorkspaceStore((state) => state.scan);
+  const insertNativeTag = useWorkspaceStore((state) => state.insertNativeTag);
   const [familyFilter, setFamilyFilter] = useState<string>("all");
 
   const families = useMemo(
@@ -70,6 +73,58 @@ export function ProjectExplorer() {
           </button>
         ))}
       </div>
+
+      <section className={styles.tagPalette} aria-label="Paleta de tags OmniVoice">
+        <div className={styles.paletteHeader}>
+          <strong>Paleta de tags</strong>
+          <span>Somente nativas OmniVoice</span>
+        </div>
+        {nativeTagGroups.map((group) => (
+          <div key={group.id} className={styles.tagGroup}>
+            <span>{group.label}</span>
+            <div>
+              <Tooltip.Provider delayDuration={120}>
+                {group.tags.map((tag) => (
+                  <Tooltip.Root key={tag}>
+                    <Tooltip.Trigger asChild>
+                      <button
+                        type="button"
+                        disabled={!selectedPath}
+                        title={nativeTagDescriptions[tag]}
+                        data-tag={tag}
+                        onClick={() => {
+                          insertNativeTag(tag);
+                        }}
+                      >
+                        {tag}
+                      </button>
+                    </Tooltip.Trigger>
+                    <Tooltip.Portal>
+                      <Tooltip.Content
+                        className={styles.tooltipContent}
+                        side="right"
+                        sideOffset={6}
+                      >
+                        {nativeTagDescriptions[tag]}
+                        <Tooltip.Arrow className={styles.tooltipArrow} />
+                      </Tooltip.Content>
+                    </Tooltip.Portal>
+                  </Tooltip.Root>
+                ))}
+              </Tooltip.Provider>
+            </div>
+          </div>
+        ))}
+        <button
+          type="button"
+          className={styles.manageTags}
+          disabled
+          title="A lista e bloqueada para manter apenas tags nativas suportadas."
+        >
+          <Plus size={14} />
+          Tags nativas bloqueadas
+        </button>
+      </section>
     </aside>
   );
 }

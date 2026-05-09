@@ -1,5 +1,6 @@
 export type LanguageCode = "auto" | "en" | "pt" | "fr" | "sv";
 export type DubbingMode = "classico" | "antisotaque";
+export type VoiceMode = "clone" | "design" | "auto";
 export type AudioFileStatus =
   | "pending"
   | "dubbed"
@@ -41,6 +42,21 @@ export interface DubbingOptions {
   trailingPeriod: boolean;
   padMs: number;
   omniTemperature: number;
+  nativeSynthesis: NativeSynthesisSettings;
+}
+
+export interface NativeSynthesisSettings {
+  voiceMode: VoiceMode;
+  instruct: string | null;
+  speed: number | null;
+  durationSeconds: number | null;
+  numStep: number;
+  guidanceScale: number;
+  positionTemperature: number;
+  classTemperature: number;
+  denoise: boolean;
+  preprocessPrompt: boolean;
+  postprocessOutput: boolean;
 }
 
 export interface AppConfig {
@@ -100,6 +116,41 @@ export interface DubbingRequest {
   options: DubbingOptions;
   customSourceText: string | null;
   customTargetText: string | null;
+  lineOverrides: LineSynthesisOverride[];
+}
+
+export interface LineSynthesisOverride {
+  lineIndex: number;
+  targetText: string;
+  tags: string[];
+  settings: NativeSynthesisSettings;
+}
+
+export interface SynthesisLinePreviewRequest {
+  sourceAudio: string;
+  text: string;
+  tags: string[];
+  settings: NativeSynthesisSettings;
+}
+
+export interface ProjectMetadata {
+  version: number;
+  files: Record<string, ProjectFileMetadata | undefined>;
+}
+
+export interface ProjectFileMetadata {
+  sourceText: string | null;
+  targetText: string | null;
+  baselineSourceText: string | null;
+  baselineTargetText: string | null;
+  lines: Record<string, ProjectLineMetadata | undefined>;
+}
+
+export interface ProjectLineMetadata {
+  tags: string[];
+  characterId: string | null;
+  notes: string | null;
+  settings: NativeSynthesisSettings;
 }
 
 export interface DubbingJobEvent {
@@ -125,5 +176,18 @@ export const defaultOptions: DubbingOptions = {
   commaBeforeQuestion: false,
   trailingPeriod: false,
   padMs: 200,
-  omniTemperature: 0
+  omniTemperature: 0,
+  nativeSynthesis: {
+    voiceMode: "clone",
+    instruct: null,
+    speed: null,
+    durationSeconds: null,
+    numStep: 48,
+    guidanceScale: 2,
+    positionTemperature: 1,
+    classTemperature: 0,
+    denoise: true,
+    preprocessPrompt: true,
+    postprocessOutput: true
+  }
 };

@@ -5,6 +5,8 @@ import type {
   AudioMetadata,
   DubbingRequest,
   LanguageCode,
+  ProjectMetadata,
+  SynthesisLinePreviewRequest,
   TranslationRequest,
   TranslationResult,
   TranscriptionResult
@@ -28,6 +30,12 @@ export const tauriClient = {
   loadConfig: () =>
     isTauriRuntime() ? command<AppConfig>("load_config") : Promise.resolve(defaultConfig),
   saveConfig: (config: AppConfig) => command<AppConfig>("save_config", { config }),
+  loadProjectMetadata: (outputDir: string) =>
+    isTauriRuntime()
+      ? command<ProjectMetadata>("load_project_metadata", { outputDir })
+      : Promise.resolve(emptyProjectMetadata()),
+  saveProjectMetadata: (outputDir: string, metadata: ProjectMetadata) =>
+    command<ProjectMetadata>("save_project_metadata", { outputDir, metadata }),
   scanAudioFolder: (inputDir: string, outputDir: string | null) =>
     command<AudioFileEntry[]>("scan_audio_folder", { inputDir, outputDir }),
   getAudioMetadata: (path: string) => command<AudioMetadata>("get_audio_metadata", { path }),
@@ -37,6 +45,8 @@ export const tauriClient = {
   translateText: (request: TranslationRequest) =>
     command<TranslationResult>("translate_text", { request }),
   startDubbingJob: (request: DubbingRequest) => command<string>("start_dubbing_job", { request }),
+  previewSynthesisLine: (request: SynthesisLinePreviewRequest) =>
+    command<string>("preview_synthesis_line", { request }),
   cancelJob: (jobId: string) => runCommand("cancel_job", { jobId }),
   approveFile: (source: string, approvedDir: string) =>
     command<string>("approve_file", { source, approvedDir }),
@@ -54,6 +64,10 @@ const defaultConfig: AppConfig = {
   voicePoolDir: "voice_pool_ptbr",
   options: defaultOptions
 };
+
+export function emptyProjectMetadata(): ProjectMetadata {
+  return { version: 1, files: {} };
+}
 
 declare global {
   interface Window {

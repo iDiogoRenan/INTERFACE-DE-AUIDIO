@@ -1,6 +1,8 @@
 use crate::error::{AppError, AppResult};
 use async_trait::async_trait;
-use dublagem_domain::{DubbingOptions, LanguageCode, TranscriptionResult, VoiceProfile};
+use dublagem_domain::{
+    DubbingOptions, LanguageCode, LineSynthesisOverride, TranscriptionResult, VoiceProfile,
+};
 use std::{
     path::{Path, PathBuf},
     sync::Arc,
@@ -35,6 +37,7 @@ pub struct SynthesisRequest<'a> {
     pub reference_audio: &'a Path,
     pub output_path: &'a Path,
     pub options: DubbingOptions,
+    pub line_overrides: &'a [LineSynthesisOverride],
     pub hooks: SynthesisHooks,
 }
 

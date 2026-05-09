@@ -1,0 +1,65 @@
+import { describe, expect, it } from "vitest";
+import {
+  insertTagIntoLine,
+  nativeTags,
+  removeNativeTagsFromText,
+  replaceLine,
+  splitLines,
+  tagsByLine,
+  tagsInText,
+  textSegments,
+  unknownNativeTags
+} from "./nativeControls";
+
+describe("native OmniVoice controls", () => {
+  it("contains only the official native non-verbal tags", () => {
+    expect(nativeTags).toEqual([
+      "[laughter]",
+      "[sigh]",
+      "[confirmation-en]",
+      "[question-en]",
+      "[question-ah]",
+      "[question-oh]",
+      "[question-ei]",
+      "[question-yi]",
+      "[surprise-ah]",
+      "[surprise-oh]",
+      "[surprise-wa]",
+      "[surprise-yo]",
+      "[dissatisfaction-hnn]"
+    ]);
+  });
+
+  it("renders supported tags as distinct text segments", () => {
+    expect(textSegments("[sigh] Ola [surprise-oh]!")).toEqual([
+      { kind: "tag", value: "[sigh]" },
+      { kind: "text", value: " Ola " },
+      { kind: "tag", value: "[surprise-oh]" },
+      { kind: "text", value: "!" }
+    ]);
+  });
+
+  it("rejects unknown lowercase bracket tags while allowing pronunciation hints", () => {
+    expect(unknownNativeTags("Texto [angry] invalido [B EY1 S].")).toEqual(["[angry]"]);
+  });
+
+  it("updates line-oriented editor content without touching adjacent lines", () => {
+    const text = "linha um\nlinha dois";
+
+    expect(replaceLine(text, 1, "linha dois [sigh]")).toBe("linha um\nlinha dois [sigh]");
+    expect(insertTagIntoLine(text, 0, "[laughter]")).toBe("linha um [laughter] \nlinha dois");
+    expect(splitLines("")).toEqual([""]);
+  });
+
+  it("extracts native tags from text in order", () => {
+    expect(tagsInText("[sigh] Ola [question-ah]?")).toEqual(["[sigh]", "[question-ah]"]);
+  });
+
+  it("can lift official native tags out of spoken text", () => {
+    expect(removeNativeTagsFromText("[sigh] Ola [question-ah]?\n[B EY1 S] [surprise-oh]!")).toBe(
+      "Ola?\n[B EY1 S]!"
+    );
+    expect(removeNativeTagsFromText("Precisa manter espaco ")).toBe("Precisa manter espaco ");
+    expect(tagsByLine("[sigh] Ola\nOpa [surprise-oh]!")).toEqual([["[sigh]"], ["[surprise-oh]"]]);
+  });
+});

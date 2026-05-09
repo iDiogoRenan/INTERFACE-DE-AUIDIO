@@ -1,6 +1,7 @@
 use crate::{
     audio,
     error::{AppError, AppResult},
+    project_metadata,
     speech::{
         runtime::SpeechRuntime, SynthesisCancellationCheck, SynthesisHooks,
         SynthesisProgressCallback, SynthesisRequest, Transcriber,
@@ -136,6 +137,12 @@ async fn run_job(
             "selecione ao menos um audio de origem".to_string(),
         ));
     }
+    project_metadata::validate_settings(&request.options.native_synthesis)?;
+    for line in &request.line_overrides {
+        project_metadata::validate_text_native_tags(&line.target_text)?;
+        project_metadata::validate_native_tags(&line.tags)?;
+        project_metadata::validate_settings(&line.settings)?;
+    }
 
     std::fs::create_dir_all(&request.output_dir)?;
     let total = request.input_paths.len();
@@ -237,7 +244,8 @@ async fn run_job(
             return Ok(());
         };
 
-        let target_text = apply_text_options(target_text, source_text.clone(), request.options);
+        let target_text = apply_text_options(target_text, source_text.clone(), &request.options)?;
+        project_metadata::validate_text_native_tags(&target_text)?;
         emit_transcription(
             &app,
             job_id,
@@ -273,7 +281,8 @@ async fn run_job(
                 source_audio: input_path,
                 reference_audio,
                 output_path: &output_path,
-                options: request.options,
+                options: request.options.clone(),
+                line_overrides: &request.line_overrides,
                 hooks: synthesis_hooks,
             }),
         )
@@ -568,8 +577,8 @@ impl JobEventExt for DubbingJobEvent {
 fn apply_text_options(
     mut target_text: String,
     source_text: String,
-    options: dublagem_domain::DubbingOptions,
-) -> String {
+    options: &dublagem_domain::DubbingOptions,
+) -> AppResult<String> {
     if options.comma_before_question {
         target_text = crate::text::comma_before_question(&target_text);
     }
@@ -579,7 +588,9 @@ fn apply_text_options(
     if options.trailing_period {
         target_text = format!("{} .", target_text.trim_end());
     }
-    crate::text::synchronize_punctuation(&target_text, &source_text)
+    let target_text = crate::text::synchronize_punctuation(&target_text, &source_text);
+    project_metadata::validate_text_native_tags(&target_text)?;
+    Ok(target_text)
 }
 
 fn emit_stage(

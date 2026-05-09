@@ -1,10 +1,29 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { useWorkspaceStore } from "./workspaceStore";
-import { defaultOptions, type AppConfig, type AudioFileEntry } from "../shared/tauri/types";
+import { applyJobEvent, useWorkspaceStore } from "./workspaceStore";
+import {
+  defaultOptions,
+  type AppConfig,
+  type AudioFileEntry,
+  type DubbingJobEvent,
+  type DubbingRequest,
+  type ProjectMetadata,
+  type SynthesisLinePreviewRequest
+} from "../shared/tauri/types";
 
 const clientMocks = vi.hoisted(() => ({
-  scanAudioFolder: vi.fn(),
-  startDubbingJob: vi.fn(() => Promise.resolve("job-1"))
+  loadProjectMetadata: vi.fn<() => Promise<ProjectMetadata>>(() =>
+    Promise.resolve({ version: 1, files: {} })
+  ),
+  saveProjectMetadata: vi.fn<
+    (outputDir: string, metadata: ProjectMetadata) => Promise<ProjectMetadata>
+  >(() => Promise.resolve({ version: 1, files: {} })),
+  previewSynthesisLine: vi.fn<(request: SynthesisLinePreviewRequest) => Promise<string>>(() =>
+    Promise.resolve("E:\\audio\\preview.wav")
+  ),
+  scanAudioFolder: vi.fn<(inputDir: string, outputDir: string) => Promise<AudioFileEntry[]>>(),
+  startDubbingJob: vi.fn<(request: DubbingRequest) => Promise<string>>(() =>
+    Promise.resolve("job-1")
+  )
 }));
 
 vi.mock("@tauri-apps/api/event", () => ({
@@ -12,12 +31,16 @@ vi.mock("@tauri-apps/api/event", () => ({
 }));
 
 vi.mock("../shared/tauri/client", () => ({
+  emptyProjectMetadata: () => ({ version: 1, files: {} }),
   isTauriRuntime: () => false,
   tauriClient: {
     loadConfig: vi.fn(),
     saveConfig: vi.fn(),
+    loadProjectMetadata: clientMocks.loadProjectMetadata,
+    saveProjectMetadata: clientMocks.saveProjectMetadata,
     scanAudioFolder: clientMocks.scanAudioFolder,
     startDubbingJob: clientMocks.startDubbingJob,
+    previewSynthesisLine: clientMocks.previewSynthesisLine,
     cancelJob: vi.fn()
   }
 }));
@@ -42,12 +65,17 @@ const cachedDubbedFile = audioFile("E:\\audio\\origem\\line_d.wav", "line_d.wav"
 
 describe("workspaceStore transcription hydration", () => {
   beforeEach(() => {
+    clientMocks.loadProjectMetadata.mockClear();
+    clientMocks.saveProjectMetadata.mockClear();
+    clientMocks.previewSynthesisLine.mockClear();
     clientMocks.scanAudioFolder.mockReset();
     clientMocks.startDubbingJob.mockClear();
     useWorkspaceStore.setState({
       config,
       files: [fileA, fileB],
+      projectMetadata: { version: 1, files: {} },
       selectedPath: fileA.path,
+      selectedLineIndex: 0,
       sourceText: "",
       targetText: "",
       transcriptionDrafts: {},
@@ -60,6 +88,7 @@ describe("workspaceStore transcription hydration", () => {
       totalFiles: null,
       isCancelling: false,
       lastOutputPath: null,
+      linePreviewPath: null,
       progress: 0,
       isBusy: false,
       logs: []
@@ -131,6 +160,34 @@ describe("workspaceStore transcription hydration", () => {
     expect(useWorkspaceStore.getState().targetText).toBe("Ola do cache.");
   });
 
+  it("keeps original sidecar baselines when scan cache contains a redubbed draft", async () => {
+    const redubbedFile = audioFile(cachedDubbedFile.path, cachedDubbedFile.name, "dubbed", {
+      sourceText: "Hello from cache.",
+      targetText: "Texto revisado."
+    });
+    clientMocks.scanAudioFolder.mockResolvedValue([redubbedFile]);
+    clientMocks.loadProjectMetadata.mockResolvedValue({
+      version: 1,
+      files: {
+        [redubbedFile.name]: {
+          sourceText: "Hello from cache.",
+          targetText: "Texto revisado.",
+          baselineSourceText: "Hello from cache.",
+          baselineTargetText: "Ola do cache.",
+          lines: {}
+        }
+      }
+    });
+    useWorkspaceStore.setState({ files: [], selectedPath: null });
+
+    await useWorkspaceStore.getState().scan();
+
+    expect(useWorkspaceStore.getState().targetText).toBe("Texto revisado.");
+    expect(useWorkspaceStore.getState().transcriptionBaselines[redubbedFile.path]?.targetText).toBe(
+      "Ola do cache."
+    );
+  });
+
   it("sends the edited cached transcription when redubbing a processed file", async () => {
     useWorkspaceStore.setState({ files: [cachedDubbedFile], selectedPath: null });
     useWorkspaceStore.getState().selectFile(cachedDubbedFile.path);
@@ -147,6 +204,60 @@ describe("workspaceStore transcription hydration", () => {
     );
   });
 
+  it("sends line synthesis overrides when selected lines have native metadata", async () => {
+    useWorkspaceStore.getState().setTargetText("Ola linha um.\nOla linha dois.");
+    useWorkspaceStore.getState().setSelectedLineIndex(0);
+    useWorkspaceStore.getState().insertNativeTag("[sigh]");
+    useWorkspaceStore.getState().updateSelectedLineSettings({ speed: 1.2 });
+
+    await useWorkspaceStore.getState().startDubbing();
+
+    const [[request]] = clientMocks.startDubbingJob.mock.calls;
+    expect(request.lineOverrides).toHaveLength(2);
+    expect(request.lineOverrides[0]).toMatchObject({
+      lineIndex: 0,
+      targetText: "Ola linha um.",
+      tags: ["[sigh]"]
+    });
+    expect(request.lineOverrides[0].settings.speed).toBe(1.2);
+    expect(request.lineOverrides[1]).toMatchObject({
+      lineIndex: 1,
+      targetText: "Ola linha dois.",
+      tags: []
+    });
+  });
+
+  it("keeps native tags as removable line metadata instead of spoken text", () => {
+    useWorkspaceStore.getState().setTargetText("[sigh] Ola linha um.\nOla linha dois.");
+    useWorkspaceStore.getState().setSelectedLineIndex(0);
+
+    expect(useWorkspaceStore.getState().targetText).toBe("Ola linha um.\nOla linha dois.");
+    expect(
+      useWorkspaceStore.getState().projectMetadata.files[fileA.name]?.lines["0"]?.tags
+    ).toEqual(["[sigh]"]);
+
+    useWorkspaceStore.getState().removeNativeTag("[sigh]");
+
+    expect(
+      useWorkspaceStore.getState().projectMetadata.files[fileA.name]?.lines["0"]?.tags
+    ).toEqual([]);
+  });
+
+  it("generates a preview for the selected line using its native settings", async () => {
+    useWorkspaceStore.getState().setTargetText("Linha para previa.");
+    useWorkspaceStore.getState().insertNativeTag("[sigh]");
+    useWorkspaceStore.getState().updateSelectedLineSettings({ voiceMode: "auto" });
+
+    await useWorkspaceStore.getState().previewSelectedLine();
+
+    const [[request]] = clientMocks.previewSynthesisLine.mock.calls;
+    expect(request.sourceAudio).toBe(fileA.path);
+    expect(request.text).toBe("Linha para previa.");
+    expect(request.tags).toEqual(["[sigh]"]);
+    expect(request.settings.voiceMode).toBe("auto");
+    expect(useWorkspaceStore.getState().linePreviewPath).toBe("E:\\audio\\preview.wav");
+  });
+
   it("reverts edited transcription fields to the selected file baseline", () => {
     useWorkspaceStore.setState({ files: [cachedDubbedFile], selectedPath: null });
     useWorkspaceStore.getState().selectFile(cachedDubbedFile.path);
@@ -156,6 +267,39 @@ describe("workspaceStore transcription hydration", () => {
     useWorkspaceStore.getState().revertTranscription();
 
     expect(useWorkspaceStore.getState().sourceText).toBe("Hello from cache.");
+    expect(useWorkspaceStore.getState().targetText).toBe("Ola do cache.");
+  });
+
+  it("can revert to the original baseline after redubbing edited transcription", () => {
+    useWorkspaceStore.setState({ files: [cachedDubbedFile], selectedPath: null });
+    useWorkspaceStore.getState().selectFile(cachedDubbedFile.path);
+    useWorkspaceStore.getState().setTargetText("Texto editado para redublagem.");
+
+    applyJobEvent(
+      jobEvent({
+        kind: "transcription",
+        filePath: cachedDubbedFile.path,
+        sourceText: "Hello from cache.",
+        targetText: "Texto editado para redublagem."
+      })
+    );
+    applyJobEvent(
+      jobEvent({
+        kind: "file_complete",
+        stage: "file_complete",
+        filePath: cachedDubbedFile.path,
+        outputPath: "E:\\audio\\saida\\line_d.wav",
+        sourceText: "Hello from cache.",
+        targetText: "Texto editado para redublagem."
+      })
+    );
+
+    expect(
+      useWorkspaceStore.getState().transcriptionBaselines[cachedDubbedFile.path]?.targetText
+    ).toBe("Ola do cache.");
+
+    useWorkspaceStore.getState().revertTranscription();
+
     expect(useWorkspaceStore.getState().targetText).toBe("Ola do cache.");
   });
 });
@@ -173,5 +317,23 @@ function audioFile(
     status,
     metadata: null,
     transcription
+  };
+}
+
+function jobEvent(patch: Partial<DubbingJobEvent>): DubbingJobEvent {
+  return {
+    jobId: "00000000-0000-0000-0000-000000000001",
+    kind: "transcription",
+    stage: null,
+    message: "Evento de teste.",
+    progress: null,
+    fileName: null,
+    filePath: null,
+    fileIndex: null,
+    totalFiles: null,
+    sourceText: null,
+    targetText: null,
+    outputPath: null,
+    ...patch
   };
 }
