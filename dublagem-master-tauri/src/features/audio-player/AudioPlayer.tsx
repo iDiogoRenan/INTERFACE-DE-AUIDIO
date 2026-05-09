@@ -57,7 +57,8 @@ export function AudioPlayer({ title, path }: AudioPlayerProps) {
   const currentPreview = preview?.path === path ? preview : null;
   const source = currentPreview?.source ?? null;
   const currentWaveform = waveform?.source === source ? waveform : null;
-  const durationSeconds = currentWaveform?.durationSeconds ?? nativeDuration;
+  const decodedDuration = currentWaveform?.durationSeconds ?? 0;
+  const durationSeconds = Math.max(decodedDuration, nativeDuration);
   const progress = durationSeconds > 0 ? currentTime / durationSeconds : 0;
   const error =
     playbackError?.path === path
@@ -197,7 +198,7 @@ export function AudioPlayer({ title, path }: AudioPlayerProps) {
           setWaveform({
             source,
             peaks: [],
-            durationSeconds: nativeDuration,
+            durationSeconds: 0,
             error: errorMessage(unknownError)
           });
         }
@@ -210,7 +211,7 @@ export function AudioPlayer({ title, path }: AudioPlayerProps) {
       cancelled = true;
       void audioContext.close();
     };
-  }, [nativeDuration, source]);
+  }, [source]);
 
   useEffect(() => {
     renderWaveform();
@@ -349,7 +350,10 @@ export function AudioPlayer({ title, path }: AudioPlayerProps) {
           src={source}
           preload="metadata"
           onLoadedMetadata={(event) => {
-            setNativeDuration(event.currentTarget.duration);
+            setNativeDuration(normalizeDuration(event.currentTarget.duration));
+          }}
+          onDurationChange={(event) => {
+            setNativeDuration(normalizeDuration(event.currentTarget.duration));
           }}
           onTimeUpdate={(event) => {
             setCurrentTime(event.currentTarget.currentTime);
@@ -413,4 +417,12 @@ function seekKeyOffset(key: string, stepSeconds: number): number | null {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function normalizeDuration(durationSeconds: number): number {
+  if (!Number.isFinite(durationSeconds) || durationSeconds <= 0) {
+    return 0;
+  }
+
+  return durationSeconds;
 }

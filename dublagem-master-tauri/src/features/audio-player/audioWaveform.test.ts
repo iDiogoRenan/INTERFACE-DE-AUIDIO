@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildWaveformPeaks, formatClockTime } from "./audioWaveform";
+import { buildWaveformPeaks, calculateWaveformBars, formatClockTime } from "./audioWaveform";
 
 describe("formatClockTime", () => {
   it("formats sub-minute and long running audio clocks", () => {
@@ -30,5 +30,14 @@ describe("buildWaveformPeaks", () => {
       { min: 0, max: 0 },
       { min: 0, max: 0 }
     ]);
+  });
+});
+
+describe("calculateWaveformBars", () => {
+  it("distributes bars across the full canvas width without accumulated rounding loss", () => {
+    const bars = calculateWaveformBars(650, 240, 1);
+    const lastBar = bars[bars.length - 1];
+
+    expect(lastBar.x + lastBar.width).toBeCloseTo(650);
   });
 });

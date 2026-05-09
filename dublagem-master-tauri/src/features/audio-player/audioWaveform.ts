@@ -22,6 +22,11 @@ export interface DrawWaveformOptions {
   theme: WaveformTheme;
 }
 
+export interface WaveformBarLayout {
+  x: number;
+  width: number;
+}
+
 const secondsPerMinute = 60;
 const secondsPerHour = 3600;
 const defaultPeak: WaveformPeak = { min: 0, max: 0 };
@@ -52,11 +57,10 @@ export function buildWaveformPeaks(channelData: Float32Array, targetBars: number
     return Array.from({ length: barCount }, () => defaultPeak);
   }
 
-  const samplesPerBar = Math.max(1, Math.floor(channelData.length / barCount));
-
   return Array.from({ length: barCount }, (_, barIndex) => {
-    const start = barIndex * samplesPerBar;
-    const end = barIndex === barCount - 1 ? channelData.length : start + samplesPerBar;
+    const start = Math.floor((barIndex * channelData.length) / barCount);
+    const naturalEnd = Math.floor(((barIndex + 1) * channelData.length) / barCount);
+    const end = Math.min(channelData.length, Math.max(start + 1, naturalEnd));
     let min = 1;
     let max = -1;
 
@@ -71,6 +75,25 @@ export function buildWaveformPeaks(channelData: Float32Array, targetBars: number
       max: clampAmplitude(max)
     };
   });
+}
+
+export function calculateWaveformBars(
+  canvasWidth: number,
+  peakCount: number,
+  devicePixelRatio: number
+): WaveformBarLayout[] {
+  const width = Math.max(1, canvasWidth);
+  const count = Math.max(1, Math.floor(peakCount));
+  const ratio = Math.max(1, devicePixelRatio);
+  const slotWidth = width / count;
+  const desiredGap = count === 1 ? 0 : Math.max(1, 1.5 * ratio);
+  const gap = Math.min(desiredGap, slotWidth * 0.35);
+  const barWidth = Math.max(0.5, slotWidth - gap);
+
+  return Array.from({ length: count }, (_, index) => ({
+    x: index * slotWidth,
+    width: index === count - 1 ? Math.max(0.5, width - index * slotWidth) : barWidth
+  }));
 }
 
 export function drawWaveform({
@@ -102,8 +125,7 @@ export function drawWaveform({
   const waveTop = timelineHeight;
   const waveHeight = height - timelineHeight;
   const centerY = waveTop + waveHeight / 2;
-  const barGap = Math.max(1, Math.floor(1.5 * ratio));
-  const barWidth = Math.max(1, Math.floor(width / Math.max(1, peaks.length)) - barGap);
+  const bars = calculateWaveformBars(width, peaks.length, ratio);
   const clampedProgress = clampProgress(progress);
   const progressX = width * clampedProgress;
 
@@ -117,12 +139,12 @@ export function drawWaveform({
   context.stroke();
 
   peaks.forEach((peak, index) => {
-    const x = index * (barWidth + barGap);
+    const bar = bars[index];
     const top = centerY - Math.max(1, peak.max * (waveHeight / 2));
     const bottom = centerY - Math.min(-1, peak.min * (waveHeight / 2));
     const barHeight = Math.max(1, bottom - top);
-    context.fillStyle = x <= progressX ? theme.progress : theme.waveform;
-    context.fillRect(x, top, barWidth, barHeight);
+    context.fillStyle = bar.x <= progressX ? theme.progress : theme.waveform;
+    context.fillRect(bar.x, top, bar.width, barHeight);
   });
 
   context.strokeStyle = theme.playhead;
