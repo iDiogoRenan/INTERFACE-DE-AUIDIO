@@ -30,7 +30,7 @@ export function SettingsPanel() {
           label="Origem"
           value={config.inputDir}
           mode="directory"
-          placeholder="Pasta com audios originais"
+          placeholder="Pasta com áudios originais"
           onChange={(inputDir) => {
             void saveAndScan({ ...config, inputDir });
           }}
@@ -45,10 +45,10 @@ export function SettingsPanel() {
           }}
         />
         <PathField
-          label="Audio guia"
+          label="Áudio guia"
           value={config.guideAudio}
           mode="file"
-          placeholder="Arquivo de referencia opcional"
+          placeholder="Arquivo de referência opcional"
           onChange={(guideAudio) => {
             void patchConfig({ guideAudio });
           }}
@@ -57,7 +57,7 @@ export function SettingsPanel() {
           label="Aprovados"
           value={config.approvedDir}
           mode="directory"
-          placeholder="Pasta de aprovacao final"
+          placeholder="Pasta de aprovação final"
           onChange={(approvedDir) => {
             void patchConfig({ approvedDir });
           }}
@@ -66,7 +66,7 @@ export function SettingsPanel() {
           label="Modelos"
           value={config.modelDir}
           mode="directory"
-          placeholder="Bundle local em models/"
+          placeholder="Pasta local de modelos"
           onChange={(modelDir) => {
             void patchConfig({ modelDir });
           }}
@@ -89,7 +89,7 @@ export function SettingsPanel() {
           >
             {sourceLanguages.map((language) => (
               <option key={language} value={language}>
-                {language.toUpperCase()}
+                {languageLabel(language)}
               </option>
             ))}
           </select>
@@ -109,7 +109,7 @@ export function SettingsPanel() {
           >
             {targetLanguages.map((language) => (
               <option key={language} value={language}>
-                {language.toUpperCase()}
+                {languageLabel(language)}
               </option>
             ))}
           </select>
@@ -126,13 +126,13 @@ export function SettingsPanel() {
           >
             {modes.map((mode) => (
               <option key={mode} value={mode}>
-                {mode}
+                {modeLabel(mode)}
               </option>
             ))}
           </select>
         </label>
         <label>
-          Pad final
+          Margem final
           <input
             type="number"
             min={0}
@@ -184,6 +184,25 @@ export function SettingsPanel() {
       </button>
     </section>
   );
+}
+
+function languageLabel(language: LanguageCode): string {
+  const labels: Record<LanguageCode, string> = {
+    auto: "Automático",
+    en: "Inglês",
+    pt: "Português",
+    fr: "Francês",
+    sv: "Sueco"
+  };
+  return labels[language];
+}
+
+function modeLabel(mode: DubbingMode): string {
+  const labels: Record<DubbingMode, string> = {
+    classico: "Clássico",
+    antisotaque: "Antissotaque"
+  };
+  return labels[mode];
 }
 
 interface ToggleProps {

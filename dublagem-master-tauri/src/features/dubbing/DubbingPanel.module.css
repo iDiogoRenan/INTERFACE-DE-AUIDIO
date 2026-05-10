@@ -549,11 +549,25 @@
 }
 
 .logPanel p {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 10px;
   margin: 0;
   padding: 6px 0;
   border-bottom: 1px solid var(--border);
   color: var(--text-muted);
   font-size: 12px;
+  line-height: 1.35;
+}
+
+.logPanel p span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.logTimestamp {
+  color: color-mix(in srgb, var(--text-muted) 78%, var(--text));
+  font-variant-numeric: tabular-nums;
 }
 
 .logPanel p[data-level="error"] {

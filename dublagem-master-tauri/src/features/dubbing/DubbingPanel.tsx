@@ -38,10 +38,10 @@ import styles from "./DubbingPanel.module.css";
 
 const pipelineStages: { stage: JobStage; label: string }[] = [
   { stage: "loading_models", label: "Modelos" },
-  { stage: "transcribing", label: "Transcricao" },
-  { stage: "translating", label: "Traducao" },
-  { stage: "synthesizing", label: "Sintese" },
-  { stage: "writing_output", label: "Saida" }
+  { stage: "transcribing", label: "Transcrição" },
+  { stage: "translating", label: "Tradução" },
+  { stage: "synthesizing", label: "Síntese" },
+  { stage: "writing_output", label: "Saída" }
 ];
 
 const stageOrder = new Map<JobStage, number>([
@@ -129,7 +129,7 @@ export function DubbingPanel() {
   return (
     <div className={styles.layout}>
       <div className={styles.mainColumn}>
-        <section className={styles.players} aria-label="Players de áudio">
+        <section className={styles.players} aria-label="Reprodutores de áudio">
           <AudioPlayer title="Origem" path={selectedPath} />
           <AudioPlayer title="Resultado" path={lastOutputPath} revision={lastOutputRevision} />
         </section>
@@ -227,7 +227,7 @@ export function DubbingPanel() {
       <section className={styles.jobStatus}>
         <div className={styles.statusHeader}>
           <div>
-            <span>{currentFileName ?? "Nenhum arquivo em execucao"}</span>
+            <span>{currentFileName ?? "Nenhum arquivo em execução"}</span>
             <strong>{currentStatus}</strong>
           </div>
           <output>{Math.round(progress)}%</output>
@@ -253,15 +253,36 @@ export function DubbingPanel() {
         </p>
       </section>
 
-      <section className={styles.logPanel} aria-label="Log de execução">
+      <section className={styles.logPanel} aria-label="Registro de execução">
         {logs.map((entry) => (
           <p key={entry.id} data-level={entry.level}>
-            {entry.message}
+            <time className={styles.logTimestamp} dateTime={entry.timestamp}>
+              {formatLogTimestamp(entry.timestamp)}
+            </time>
+            <span>{entry.message}</span>
           </p>
         ))}
       </section>
     </div>
   );
+}
+
+const logTimestampFormatter = new Intl.DateTimeFormat("pt-BR", {
+  day: "2-digit",
+  month: "2-digit",
+  year: "2-digit",
+  hour: "2-digit",
+  minute: "2-digit",
+  second: "2-digit",
+  hour12: false
+});
+
+function formatLogTimestamp(timestamp: string): string {
+  const date = new Date(timestamp);
+  if (Number.isNaN(date.getTime())) {
+    return timestamp;
+  }
+  return logTimestampFormatter.format(date).replace(",", "");
 }
 
 interface TaggedLineEditorProps {
@@ -384,12 +405,12 @@ interface SelectedNativeTagsProps {
 
 function SelectedNativeTags({ tags, onRemoveTag }: SelectedNativeTagsProps) {
   if (tags.length === 0) {
-    return <span className={styles.emptyTagHeader}>Sem tags</span>;
+    return <span className={styles.emptyTagHeader}>Sem marcadores</span>;
   }
 
   return (
     <Tooltip.Provider delayDuration={120}>
-      <div className={styles.selectedTags} aria-label="Tags nativas da linha selecionada">
+      <div className={styles.selectedTags} aria-label="Marcadores nativos da linha selecionada">
         {tags.map((tag) => (
           <Tooltip.Root key={tag}>
             <Tooltip.Trigger asChild>
@@ -527,7 +548,7 @@ function LinePropertiesPanel({
       {isPropertiesOpen && (
         <div className={styles.propertiesBody}>
           <CollapsibleSection
-            title="Propriedades basicas"
+            title="Propriedades básicas"
             isOpen={sectionOpenState.basicSettings}
             onOpenChange={(isOpen) => {
               onSectionOpenChange("basicSettings", isOpen);
@@ -542,19 +563,19 @@ function LinePropertiesPanel({
                     voiceMode,
                     instruct:
                       voiceMode === "design"
-                        ? (acceptedSettings.instruct ?? "female, young adult, moderate pitch")
+                        ? (acceptedSettings.instruct ?? "mulher, jovem adulta, tom moderado")
                         : null
                   });
                 }}
                 items={[
-                  { value: "clone", label: "Clone" },
-                  { value: "design", label: "Design" },
-                  { value: "auto", label: "Auto" }
+                  { value: "clone", label: "Clonagem" },
+                  { value: "design", label: "Desenho" },
+                  { value: "auto", label: "Automático" }
                 ]}
               />
             </ControlGroup>
 
-            <ControlGroup label="Instruct">
+            <ControlGroup label="Instrução">
               <input
                 value={acceptedSettings.instruct ?? ""}
                 disabled={controlsDisabled || acceptedSettings.voiceMode !== "design"}
@@ -581,7 +602,7 @@ function LinePropertiesPanel({
               </div>
             </ControlGroup>
 
-            <ControlGroup label="Duracao alvo">
+            <ControlGroup label="Duração alvo">
               <input
                 type="number"
                 min={nativeSynthesisNumberControls.durationSeconds.min}
@@ -600,11 +621,11 @@ function LinePropertiesPanel({
 
             <dl className={styles.durationFacts}>
               <div>
-                <dt>Duracao atual</dt>
+                <dt>Duração atual</dt>
                 <dd>{currentDuration ? `${currentDuration.toFixed(2)}s` : "-"}</dd>
               </div>
               <div>
-                <dt>Tags</dt>
+                <dt>Marcadores</dt>
                 <dd>{metadata.tags.length}</dd>
               </div>
             </dl>
@@ -630,7 +651,7 @@ function LinePropertiesPanel({
             }}
           >
             <NumberField
-              label="Steps"
+              label="Número de passos"
               value={acceptedSettings.numStep}
               min={nativeSynthesisNumberControls.numStep.min}
               max={nativeSynthesisNumberControls.numStep.max}
@@ -641,7 +662,7 @@ function LinePropertiesPanel({
               }}
             />
             <NumberField
-              label="Guidance"
+              label="Orientação"
               value={acceptedSettings.guidanceScale}
               min={nativeSynthesisNumberControls.guidanceScale.min}
               max={nativeSynthesisNumberControls.guidanceScale.max}
@@ -652,7 +673,7 @@ function LinePropertiesPanel({
               }}
             />
             <NumberField
-              label="Position temp"
+              label="Temperatura de posição"
               value={acceptedSettings.positionTemperature}
               min={nativeSynthesisNumberControls.positionTemperature.min}
               max={nativeSynthesisNumberControls.positionTemperature.max}
@@ -663,7 +684,7 @@ function LinePropertiesPanel({
               }}
             />
             <NumberField
-              label="Class temp"
+              label="Temperatura de classe"
               value={acceptedSettings.classTemperature}
               min={nativeSynthesisNumberControls.classTemperature.min}
               max={nativeSynthesisNumberControls.classTemperature.max}
@@ -674,7 +695,7 @@ function LinePropertiesPanel({
               }}
             />
             <NativeCheckbox
-              label="Denoise"
+              label="Redução de ruído"
               checked={acceptedSettings.denoise}
               disabled={controlsDisabled}
               onCheckedChange={(denoise) => {
@@ -682,7 +703,7 @@ function LinePropertiesPanel({
               }}
             />
             <NativeCheckbox
-              label="Preprocess prompt"
+              label="Pré-processar instrução"
               checked={acceptedSettings.preprocessPrompt}
               disabled={controlsDisabled}
               onCheckedChange={(preprocessPrompt) => {
@@ -690,7 +711,7 @@ function LinePropertiesPanel({
               }}
             />
             <NativeCheckbox
-              label="Postprocess output"
+              label="Pós-processar saída"
               checked={acceptedSettings.postprocessOutput}
               disabled={controlsDisabled}
               onCheckedChange={(postprocessOutput) => {
@@ -700,14 +721,14 @@ function LinePropertiesPanel({
           </CollapsibleSection>
 
           <CollapsibleSection
-            title="Polimento de audio"
+            title="Polimento de áudio"
             isOpen={sectionOpenState.audioPolish}
             onOpenChange={(isOpen) => {
               onSectionOpenChange("audioPolish", isOpen);
             }}
           >
             <NativeCheckbox
-              label="Casar loudness com origem"
+              label="Casar volume percebido com origem"
               checked={acceptedSettings.matchSourceLoudness}
               disabled={controlsDisabled}
               onCheckedChange={(matchSourceLoudness) => {
@@ -715,7 +736,7 @@ function LinePropertiesPanel({
               }}
             />
             <RangeField
-              label="Forca loudness"
+              label="Força do ajuste de volume"
               value={acceptedSettings.loudnessMatchStrength}
               min={nativeSynthesisNumberControls.loudnessMatchStrength.min}
               max={nativeSynthesisNumberControls.loudnessMatchStrength.max}
@@ -739,7 +760,7 @@ function LinePropertiesPanel({
               }}
             />
             <RangeField
-              label="Reducao de sibilancia"
+              label="Redução de sibilância"
               value={acceptedSettings.sibilanceReduction}
               min={nativeSynthesisNumberControls.sibilanceReduction.min}
               max={nativeSynthesisNumberControls.sibilanceReduction.max}
@@ -751,7 +772,7 @@ function LinePropertiesPanel({
               }}
             />
             <RangeField
-              label="Reducao de metalizado"
+              label="Redução de metalizado"
               value={acceptedSettings.artifactReduction}
               min={nativeSynthesisNumberControls.artifactReduction.min}
               max={nativeSynthesisNumberControls.artifactReduction.max}
@@ -790,15 +811,15 @@ function LineActionDock({
     <section className={styles.propertyActions} aria-label="Controles da linha">
       <button type="button" disabled={controlsDisabled} onClick={onSaveSettingsAsDefault}>
         <CheckCircle2 size={15} />
-        Salvar padrao global
+        Salvar padrão global
       </button>
       <button type="button" disabled={controlsDisabled} onClick={onResetSettingsToDefault}>
         <Undo2 size={15} />
-        Restaurar defaults
+        Restaurar padrões
       </button>
       <button type="button" disabled={controlsDisabled || !canPreviewLine} onClick={onPreview}>
         <Play size={15} />
-        Previa desta linha
+        Prévia desta linha
       </button>
       <button type="button" disabled={controlsDisabled} onClick={onRegenerate}>
         <RotateCcw size={15} />
@@ -1055,7 +1076,7 @@ function formatDecibels(value: number): string {
 
 function formatReduction(value: number): string {
   const percent = Math.round(value * 100);
-  return percent === 0 ? "off" : `-${String(percent)}%`;
+  return percent === 0 ? "desligado" : `-${String(percent)}%`;
 }
 
 interface NativeCheckboxProps {
@@ -1098,8 +1119,8 @@ function stageState(stage: JobStage, currentStage: JobStage | null): "pending" |
 
 function unsupportedNativeTagMessage(tag: string): string {
   if (tag === "[pause]") {
-    return "OmniVoice nao suporta [pause] como tag nativa. Use pontuacao ou duracao alvo para controlar pausas.";
+    return "OmniVoice não suporta [pause] como marcador nativo. Use pontuação ou duração alvo para controlar pausas.";
   }
 
-  return `Tag OmniVoice nao suportada: ${tag}`;
+  return `Marcador OmniVoice não suportado: ${tag}`;
 }

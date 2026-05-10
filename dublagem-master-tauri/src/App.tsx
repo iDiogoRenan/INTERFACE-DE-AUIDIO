@@ -28,7 +28,7 @@ function App() {
   useEffect(() => {
     void load().catch((error: unknown) => {
       appendLog(
-        error instanceof Error ? error.message : "Falha ao carregar configuracao.",
+        error instanceof Error ? error.message : "Falha ao carregar configuração.",
         "error"
       );
     });
@@ -47,7 +47,7 @@ function App() {
         <header className={styles.topbar}>
           <div>
             <h1>{APP_DISPLAY_NAME}</h1>
-            <p>Pipeline local em Rust para transcrição, tradução, síntese e validação.</p>
+            <p>Fluxo local em Rust para transcrição, tradução, síntese e validação.</p>
             <dl className={styles.modelBadges} aria-label="Modelos ativos">
               {ACTIVE_SPEECH_MODELS.map((model) => (
                 <div className={styles.modelBadge} key={model.label}>

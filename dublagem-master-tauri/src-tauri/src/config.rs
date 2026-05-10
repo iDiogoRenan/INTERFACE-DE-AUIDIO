@@ -27,7 +27,7 @@ pub fn save_config(app: &AppHandle, config: &AppConfig) -> AppResult<AppConfig> 
     let config = with_discovered_models(config.clone());
     let path = config_path(app)?;
     let parent = path.parent().ok_or_else(|| {
-        AppError::InvalidConfig("caminho de configuracao sem diretorio".to_string())
+        AppError::InvalidConfig("caminho de configuração sem diretório".to_string())
     })?;
     std::fs::create_dir_all(parent)?;
     let payload = serde_json::to_string_pretty(&config)?;

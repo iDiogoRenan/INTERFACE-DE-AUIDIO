@@ -55,7 +55,7 @@ pub fn resolve_speech_model_paths(model_dir: Option<&Path>) -> AppResult<SpeechM
 
     let Some(model_dir) = model_dir else {
         return Err(AppError::SpeechEngineUnavailable(
-            "modelos locais nao provisionados. Execute a migracao para dublagem-master-tauri/models antes de dublar.".to_string(),
+            "modelos locais não provisionados. Execute a migração para dublagem-master-tauri/models antes de dublar.".to_string(),
         ));
     };
 
@@ -104,7 +104,7 @@ fn resolve_from_manifest(manifest_path: &Path) -> AppResult<SpeechModelPaths> {
     let manifest: ModelManifest = serde_json::from_str(&payload)?;
     if manifest.schema_version != 1 {
         return Err(AppError::InvalidConfig(format!(
-            "manifesto de modelos com schemaVersion {} nao suportado",
+            "manifesto de modelos com schemaVersion {} não suportado",
             manifest.schema_version
         )));
     }

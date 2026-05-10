@@ -6,17 +6,17 @@ pub type AppResult<T> = Result<T, AppError>;
 
 #[derive(Debug, Error)]
 pub enum AppError {
-    #[error("configuracao invalida: {0}")]
+    #[error("configuração inválida: {0}")]
     InvalidConfig(String),
     #[error("caminho invalido: {0}")]
     InvalidPath(PathBuf),
-    #[error("codec nao suportado: {0}")]
+    #[error("codec não suportado: {0}")]
     UnsupportedCodec(String),
-    #[error("motor de fala nao configurado: {0}")]
+    #[error("motor de fala não configurado: {0}")]
     SpeechEngineUnavailable(String),
-    #[error("traducao nao configurada: {0}")]
+    #[error("tradução não configurada: {0}")]
     TranslationUnavailable(String),
-    #[error("job nao encontrado: {0}")]
+    #[error("processamento não encontrado: {0}")]
     JobNotFound(String),
     #[error("erro de io: {0}")]
     Io(String),

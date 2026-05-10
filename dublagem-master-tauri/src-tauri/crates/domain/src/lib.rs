@@ -140,7 +140,7 @@ impl NativeSynthesisSettings {
                 .filter(|value| !value.is_empty())
                 .is_none()
         {
-            return Err("voiceMode design requer instruct preenchido".to_string());
+            return Err("modo de voz por desenho requer instrução preenchida".to_string());
         }
 
         Ok(())
@@ -408,6 +408,7 @@ pub struct DubbingJobEvent {
     pub job_id: JobId,
     pub kind: JobEventKind,
     pub stage: Option<JobStage>,
+    pub timestamp: String,
     pub message: String,
     pub progress: Option<u8>,
     pub file_name: Option<String>,

@@ -9,6 +9,7 @@ use crate::{
     state::AppState,
     translation::{legacy_ptbr_postprocess, TranslationProvider},
 };
+use chrono::{SecondsFormat, Utc};
 use dublagem_domain::{
     DubbingJobEvent, DubbingOptions, DubbingRequest, JobEventKind, JobId, JobStage, LanguageCode,
     LineSynthesisOverride, TranslationRequest,
@@ -137,7 +138,7 @@ async fn run_job(
 ) -> AppResult<()> {
     if request.input_paths.is_empty() {
         return Err(AppError::InvalidConfig(
-            "selecione ao menos um audio de origem".to_string(),
+            "selecione ao menos um áudio de origem".to_string(),
         ));
     }
     project_metadata::validate_settings(&request.options.native_synthesis)?;
@@ -153,7 +154,7 @@ async fn run_job(
         &app,
         job_id,
         JobStage::LoadingModels,
-        "Validando modelos locais e preparando motores ML.",
+        "Validando modelos locais e preparando motores de fala.",
         Some(1),
         None,
     )?;
@@ -164,7 +165,7 @@ async fn run_job(
         job_id,
         &cancellation,
         None,
-        "validacao e carga de modelos",
+        "validação e carga de modelos",
         MODEL_LOADING_TIMEOUT,
         speech.engines(requested_model_dir),
     )
@@ -174,9 +175,9 @@ async fn run_job(
         return Ok(());
     };
     let runtime_message = if speech_engines.reused_runtime {
-        "Runtime ML residente reutilizado; modelos ja estavam carregados."
+        "Ambiente de fala residente reutilizado; modelos já estavam carregados."
     } else {
-        "Runtime ML carregado e mantido residente enquanto o app estiver aberto."
+        "Ambiente de fala carregado e mantido residente enquanto o aplicativo estiver aberto."
     };
 
     emit_stage(
@@ -253,7 +254,7 @@ async fn run_job(
             &app,
             job_id,
             &context,
-            "Texto destino pronto para sintese.",
+            "Texto destino pronto para síntese.",
             context.progress(58),
             &source_text,
             Some(&target_text),
@@ -332,7 +333,7 @@ async fn run_job(
             job_id,
             JobEventKind::Finished,
             Some(JobStage::Finished),
-            "Job concluido.",
+            "Processamento concluído.",
             Some(100),
             None,
         )
@@ -367,7 +368,7 @@ async fn resolve_source_text(
         app,
         job_id,
         JobStage::Transcribing,
-        "Transcrevendo audio com Whisper local.",
+        "Transcrevendo áudio com Whisper local.",
         Some(context.progress(15)),
         Some(context),
     )?;
@@ -437,7 +438,7 @@ async fn resolve_target_text(
         job_id,
         cancellation,
         Some(context),
-        "traducao",
+        "tradução",
         TRANSLATION_TIMEOUT,
         translator.translate(TranslationRequest {
             text: source_text.to_string(),
@@ -485,7 +486,7 @@ where
                 app,
                 job_id,
                 JobStage::Cancelling,
-                "Cancelamento solicitado; encerrando o job.",
+                "Cancelamento solicitado; encerrando o processamento.",
                 context.map(|item| item.progress(99)),
                 context,
             )?;
@@ -586,7 +587,7 @@ async fn synthesize_with_v14_guard(job: V14SynthesisJob<'_>) -> AppResult<Option
             job.job_id,
             job.cancellation,
             Some(job.context),
-            "sintese OmniVoice v14",
+            "síntese OmniVoice v14",
             SYNTHESIS_TIMEOUT,
             job.synthesizer.synthesize(SynthesisRequest {
                 text: &attempt_text,
@@ -617,7 +618,7 @@ async fn synthesize_with_v14_guard(job: V14SynthesisJob<'_>) -> AppResult<Option
                     job.app,
                     job.job_id,
                     JobStage::Synthesizing,
-                    format!("Tentativa v14 {attempt_number} falhou na sintese: {last_failure}"),
+                    format!("Tentativa v14 {attempt_number} falhou na síntese: {last_failure}"),
                     Some(job.context.progress(82)),
                     Some(job.context),
                 )?;
@@ -690,7 +691,7 @@ async fn resolve_v14_reference_text(job: &V14SynthesisJob<'_>) -> AppResult<Opti
                 job.app,
                 job.job_id,
                 JobStage::Synthesizing,
-                format!("Referencia curta v14 indisponivel; usando texto original: {error}"),
+                format!("Referência curta v14 indisponível; usando texto original: {error}"),
                 Some(job.context.progress(63)),
                 Some(job.context),
             )?;
@@ -703,7 +704,7 @@ async fn resolve_v14_reference_text(job: &V14SynthesisJob<'_>) -> AppResult<Opti
         job.job_id,
         JobStage::Synthesizing,
         format!(
-            "Transcrevendo referencia curta v14 ({:.2}s de {:.2}s, inicio {:.2}s).",
+            "Transcrevendo referência curta v14 ({:.2}s de {:.2}s, início {:.2}s).",
             reference.duration_seconds, reference.source_duration_seconds, reference.start_seconds
         ),
         Some(job.context.progress(63)),
@@ -720,7 +721,7 @@ async fn resolve_v14_reference_text(job: &V14SynthesisJob<'_>) -> AppResult<Opti
         job.job_id,
         job.cancellation,
         Some(job.context),
-        "transcricao da referencia curta v14",
+        "transcrição da referência curta v14",
         TRANSCRIPTION_TIMEOUT,
         job.transcriber.transcribe(
             &reference_path,
@@ -743,7 +744,7 @@ async fn resolve_v14_reference_text(job: &V14SynthesisJob<'_>) -> AppResult<Opti
                 job.job_id,
                 JobStage::Synthesizing,
                 format!(
-                    "Transcricao da referencia curta v14 falhou; usando texto original: {error}"
+                    "Transcrição da referência curta v14 falhou; usando texto original: {error}"
                 ),
                 Some(job.context.progress(64)),
                 Some(job.context),
@@ -762,7 +763,7 @@ async fn resolve_v14_reference_text(job: &V14SynthesisJob<'_>) -> AppResult<Opti
     let fallback = clean_reference_text(job.source_text);
     if fallback.is_empty() {
         return Err(AppError::SpeechEngineUnavailable(
-            "Whisper nao obteve texto para a referencia curta v14".to_string(),
+            "Whisper não obteve texto para a referência curta v14".to_string(),
         ));
     }
     Ok(Some(fallback))
@@ -830,7 +831,7 @@ async fn validate_v14_attempt(job: V14ValidationJob<'_>) -> AppResult<V14Attempt
         job.job_id,
         job.cancellation,
         Some(job.context),
-        "conferencia Whisper v14 do audio gerado",
+        "conferência Whisper v14 do áudio gerado",
         V14_VALIDATION_TIMEOUT,
         job.transcriber
             .transcribe(job.attempt_path, job.target_language, job.target_language),
@@ -839,7 +840,7 @@ async fn validate_v14_attempt(job: V14ValidationJob<'_>) -> AppResult<V14Attempt
     let Some(transcription) = transcription else {
         return Ok(V14AttemptValidation {
             accepted: false,
-            message: "Cancelado durante conferencia Whisper.".to_string(),
+            message: "Cancelado durante conferência Whisper.".to_string(),
         });
     };
 
@@ -1421,7 +1422,7 @@ fn emit_cancelled(app: &AppHandle, job_id: JobId, context: Option<&FileContext>)
             job_id,
             JobEventKind::Cancelled,
             Some(JobStage::Cancelled),
-            "Job cancelado pelo usuario.",
+            "Processamento cancelado pelo usuário.",
             context.map(|item| item.progress(100)),
             context,
         ),
@@ -1440,6 +1441,7 @@ fn event(
         job_id,
         kind,
         stage,
+        timestamp: Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
         message: message.into(),
         progress,
         file_name: context.map(|item| item.file_name.clone()),

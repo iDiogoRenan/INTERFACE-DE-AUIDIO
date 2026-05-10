@@ -72,15 +72,15 @@ export function AudioPlayer({ title, path, revision = 0 }: AudioPlayerProps) {
       return "Sem arquivo";
     }
     if (!source) {
-      return error ?? "Preparando preview";
+      return error ?? "Preparando prévia";
     }
     if (!currentWaveform) {
       return "Analisando forma de onda";
     }
     if (currentWaveform.error) {
-      return "Preview carregado";
+      return "Prévia carregada";
     }
-    return "Waveform pronta";
+    return "Forma de onda pronta";
   }, [currentWaveform, error, path, source]);
 
   const renderWaveform = useCallback(() => {
@@ -133,7 +133,7 @@ export function AudioPlayer({ title, path, revision = 0 }: AudioPlayerProps) {
             path,
             revision,
             source: null,
-            error: "Player disponivel apenas no app desktop."
+            error: "Reprodutor disponível apenas no aplicativo."
           });
         }
       });
@@ -181,7 +181,7 @@ export function AudioPlayer({ title, path, revision = 0 }: AudioPlayerProps) {
     void fetch(source)
       .then((response) => {
         if (!response.ok) {
-          throw new Error(`Falha ao carregar preview (${String(response.status)})`);
+          throw new Error(`Falha ao carregar prévia (${String(response.status)})`);
         }
         return response.arrayBuffer();
       })
@@ -295,7 +295,7 @@ export function AudioPlayer({ title, path, revision = 0 }: AudioPlayerProps) {
         <div className={styles.transport}>
           <button
             type="button"
-            aria-label={isAudioPlaying ? "Pausar audio" : "Tocar audio"}
+            aria-label={isAudioPlaying ? "Pausar áudio" : "Tocar áudio"}
             disabled={!source}
             onClick={() => {
               void toggle();
@@ -303,7 +303,7 @@ export function AudioPlayer({ title, path, revision = 0 }: AudioPlayerProps) {
           >
             <Icon size={16} />
           </button>
-          <button type="button" aria-label="Voltar ao inicio" disabled={!source} onClick={restart}>
+          <button type="button" aria-label="Voltar ao início" disabled={!source} onClick={restart}>
             <RotateCcw size={15} />
           </button>
         </div>
@@ -314,7 +314,7 @@ export function AudioPlayer({ title, path, revision = 0 }: AudioPlayerProps) {
           ref={canvasRef}
           className={styles.waveform}
           role="slider"
-          aria-label={`Linha do tempo do audio ${title}`}
+          aria-label={`Linha do tempo do áudio ${title}`}
           aria-valuemin={0}
           aria-valuemax={Math.round(durationSeconds * 1000)}
           aria-valuenow={Math.round(currentTime * 1000)}
@@ -333,7 +333,7 @@ export function AudioPlayer({ title, path, revision = 0 }: AudioPlayerProps) {
             });
           }}
         />
-        {!source ? <div className={styles.empty}>{error ?? "Nenhum audio selecionado"}</div> : null}
+        {!source ? <div className={styles.empty}>{error ?? "Nenhum áudio selecionado"}</div> : null}
       </div>
 
       <div className={styles.footer}>
@@ -343,7 +343,7 @@ export function AudioPlayer({ title, path, revision = 0 }: AudioPlayerProps) {
         <span className={styles.formatBadge}>
           <ScanLine size={14} />
           {currentWaveform?.peaks.length
-            ? `${String(currentWaveform.peaks.length)} peaks`
+            ? `${String(currentWaveform.peaks.length)} picos`
             : "sem picos"}
         </span>
       </div>
@@ -375,7 +375,7 @@ export function AudioPlayer({ title, path, revision = 0 }: AudioPlayerProps) {
           onError={() => {
             setPlaybackError({
               path: path ?? "",
-              message: "Nao foi possivel carregar o audio selecionado."
+              message: "Não foi possível carregar o áudio selecionado."
             });
           }}
         />

@@ -123,7 +123,7 @@ pub fn ptbr_voice_profiles() -> Vec<VoiceProfile> {
 
 pub fn missing_model_error(model: &str, expected_path: &Path) -> AppError {
     AppError::SpeechEngineUnavailable(format!(
-        "{model} ainda nao foi provisionado. Caminho esperado: {}. Baixe e registre o modelo antes de executar ML local.",
+        "{model} ainda não foi provisionado. Caminho esperado: {}. Baixe e registre o modelo antes de executar aprendizado de máquina local.",
         expected_path.display()
     ))
 }

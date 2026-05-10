@@ -21,21 +21,21 @@ test("shows native OmniVoice tag and line property controls", async ({ page }) =
   await page.setViewportSize({ width: 1600, height: 960 });
   await page.goto("/");
 
-  await expect(page.getByRole("region", { name: "Paleta de tags OmniVoice" })).toBeVisible();
+  await expect(page.getByRole("region", { name: "Paleta de marcadores OmniVoice" })).toBeVisible();
   await expect(page.getByRole("button", { name: "[sigh]" })).toBeVisible();
   await expect(page.getByRole("button", { name: "[sigh]" })).not.toHaveAttribute("title", /.+/u);
   await expect(page.getByRole("complementary", { name: "Propriedades da linha" })).toBeVisible();
   await expect(page.getByText("Personagem")).toHaveCount(0);
-  await expect(page.getByRole("button", { name: /Propriedades basicas/u })).toBeVisible();
+  await expect(page.getByRole("button", { name: /Propriedades básicas/u })).toBeVisible();
   await expect(page.getByText("Modo de voz")).toBeVisible();
-  await expect(page.getByText("Instruct")).toBeVisible();
+  await expect(page.getByText("Instrução")).toBeVisible();
   await expect(page.getByText("Ajustes nativos")).toBeVisible();
-  await expect(page.getByText("Polimento de audio")).toBeVisible();
+  await expect(page.getByText("Polimento de áudio")).toBeVisible();
   await expect(page.getByText("Preservar trilha de fundo")).toHaveCount(0);
   await expect(page.getByText("Nivel da trilha")).toHaveCount(0);
   await expect(page.getByText("Remover voz original")).toHaveCount(0);
-  await expect(page.getByText("Reducao de sibilancia")).toBeVisible();
-  await expect(page.getByRole("button", { name: "Salvar padrao global" })).toBeDisabled();
+  await expect(page.getByText("Redução de sibilância")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Salvar padrão global" })).toBeDisabled();
   await expect(page.getByRole("button", { name: "Regenerar resultado" })).toBeDisabled();
 
   await page.getByText("Ajustes nativos").click();
@@ -59,7 +59,7 @@ test("persists right sidebar collapsed sections", async ({ page }) => {
   await page.setViewportSize({ width: 1600, height: 960 });
   await page.goto("/");
 
-  const basicSectionHeader = page.getByRole("button", { name: /Propriedades basicas/u });
+  const basicSectionHeader = page.getByRole("button", { name: /Propriedades básicas/u });
   await expect(basicSectionHeader).toHaveAttribute("aria-expanded", "true");
   await basicSectionHeader.click();
   await expect(basicSectionHeader).toHaveAttribute("aria-expanded", "false");
@@ -67,7 +67,7 @@ test("persists right sidebar collapsed sections", async ({ page }) => {
 
   await page.reload();
 
-  await expect(page.getByRole("button", { name: /Propriedades basicas/u })).toHaveAttribute(
+  await expect(page.getByRole("button", { name: /Propriedades básicas/u })).toHaveAttribute(
     "aria-expanded",
     "false"
   );
@@ -78,8 +78,8 @@ test("collapses tag palette downward to free the audio column", async ({ page })
   await page.setViewportSize({ width: 1600, height: 960 });
   await page.goto("/");
 
-  const tagPalette = page.getByRole("region", { name: "Paleta de tags OmniVoice" });
-  const paletteHeader = tagPalette.getByRole("button", { name: /Paleta de tags/u });
+  const tagPalette = page.getByRole("region", { name: "Paleta de marcadores OmniVoice" });
+  const paletteHeader = tagPalette.getByRole("button", { name: /Paleta de marcadores/u });
   const fileColumn = page.getByRole("region", { name: "Arquivos do projeto" });
 
   await expect(paletteHeader).toHaveAttribute("aria-expanded", "true");
@@ -102,8 +102,8 @@ test("collapses tag palette downward to free the audio column", async ({ page })
 
   await expect(
     page
-      .getByRole("region", { name: "Paleta de tags OmniVoice" })
-      .getByRole("button", { name: /Paleta de tags/u })
+      .getByRole("region", { name: "Paleta de marcadores OmniVoice" })
+      .getByRole("button", { name: /Paleta de marcadores/u })
   ).toHaveAttribute("aria-expanded", "false");
 });
 
@@ -162,13 +162,31 @@ test("lets the execution log use the remaining desktop height", async ({ page })
   await page.setViewportSize({ width: 1600, height: 960 });
   await page.goto("/");
 
-  const logBox = await page.getByRole("region", { name: "Log de execução" }).boundingBox();
+  const logBox = await page.getByRole("region", { name: "Registro de execução" }).boundingBox();
   if (!logBox) {
     throw new Error("Execution log region was not rendered.");
   }
 
   const viewportHeight = await page.evaluate(() => window.innerHeight);
   expect(logBox.y + logBox.height).toBeGreaterThan(viewportHeight - 30);
+});
+
+test("shows timestamps in execution log entries", async ({ page }) => {
+  await page.setViewportSize({ width: 1600, height: 960 });
+  await page.goto("/");
+
+  await page.getByRole("button", { name: "Dublar selecionado" }).click();
+
+  const logBox = page.getByRole("region", { name: "Registro de execução" });
+  const newestEntry = logBox.locator("p").first();
+  const timestamp = newestEntry.locator("time");
+
+  await expect(newestEntry).toContainText("Selecione um arquivo e uma pasta de destino.");
+  await expect(timestamp).toBeVisible();
+  await expect(timestamp).toHaveAttribute(
+    "datetime",
+    /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u
+  );
 });
 
 test("aligns sidebar and workspace panel intersections", async ({ page }) => {
@@ -181,7 +199,7 @@ test("aligns sidebar and workspace panel intersections", async ({ page }) => {
     const sidebarFilter = sidebar?.querySelector("label");
     const workspace = document.querySelector("main")?.children.item(1);
     const workspaceHeader = workspace?.firstElementChild;
-    const players = document.querySelector('[aria-label="Players de áudio"]');
+    const players = document.querySelector('[aria-label="Reprodutores de áudio"]');
 
     if (!sidebarHeader || !sidebarFilter || !workspaceHeader || !players) {
       throw new Error("Expected workspace layout regions were not rendered.");

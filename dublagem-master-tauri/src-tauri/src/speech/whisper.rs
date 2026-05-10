@@ -52,13 +52,13 @@ impl Transcriber for WhisperRsTranscriber {
     ) -> AppResult<TranscriptionResult> {
         let Some(model_path) = &self.model_path else {
             return Err(AppError::SpeechEngineUnavailable(
-                "pasta de modelos nao configurada. Selecione a pasta em Ajustes antes de dublar."
+                "pasta de modelos não configurada. Selecione a pasta em Ajustes antes de dublar."
                     .to_string(),
             ));
         };
         let Some(vad_model_path) = &self.vad_model_path else {
             return Err(AppError::SpeechEngineUnavailable(
-                "modelo VAD do Whisper nao configurado. Selecione a pasta em Ajustes antes de dublar."
+                "modelo VAD do Whisper não configurado. Selecione a pasta em Ajustes antes de dublar."
                     .to_string(),
             ));
         };
@@ -211,7 +211,7 @@ async fn transcribe_with_context(
             .to_string();
         if source_text.is_empty() {
             return Err(AppError::SpeechEngineUnavailable(
-                "Whisper nao encontrou segmentos de voz no audio.".to_string(),
+                "Whisper não encontrou segmentos de voz no áudio.".to_string(),
             ));
         }
 

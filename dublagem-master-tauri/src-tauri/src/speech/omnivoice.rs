@@ -98,7 +98,7 @@ impl VoiceSynthesizer for OmniVoiceCandleSynthesizer {
     async fn synthesize(&self, request: SynthesisRequest<'_>) -> AppResult<()> {
         let Some(model_dir) = &self.model_dir else {
             return Err(AppError::SpeechEngineUnavailable(
-                "pasta de modelos nao configurada. Selecione a pasta em Ajustes antes de dublar."
+                "pasta de modelos não configurada. Selecione a pasta em Ajustes antes de dublar."
                     .to_string(),
             ));
         };
@@ -114,7 +114,7 @@ impl VoiceSynthesizer for OmniVoiceCandleSynthesizer {
     async fn generate_voice_pool(&self, output_dir: &Path) -> AppResult<Vec<PathBuf>> {
         let Some(model_dir) = &self.model_dir else {
             return Err(AppError::SpeechEngineUnavailable(
-                "pasta de modelos nao configurada. Selecione a pasta em Ajustes antes de dublar."
+                "pasta de modelos não configurada. Selecione a pasta em Ajustes antes de dublar."
                     .to_string(),
             ));
         };
@@ -226,7 +226,7 @@ fn generate_pool_blocking(
             .next()
             .ok_or_else(|| {
                 AppError::SpeechEngineUnavailable(
-                    "OmniVoice nao gerou audio para o perfil PT-BR.".to_string(),
+                    "OmniVoice não gerou áudio para o perfil PT-BR.".to_string(),
                 )
             })?;
         audio.write_wav(&output_path).map_err(map_omnivoice_error)?;
@@ -260,7 +260,7 @@ fn synthesize_blocking_with_pipeline(
     let segments = synthesis_segments_for_request(&request, target_duration)?;
     if segments.is_empty() {
         return Err(AppError::InvalidConfig(
-            "texto destino vazio; nao ha conteudo para sintese".to_string(),
+            "texto destino vazio; não há conteúdo para síntese".to_string(),
         ));
     }
     request.hooks.report(0, segments.len());
@@ -287,7 +287,7 @@ fn synthesize_blocking_with_pipeline(
 
     for (index, segment) in segments.iter().enumerate() {
         if request.hooks.is_cancelled() {
-            return Err(AppError::Internal("sintese cancelada".to_string()));
+            return Err(AppError::Internal("síntese cancelada".to_string()));
         }
 
         let audio = synthesize_segment(
@@ -472,7 +472,7 @@ fn voice_clone_prompt_for<'a>(
     }
 
     prompt.map(Some).ok_or_else(|| {
-        AppError::SpeechEngineUnavailable("prompt de voz clone indisponivel".to_string())
+        AppError::SpeechEngineUnavailable("instrução de voz clonada indisponível".to_string())
     })
 }
 
@@ -501,7 +501,7 @@ fn synthesize_segment(
         .into_iter()
         .next()
         .ok_or_else(|| {
-            AppError::SpeechEngineUnavailable("OmniVoice nao gerou audio.".to_string())
+            AppError::SpeechEngineUnavailable("OmniVoice não gerou áudio.".to_string())
         })?;
 
     Ok(DecodedAudio::new(audio.samples, audio.sample_rate))
@@ -592,7 +592,7 @@ fn prepare_short_reference(
 ) -> AppResult<ShortReferencePrompt> {
     let reference = short_reference_waveform(reference_audio).map_err(|error| {
         AppError::SpeechEngineUnavailable(format!(
-            "falha ao preparar referencia curta para OmniVoice: {error}"
+            "falha ao preparar referência curta para OmniVoice: {error}"
         ))
     })?;
     let text = reference_text
@@ -614,7 +614,7 @@ fn concatenate_segments(segments: Vec<DecodedAudio>) -> AppResult<DecodedAudio> 
     let mut segments = segments.into_iter();
     let Some(first) = segments.next() else {
         return Err(AppError::SpeechEngineUnavailable(
-            "OmniVoice nao gerou segmentos de audio.".to_string(),
+            "OmniVoice não gerou segmentos de áudio.".to_string(),
         ));
     };
 
@@ -623,7 +623,7 @@ fn concatenate_segments(segments: Vec<DecodedAudio>) -> AppResult<DecodedAudio> 
     for segment in segments {
         if segment.sample_rate != sample_rate {
             return Err(AppError::SpeechEngineUnavailable(format!(
-                "OmniVoice retornou sample rates inconsistentes: {} e {}",
+                "OmniVoice retornou taxas de amostragem inconsistentes: {} e {}",
                 sample_rate, segment.sample_rate
             )));
         }

@@ -133,7 +133,7 @@ pub fn get_audio_metadata(path: &Path) -> AppResult<AudioMetadata> {
     let extension = extension(path);
     if extension == "wem" {
         return Err(AppError::UnsupportedCodec(
-            "Wwise WEM precisa de decoder Rust validado antes de entrar no pipeline".to_string(),
+            "Wwise WEM precisa de decodificador Rust validado antes de entrar no fluxo".to_string(),
         ));
     }
 
@@ -154,7 +154,7 @@ pub fn get_audio_metadata(path: &Path) -> AppResult<AudioMetadata> {
         .map_err(|error| AppError::UnsupportedCodec(error.to_string()))?;
     let format = probed.format;
     let track = format.default_track().ok_or_else(|| {
-        AppError::UnsupportedCodec("arquivo sem faixa de audio padrao".to_string())
+        AppError::UnsupportedCodec("arquivo sem faixa de áudio padrão".to_string())
     })?;
     let params = &track.codec_params;
     let duration_seconds = match (params.n_frames, params.sample_rate) {
@@ -252,7 +252,7 @@ pub fn short_reference_waveform(path: &Path) -> AppResult<ShortReferenceWaveform
 
     if samples.is_empty() {
         return Err(AppError::UnsupportedCodec(
-            "audio de referencia vazio".to_string(),
+            "áudio de referência vazio".to_string(),
         ));
     }
 
@@ -275,7 +275,7 @@ pub fn short_reference_waveform(path: &Path) -> AppResult<ShortReferenceWaveform
     }
     if reference.is_empty() {
         return Err(AppError::UnsupportedCodec(
-            "nao foi possivel extrair referencia curta valida".to_string(),
+            "não foi possível extrair referência curta válida".to_string(),
         ));
     }
 
@@ -309,7 +309,7 @@ pub fn decode_audio_mono_f32(path: &Path) -> AppResult<DecodedAudio> {
     let extension = extension(path);
     if extension == "wem" {
         return Err(AppError::UnsupportedCodec(
-            "Wwise WEM precisa de decoder Rust validado antes de entrar no pipeline".to_string(),
+            "Wwise WEM precisa de decodificador Rust validado antes de entrar no fluxo".to_string(),
         ));
     }
 
@@ -330,11 +330,11 @@ pub fn decode_audio_mono_f32(path: &Path) -> AppResult<DecodedAudio> {
         .map_err(|error| AppError::UnsupportedCodec(error.to_string()))?;
     let mut format = probed.format;
     let track = format.default_track().ok_or_else(|| {
-        AppError::UnsupportedCodec("arquivo sem faixa de audio padrao".to_string())
+        AppError::UnsupportedCodec("arquivo sem faixa de áudio padrão".to_string())
     })?;
     if track.codec_params.codec == CODEC_TYPE_NULL {
         return Err(AppError::UnsupportedCodec(
-            "arquivo sem codec de audio detectavel".to_string(),
+            "arquivo sem codec de áudio detectável".to_string(),
         ));
     }
 
@@ -369,13 +369,13 @@ pub fn decode_audio_mono_f32(path: &Path) -> AppResult<DecodedAudio> {
         let channels = spec.channels.count();
         if channels == 0 || spec.rate == 0 {
             return Err(AppError::UnsupportedCodec(
-                "audio decodificado sem canais ou sample rate".to_string(),
+                "áudio decodificado sem canais ou taxa de amostragem".to_string(),
             ));
         }
         if let Some(existing_rate) = sample_rate {
             if existing_rate != spec.rate {
                 return Err(AppError::UnsupportedCodec(
-                    "mudanca de sample rate no meio do stream nao suportada".to_string(),
+                    "mudança de taxa de amostragem no meio do fluxo não suportada".to_string(),
                 ));
             }
         } else {
@@ -392,7 +392,7 @@ pub fn decode_audio_mono_f32(path: &Path) -> AppResult<DecodedAudio> {
 
     if samples.is_empty() {
         return Err(AppError::UnsupportedCodec(
-            "audio sem amostras decodificaveis".to_string(),
+            "áudio sem amostras decodificáveis".to_string(),
         ));
     }
 
@@ -546,7 +546,7 @@ fn read_wav_interleaved_f32(path: &Path) -> AppResult<WavInterleavedSamples> {
     let channels = usize::from(spec.channels);
     if channels == 0 || spec.sample_rate == 0 {
         return Err(AppError::UnsupportedCodec(
-            "wav sem canais ou sample rate validos".to_string(),
+            "wav sem canais ou taxa de amostragem válidos".to_string(),
         ));
     }
 
@@ -556,7 +556,7 @@ fn read_wav_interleaved_f32(path: &Path) -> AppResult<WavInterleavedSamples> {
     };
     if samples.is_empty() {
         return Err(AppError::UnsupportedCodec(
-            "wav sem amostras decodificaveis".to_string(),
+            "wav sem amostras decodificáveis".to_string(),
         ));
     }
 
@@ -569,7 +569,7 @@ fn read_float_wav_samples<R: std::io::Read>(
 ) -> AppResult<Vec<f32>> {
     if bits_per_sample != 32 {
         return Err(AppError::UnsupportedCodec(format!(
-            "wav float de {bits_per_sample} bits nao suportado"
+            "wav float de {bits_per_sample} bits não suportado"
         )));
     }
 
@@ -585,7 +585,7 @@ fn read_integer_wav_samples<R: std::io::Read>(
 ) -> AppResult<Vec<f32>> {
     if !(2..=32).contains(&bits_per_sample) {
         return Err(AppError::UnsupportedCodec(format!(
-            "wav PCM de {bits_per_sample} bits nao suportado"
+            "wav PCM de {bits_per_sample} bits não suportado"
         )));
     }
 

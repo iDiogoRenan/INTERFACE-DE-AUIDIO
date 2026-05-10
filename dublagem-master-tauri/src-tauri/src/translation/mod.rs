@@ -45,7 +45,7 @@ impl GoogleCloudTranslateProvider {
                 Ok((project_id, access_token))
             }
             _ => Err(AppError::TranslationUnavailable(
-                "defina GOOGLE_CLOUD_PROJECT_ID e GOOGLE_CLOUD_ACCESS_TOKEN para usar traducao automatica"
+                "defina GOOGLE_CLOUD_PROJECT_ID e GOOGLE_CLOUD_ACCESS_TOKEN para usar tradução automática"
                     .to_string(),
             )),
         }
@@ -240,7 +240,7 @@ fn extract_google_translate_text(payload: &Value) -> AppResult<String> {
 
     if translated.trim().is_empty() {
         return Err(AppError::TranslationUnavailable(
-            "resposta de traducao sem segmentos de texto".to_string(),
+            "resposta de tradução sem segmentos de texto".to_string(),
         ));
     }
 

@@ -71,7 +71,7 @@ pub fn validate_text_native_tags(text: &str) -> AppResult<()> {
     for tag in bracketed_lowercase_tags(text) {
         if !OMNIVOICE_NATIVE_TAGS.contains(&tag.as_str()) {
             return Err(AppError::InvalidConfig(format!(
-                "tag OmniVoice nao suportada: {tag}"
+                "marcador OmniVoice não suportado: {tag}"
             )));
         }
     }
@@ -82,7 +82,7 @@ pub fn validate_native_tags(tags: &[String]) -> AppResult<()> {
     for tag in tags {
         if !OMNIVOICE_NATIVE_TAGS.contains(&tag.as_str()) {
             return Err(AppError::InvalidConfig(format!(
-                "tag OmniVoice nao suportada: {tag}"
+                "marcador OmniVoice não suportado: {tag}"
             )));
         }
     }

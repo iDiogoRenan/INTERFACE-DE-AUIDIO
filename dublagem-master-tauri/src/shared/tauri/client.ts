@@ -17,7 +17,7 @@ type CommandArgs = Record<string, unknown>;
 
 function command<TResponse>(name: string, args?: CommandArgs): Promise<TResponse> {
   if (!isTauriRuntime()) {
-    return Promise.reject(new Error("Runtime Tauri indisponivel no preview web."));
+    return Promise.reject(new Error("Ambiente Tauri indisponível na prévia do navegador."));
   }
   return invoke<TResponse>(name, args);
 }

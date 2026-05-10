@@ -6,7 +6,7 @@ import "./styles/theme.css";
 const root = document.getElementById("root");
 
 if (root === null) {
-  throw new Error("Elemento root nao encontrado.");
+  throw new Error("Elemento raiz não encontrado.");
 }
 
 ReactDOM.createRoot(root).render(

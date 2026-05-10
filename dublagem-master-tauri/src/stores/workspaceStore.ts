@@ -28,6 +28,7 @@ import {
 export interface LogEntry {
   id: string;
   level: "info" | "warning" | "error" | "success";
+  timestamp: string;
   message: string;
 }
 
@@ -86,8 +87,10 @@ interface WorkspaceState {
   revertTranscription: () => void;
   startDubbing: () => Promise<void>;
   cancelJob: () => Promise<void>;
-  appendLog: (message: string, level?: LogEntry["level"]) => void;
+  appendLog: (message: string, level?: LogEntry["level"], timestamp?: string) => void;
 }
+
+const maximumLogEntries = 200;
 
 const initialConfig: AppConfig = {
   inputDir: null,
@@ -113,7 +116,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   logs: [],
   activeJobId: null,
   currentStage: null,
-  currentStatus: "Aguardando job.",
+  currentStatus: "Aguardando processamento.",
   currentFileName: null,
   currentFileIndex: null,
   totalFiles: null,
@@ -231,7 +234,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   },
   insertNativeTag: (tag) => {
     if (!nativeTagSet.has(tag)) {
-      get().appendLog(`Tag OmniVoice nao suportada: ${tag}`, "warning");
+      get().appendLog(`Marcador OmniVoice não suportado: ${tag}`, "warning");
       return;
     }
 
@@ -278,7 +281,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     try {
       const saved = await tauriClient.saveConfig(nextConfig);
       set({ config: saved });
-      get().appendLog("Ajustes de sintese salvos como padrao global.", "success");
+      get().appendLog("Ajustes de síntese salvos como padrão global.", "success");
     } catch (unknownError: unknown) {
       get().appendLog(errorMessage(unknownError), "error");
     }
@@ -302,7 +305,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     try {
       const saved = await tauriClient.saveConfig(nextConfig);
       set({ config: saved });
-      get().appendLog("Padroes de sintese restaurados.", "success");
+      get().appendLog("Padrões de síntese restaurados.", "success");
     } catch (unknownError: unknown) {
       get().appendLog(errorMessage(unknownError), "error");
     }
@@ -310,12 +313,12 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   previewSelectedLine: async () => {
     const state = get();
     if (!state.selectedPath) {
-      state.appendLog("Selecione uma linha antes da previa.", "warning");
+      state.appendLog("Selecione uma linha antes da prévia.", "warning");
       return;
     }
     const text = splitLines(state.targetText)[state.selectedLineIndex]?.trim() ?? "";
     if (text.length === 0) {
-      state.appendLog("Linha selecionada sem texto para previa.", "warning");
+      state.appendLog("Linha selecionada sem texto para prévia.", "warning");
       return;
     }
     const lineMetadata = selectedLineMetadata(state);
@@ -334,7 +337,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
           lastOutputRevision
         };
       });
-      state.appendLog("Previa da linha gerada.", "success");
+      state.appendLog("Prévia da linha gerada.", "success");
     } catch (unknownError: unknown) {
       state.appendLog(errorMessage(unknownError), "error");
     }
@@ -366,7 +369,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   },
   startDubbing: async () => {
     if (get().isBusy) {
-      get().appendLog("Aguarde o job atual terminar antes de iniciar outro.", "warning");
+      get().appendLog("Aguarde o processamento atual terminar antes de iniciar outro.", "warning");
       return;
     }
     const { config, selectedPath, sourceText, targetText, files, projectMetadata } = get();
@@ -381,7 +384,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       isCancelling: false,
       progress: 0,
       currentStage: "queued",
-      currentStatus: "Enviando job para o backend.",
+      currentStatus: "Enviando processamento para o serviço local.",
       currentFileName: null,
       currentFileIndex: null,
       totalFiles: null,
@@ -438,7 +441,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     set({
       isCancelling: true,
       currentStage: "cancelling",
-      currentStatus: "Cancelamento solicitado. Aguardando o backend encerrar a etapa atual."
+      currentStatus: "Cancelamento solicitado. Aguardando o serviço local encerrar a etapa atual."
     });
     try {
       await tauriClient.cancelJob(activeJobId);
@@ -447,9 +450,12 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       set({ isCancelling: false });
     }
   },
-  appendLog: (message, level = "info") => {
+  appendLog: (message, level = "info", timestamp = new Date().toISOString()) => {
     set((state) => ({
-      logs: [{ id: crypto.randomUUID(), level, message }, ...state.logs].slice(0, 200)
+      logs: sortLogsByTimestamp([
+        { id: crypto.randomUUID(), level, timestamp, message },
+        ...state.logs
+      ]).slice(0, maximumLogEntries)
     }));
   }
 }));
@@ -465,26 +471,26 @@ async function registerJobListeners(): Promise<void> {
   const store = useWorkspaceStore;
 
   await listen<DubbingJobEvent>("job:log", (event) => {
-    store.getState().appendLog(event.payload.message, "info");
+    appendJobLog(event.payload, "info");
   });
   await listen<DubbingJobEvent>("job:stage", (event) => {
     applyJobEvent(event.payload);
-    store.getState().appendLog(event.payload.message, "info");
+    appendJobLog(event.payload, "info");
   });
   await listen<DubbingJobEvent>("job:transcription", (event) => {
     applyJobEvent(event.payload);
-    store.getState().appendLog(event.payload.message, "success");
+    appendJobLog(event.payload, "success");
   });
   await listen<DubbingJobEvent>("job:progress", (event) => {
     applyJobEvent(event.payload);
   });
   await listen<DubbingJobEvent>("job:file-complete", (event) => {
     applyJobEvent(event.payload);
-    store.getState().appendLog(event.payload.message, "success");
+    appendJobLog(event.payload, "success");
   });
   await listen<DubbingJobEvent>("job:cancelled", (event) => {
     applyJobEvent(event.payload);
-    store.getState().appendLog(event.payload.message, "warning");
+    appendJobLog(event.payload, "warning");
     store.setState({
       activeJobId: null,
       isBusy: false,
@@ -494,7 +500,7 @@ async function registerJobListeners(): Promise<void> {
   });
   await listen<DubbingJobEvent>("job:finished", (event) => {
     applyJobEvent(event.payload);
-    store.getState().appendLog(event.payload.message, "success");
+    appendJobLog(event.payload, "success");
     store.setState({
       activeJobId: null,
       isBusy: false,
@@ -505,7 +511,7 @@ async function registerJobListeners(): Promise<void> {
   });
   await listen<DubbingJobEvent>("job:failed", (event) => {
     applyJobEvent(event.payload);
-    store.getState().appendLog(event.payload.message, "error");
+    appendJobLog(event.payload, "error");
     store.setState({
       activeJobId: null,
       isBusy: false,
@@ -513,6 +519,21 @@ async function registerJobListeners(): Promise<void> {
       currentStage: "failed"
     });
   });
+}
+
+function appendJobLog(payload: DubbingJobEvent, level: LogEntry["level"]): void {
+  useWorkspaceStore.getState().appendLog(payload.message, level, payload.timestamp);
+}
+
+function sortLogsByTimestamp(entries: LogEntry[]): LogEntry[] {
+  return [...entries].sort(
+    (left, right) => timestampMillis(right.timestamp) - timestampMillis(left.timestamp)
+  );
+}
+
+function timestampMillis(timestamp: string): number {
+  const parsedTimestamp = Date.parse(timestamp);
+  return Number.isNaN(parsedTimestamp) ? 0 : parsedTimestamp;
 }
 
 export function applyJobEvent(payload: DubbingJobEvent): void {

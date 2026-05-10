@@ -52,7 +52,7 @@ export function ProjectExplorer() {
         >
           {families.map((family) => (
             <option key={family} value={family}>
-              {family === "all" ? "Todas as familias" : family}
+              {family === "all" ? "Todas as famílias" : family}
             </option>
           ))}
         </select>
@@ -77,7 +77,7 @@ export function ProjectExplorer() {
         ))}
       </section>
 
-      <section className={styles.tagPalette} aria-label="Paleta de tags OmniVoice">
+      <section className={styles.tagPalette} aria-label="Paleta de marcadores OmniVoice">
         <button
           type="button"
           className={styles.paletteHeader}
@@ -88,7 +88,7 @@ export function ProjectExplorer() {
           }}
         >
           {isTagPaletteOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
-          <strong>Paleta de tags</strong>
+          <strong>Paleta de marcadores</strong>
         </button>
 
         {isTagPaletteOpen && (
@@ -130,7 +130,7 @@ export function ProjectExplorer() {
             ))}
             <button type="button" className={styles.manageTags} disabled>
               <Plus size={14} />
-              Tags nativas bloqueadas
+              Marcadores nativos bloqueados
             </button>
           </div>
         )}

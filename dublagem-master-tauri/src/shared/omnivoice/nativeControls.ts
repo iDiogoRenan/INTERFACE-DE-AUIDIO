@@ -4,12 +4,12 @@ import { defaultOptions } from "../tauri/types";
 export const nativeTagGroups = [
   {
     id: "expression",
-    label: "Expressao",
+    label: "Expressão",
     tags: ["[laughter]", "[sigh]"]
   },
   {
     id: "confirmation",
-    label: "Confirmacao",
+    label: "Confirmação",
     tags: ["[confirmation-en]"]
   },
   {
@@ -24,7 +24,7 @@ export const nativeTagGroups = [
   },
   {
     id: "dissatisfaction",
-    label: "Insatisfacao",
+    label: "Insatisfação",
     tags: ["[dissatisfaction-hnn]"]
   }
 ] as const;

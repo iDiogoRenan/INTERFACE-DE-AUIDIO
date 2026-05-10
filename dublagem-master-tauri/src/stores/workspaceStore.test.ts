@@ -87,7 +87,7 @@ describe("workspaceStore transcription hydration", () => {
       submittedDubbingDrafts: {},
       activeJobId: null,
       currentStage: null,
-      currentStatus: "Aguardando job.",
+      currentStatus: "Aguardando processamento.",
       currentFileName: null,
       currentFileIndex: null,
       totalFiles: null,
@@ -413,6 +413,20 @@ describe("workspaceStore transcription hydration", () => {
     expect(useWorkspaceStore.getState().isCancelling).toBe(false);
   });
 
+  it("keeps execution logs timestamped and sorted newest first", () => {
+    const store = useWorkspaceStore.getState();
+
+    store.appendLog("Evento antigo.", "info", "2026-05-10T10:00:00.000Z");
+    store.appendLog("Evento novo.", "success", "2026-05-10T10:01:00.000Z");
+    store.appendLog("Evento intermediario.", "warning", "2026-05-10T10:00:30.000Z");
+
+    expect(useWorkspaceStore.getState().logs).toMatchObject([
+      { message: "Evento novo.", timestamp: "2026-05-10T10:01:00.000Z" },
+      { message: "Evento intermediario.", timestamp: "2026-05-10T10:00:30.000Z" },
+      { message: "Evento antigo.", timestamp: "2026-05-10T10:00:00.000Z" }
+    ]);
+  });
+
   it("reverts edited transcription fields to the selected file baseline", () => {
     useWorkspaceStore.setState({ files: [cachedDubbedFile], selectedPath: null });
     useWorkspaceStore.getState().selectFile(cachedDubbedFile.path);
@@ -480,6 +494,7 @@ function jobEvent(patch: Partial<DubbingJobEvent>): DubbingJobEvent {
     jobId: "00000000-0000-0000-0000-000000000001",
     kind: "transcription",
     stage: null,
+    timestamp: "2026-05-10T10:00:00.000Z",
     message: "Evento de teste.",
     progress: null,
     fileName: null,

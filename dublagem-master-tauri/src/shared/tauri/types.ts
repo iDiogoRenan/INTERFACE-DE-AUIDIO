@@ -162,6 +162,7 @@ export interface DubbingJobEvent {
   jobId: string;
   kind: JobEventKind;
   stage: JobStage | null;
+  timestamp: string;
   message: string;
   progress: number | null;
   fileName: string | null;
