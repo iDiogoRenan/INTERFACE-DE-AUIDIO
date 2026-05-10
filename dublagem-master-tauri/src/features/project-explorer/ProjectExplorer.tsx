@@ -1,9 +1,11 @@
 import * as Tooltip from "@radix-ui/react-tooltip";
-import { FileAudio, Filter, Plus, RefreshCw } from "lucide-react";
-import { useMemo, useState } from "react";
+import { ChevronDown, ChevronRight, FileAudio, Filter, Plus, RefreshCw } from "lucide-react";
+import { useEffect, useMemo, useState, type Dispatch, type SetStateAction } from "react";
 import { nativeTagDescriptions, nativeTagGroups } from "../../shared/omnivoice/nativeControls";
 import { useWorkspaceStore } from "../../stores/workspaceStore";
 import styles from "./ProjectExplorer.module.css";
+
+const TAG_PALETTE_OPEN_STORAGE_KEY = "nsg-gaming-dub.tag-palette-open.v1";
 
 export function ProjectExplorer() {
   const files = useWorkspaceStore((state) => state.files);
@@ -12,6 +14,7 @@ export function ProjectExplorer() {
   const scan = useWorkspaceStore((state) => state.scan);
   const insertNativeTag = useWorkspaceStore((state) => state.insertNativeTag);
   const [familyFilter, setFamilyFilter] = useState<string>("all");
+  const [isTagPaletteOpen, setIsTagPaletteOpen] = usePersistentTagPaletteOpenState();
 
   const families = useMemo(
     () => ["all", ...Array.from(new Set(files.map((file) => file.family))).sort()],
@@ -55,7 +58,7 @@ export function ProjectExplorer() {
         </select>
       </label>
 
-      <div className={styles.list}>
+      <section className={styles.list} aria-label="Arquivos do projeto">
         {visibleFiles.map((file) => (
           <button
             key={file.path}
@@ -72,55 +75,109 @@ export function ProjectExplorer() {
             </span>
           </button>
         ))}
-      </div>
+      </section>
 
       <section className={styles.tagPalette} aria-label="Paleta de tags OmniVoice">
-        <div className={styles.paletteHeader}>
+        <button
+          type="button"
+          className={styles.paletteHeader}
+          aria-expanded={isTagPaletteOpen}
+          aria-controls="tag-palette-content"
+          onClick={() => {
+            setIsTagPaletteOpen((current) => !current);
+          }}
+        >
+          {isTagPaletteOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
           <strong>Paleta de tags</strong>
-          <span>Somente nativas OmniVoice</span>
-        </div>
-        {nativeTagGroups.map((group) => (
-          <div key={group.id} className={styles.tagGroup}>
-            <span>{group.label}</span>
-            <div>
-              <Tooltip.Provider delayDuration={120}>
-                {group.tags.map((tag) => (
-                  <Tooltip.Root key={tag}>
-                    <Tooltip.Trigger asChild>
-                      <button
-                        type="button"
-                        disabled={!selectedPath}
-                        data-tag={tag}
-                        onClick={() => {
-                          insertNativeTag(tag);
-                        }}
-                      >
-                        {tag}
-                      </button>
-                    </Tooltip.Trigger>
-                    <Tooltip.Portal>
-                      <Tooltip.Content
-                        className={styles.tooltipContent}
-                        side="right"
-                        sideOffset={6}
-                      >
-                        {nativeTagDescriptions[tag]}
-                        <Tooltip.Arrow className={styles.tooltipArrow} />
-                      </Tooltip.Content>
-                    </Tooltip.Portal>
-                  </Tooltip.Root>
-                ))}
-              </Tooltip.Provider>
-            </div>
-          </div>
-        ))}
-        <button type="button" className={styles.manageTags} disabled>
-          <Plus size={14} />
-          Tags nativas bloqueadas
         </button>
+
+        {isTagPaletteOpen && (
+          <div id="tag-palette-content" className={styles.paletteContent}>
+            {nativeTagGroups.map((group) => (
+              <div key={group.id} className={styles.tagGroup}>
+                <span>{group.label}</span>
+                <div>
+                  <Tooltip.Provider delayDuration={120}>
+                    {group.tags.map((tag) => (
+                      <Tooltip.Root key={tag}>
+                        <Tooltip.Trigger asChild>
+                          <button
+                            type="button"
+                            disabled={!selectedPath}
+                            data-tag={tag}
+                            onClick={() => {
+                              insertNativeTag(tag);
+                            }}
+                          >
+                            {tag}
+                          </button>
+                        </Tooltip.Trigger>
+                        <Tooltip.Portal>
+                          <Tooltip.Content
+                            className={styles.tooltipContent}
+                            side="right"
+                            sideOffset={6}
+                          >
+                            {nativeTagDescriptions[tag]}
+                            <Tooltip.Arrow className={styles.tooltipArrow} />
+                          </Tooltip.Content>
+                        </Tooltip.Portal>
+                      </Tooltip.Root>
+                    ))}
+                  </Tooltip.Provider>
+                </div>
+              </div>
+            ))}
+            <button type="button" className={styles.manageTags} disabled>
+              <Plus size={14} />
+              Tags nativas bloqueadas
+            </button>
+          </div>
+        )}
       </section>
     </aside>
   );
+}
+
+function usePersistentTagPaletteOpenState(): readonly [boolean, Dispatch<SetStateAction<boolean>>] {
+  const [isOpen, setIsOpen] = useState(readTagPaletteOpenState);
+
+  useEffect(() => {
+    writeTagPaletteOpenState(isOpen);
+  }, [isOpen]);
+
+  return [isOpen, setIsOpen];
+}
+
+function readTagPaletteOpenState(): boolean {
+  if (typeof window === "undefined") {
+    return true;
+  }
+
+  const storedValue = localStorage.getItem(TAG_PALETTE_OPEN_STORAGE_KEY);
+  if (!storedValue) {
+    return true;
+  }
+
+  try {
+    const parsedValue: unknown = JSON.parse(storedValue);
+    return typeof parsedValue === "boolean" ? parsedValue : true;
+  } catch {
+    localStorage.removeItem(TAG_PALETTE_OPEN_STORAGE_KEY);
+    return true;
+  }
+}
+
+function writeTagPaletteOpenState(isOpen: boolean): void {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  try {
+    localStorage.setItem(TAG_PALETTE_OPEN_STORAGE_KEY, JSON.stringify(isOpen));
+  } catch {
+    return;
+  }
 }
 
 function statusLabel(status: string): string {

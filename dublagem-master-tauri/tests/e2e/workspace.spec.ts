@@ -74,6 +74,39 @@ test("persists right sidebar collapsed sections", async ({ page }) => {
   await expect(page.getByText("Modo de voz")).toHaveCount(0);
 });
 
+test("collapses tag palette downward to free the audio column", async ({ page }) => {
+  await page.setViewportSize({ width: 1600, height: 960 });
+  await page.goto("/");
+
+  const tagPalette = page.getByRole("region", { name: "Paleta de tags OmniVoice" });
+  const paletteHeader = tagPalette.getByRole("button", { name: /Paleta de tags/u });
+  const fileColumn = page.getByRole("region", { name: "Arquivos do projeto" });
+
+  await expect(paletteHeader).toHaveAttribute("aria-expanded", "true");
+  const openFileColumnBox = await fileColumn.boundingBox();
+  if (!openFileColumnBox) {
+    throw new Error("Project audio column geometry was not available.");
+  }
+
+  await paletteHeader.click();
+
+  await expect(paletteHeader).toHaveAttribute("aria-expanded", "false");
+  await expect(tagPalette.getByRole("button", { name: "[sigh]" })).toHaveCount(0);
+  const collapsedFileColumnBox = await fileColumn.boundingBox();
+  if (!collapsedFileColumnBox) {
+    throw new Error("Collapsed project audio column geometry was not available.");
+  }
+  expect(collapsedFileColumnBox.height).toBeGreaterThan(openFileColumnBox.height + 60);
+
+  await page.reload();
+
+  await expect(
+    page
+      .getByRole("region", { name: "Paleta de tags OmniVoice" })
+      .getByRole("button", { name: /Paleta de tags/u })
+  ).toHaveAttribute("aria-expanded", "false");
+});
+
 test("keeps spaces inside line textareas without rendering duplicate text", async ({ page }) => {
   await page.setViewportSize({ width: 1600, height: 960 });
   await page.goto("/");

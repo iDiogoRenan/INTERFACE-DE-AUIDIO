@@ -121,23 +121,38 @@
 }
 
 .paletteHeader {
-  display: flex;
+  display: grid;
+  grid-template-columns: 14px minmax(0, 1fr);
   align-items: center;
-  justify-content: space-between;
-  gap: 8px;
+  gap: 7px;
+  width: 100%;
+  min-height: 30px;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+  padding: 0;
+  text-align: left;
 }
 
 .paletteHeader strong {
+  overflow: hidden;
   font-size: 12px;
+  text-overflow: ellipsis;
   text-transform: uppercase;
+  white-space: nowrap;
 }
 
-.paletteHeader span,
 .tagGroup > span {
   color: var(--text-muted);
   font-size: 10px;
   font-weight: 750;
   text-transform: uppercase;
+}
+
+.paletteContent {
+  display: grid;
+  gap: 10px;
 }
 
 .tagGroup {
