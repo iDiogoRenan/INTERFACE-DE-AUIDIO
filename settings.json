@@ -2,8 +2,6 @@
   "whisper_model": "medium",
   "whisper_temperature": 0.0,
   "omni_temperature": 0.0,
-  "omni_temperature_pass2": 0.4,
-  "max_retries": 3,
   "gpu_cleanup_interval": 15,
   "mode": "single",
   "use_spanish_bridge": true,

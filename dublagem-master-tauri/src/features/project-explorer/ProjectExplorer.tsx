@@ -212,6 +212,7 @@ function statusLabel(status: string): string {
     dubbed: "Dublado",
     approved: "Aprovado",
     rejected: "Rejeitado",
+    ignored: "Ignorado",
     missing_source: "Sem origem",
     failed: "Falhou"
   };

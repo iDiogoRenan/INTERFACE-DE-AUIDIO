@@ -12,7 +12,7 @@ use crate::{
 use chrono::{SecondsFormat, Utc};
 use dublagem_domain::{
     DubbingJobEvent, DubbingOptions, DubbingRequest, JobEventKind, JobId, JobStage, LanguageCode,
-    LineSynthesisOverride, TranslationRequest,
+    LineSynthesisOverride, TranslationRequest, OMNIVOICE_MAX_SYNTHESIS_SECONDS,
 };
 use std::{
     collections::HashMap,
@@ -37,7 +37,6 @@ const MODEL_LOADING_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 const TRANSCRIPTION_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const TRANSLATION_TIMEOUT: Duration = Duration::from_secs(2 * 60);
 const SYNTHESIS_TIMEOUT: Duration = Duration::from_secs(20 * 60);
-const V14_SYNTHESIS_ATTEMPTS: usize = 6;
 const V14_VALIDATION_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 
 #[derive(Default)]
@@ -154,46 +153,64 @@ async fn run_job(
 
     std::fs::create_dir_all(&request.output_dir)?;
     let total = request.input_paths.len();
-    emit_stage(
-        &app,
-        job_id,
-        JobStage::LoadingModels,
-        "Validando modelos locais e preparando motores de fala.",
-        Some(1),
-        None,
-    )?;
+    let ignored_inputs = ignored_source_audio_reasons(&request.input_paths)?;
+    let needs_speech_engines = ignored_inputs.len() < total;
 
-    let requested_model_dir = request.model_dir.clone();
-    let speech_engines = cancellable_phase(
-        &app,
-        job_id,
-        &cancellation,
-        None,
-        "validação e carga de modelos",
-        MODEL_LOADING_TIMEOUT,
-        speech.engines(requested_model_dir),
-    )
-    .await?;
-    let Some(speech_engines) = speech_engines else {
-        emit_cancelled(&app, job_id, None)?;
-        return Ok(());
-    };
-    let runtime_message = if speech_engines.reused_runtime {
-        "Ambiente de fala residente reutilizado; modelos já estavam carregados."
+    let (transcriber, synthesizer) = if needs_speech_engines {
+        emit_stage(
+            &app,
+            job_id,
+            JobStage::LoadingModels,
+            "Validando modelos locais e preparando motores de fala.",
+            Some(1),
+            None,
+        )?;
+
+        let requested_model_dir = request.model_dir.clone();
+        let speech_engines = cancellable_phase(
+            &app,
+            job_id,
+            &cancellation,
+            None,
+            "validação e carga de modelos",
+            MODEL_LOADING_TIMEOUT,
+            speech.engines(requested_model_dir),
+        )
+        .await?;
+        let Some(speech_engines) = speech_engines else {
+            emit_cancelled(&app, job_id, None)?;
+            return Ok(());
+        };
+        let runtime_message = if speech_engines.reused_runtime {
+            "Ambiente de fala residente reutilizado; modelos já estavam carregados."
+        } else {
+            "Ambiente de fala carregado e mantido residente enquanto o aplicativo estiver aberto."
+        };
+
+        emit_stage(
+            &app,
+            job_id,
+            JobStage::Queued,
+            runtime_message,
+            Some(2),
+            None,
+        )?;
+
+        (
+            Some(speech_engines.transcriber),
+            Some(speech_engines.synthesizer),
+        )
     } else {
-        "Ambiente de fala carregado e mantido residente enquanto o aplicativo estiver aberto."
+        emit_stage(
+            &app,
+            job_id,
+            JobStage::Queued,
+            "Todos os arquivos excedem 30s; modelos de fala não foram carregados.",
+            Some(2),
+            None,
+        )?;
+        (None, None)
     };
-
-    emit_stage(
-        &app,
-        job_id,
-        JobStage::Queued,
-        runtime_message,
-        Some(2),
-        None,
-    )?;
-    let transcriber = speech_engines.transcriber;
-    let synthesizer = speech_engines.synthesizer;
 
     for (index, input_path) in request.input_paths.iter().enumerate() {
         let file_name = input_path
@@ -221,6 +238,19 @@ async fn run_job(
             Some(context.progress(5)),
             Some(&context),
         )?;
+
+        if let Some(reason) = ignored_inputs.get(input_path) {
+            emit_ignored_file(&app, job_id, &context, reason.clone())?;
+            emit_progress(&app, job_id, context.progress(100), Some(&context))?;
+            continue;
+        }
+
+        let transcriber = transcriber.as_ref().ok_or_else(|| {
+            AppError::Internal("motor de transcrição indisponível para arquivo válido".to_string())
+        })?;
+        let synthesizer = synthesizer.as_ref().ok_or_else(|| {
+            AppError::Internal("motor de síntese indisponível para arquivo válido".to_string())
+        })?;
 
         let source_text = resolve_source_text(
             &app,
@@ -535,13 +565,12 @@ struct V14ValidationJob<'a> {
     cancellation: &'a CancellationToken,
     transcriber: &'a dyn Transcriber,
     expected_text: &'a str,
-    attempt_path: &'a Path,
+    output_path: &'a Path,
     target_language: LanguageCode,
-    attempt_number: usize,
 }
 
 #[derive(Debug, Clone)]
-struct V14AttemptValidation {
+struct V14OutputValidation {
     accepted: bool,
     message: String,
 }
@@ -556,123 +585,79 @@ struct V14TextMetrics {
 }
 
 async fn synthesize_with_v14_guard(job: V14SynthesisJob<'_>) -> AppResult<Option<()>> {
-    let mut attempt_paths = Vec::with_capacity(V14_SYNTHESIS_ATTEMPTS);
-    let mut last_failure = String::new();
     let Some(reference_text) = resolve_v14_reference_text(&job).await? else {
         return Ok(None);
     };
 
-    for attempt_index in 0..V14_SYNTHESIS_ATTEMPTS {
-        if job.cancellation.is_cancelled() {
-            cleanup_attempt_files(&attempt_paths);
-            return Ok(None);
-        }
-
-        let attempt_number = attempt_index + 1;
-        let attempt_path = synthesis_attempt_path(job.output_path, job.job_id, attempt_number);
-        remove_file_if_exists(&attempt_path)?;
-        attempt_paths.push(attempt_path.clone());
-
-        let attempt_text = synthesis_text_with_final_breath(job.target_text, attempt_index);
-        let attempt_line_overrides =
-            line_overrides_with_final_breath(job.line_overrides, attempt_index);
-
-        emit_stage(
-            job.app,
-            job.job_id,
-            JobStage::Synthesizing,
-            format!("Gerando tentativa v14 {attempt_number}/{V14_SYNTHESIS_ATTEMPTS}."),
-            Some(job.context.progress(65)),
-            Some(job.context),
-        )?;
-
-        let synth_result = cancellable_phase(
-            job.app,
-            job.job_id,
-            job.cancellation,
-            Some(job.context),
-            "síntese OmniVoice v14",
-            SYNTHESIS_TIMEOUT,
-            job.synthesizer.synthesize(SynthesisRequest {
-                text: &attempt_text,
-                source_audio: job.source_audio,
-                reference_audio: job.reference_audio,
-                reference_text: &reference_text,
-                output_path: &attempt_path,
-                options: job.options.clone(),
-                line_overrides: &attempt_line_overrides,
-                hooks: job.hooks.clone(),
-            }),
-        )
-        .await;
-
-        match synth_result {
-            Ok(Some(())) => {}
-            Ok(None) => {
-                cleanup_attempt_files(&attempt_paths);
-                return Ok(None);
-            }
-            Err(_) if job.cancellation.is_cancelled() => {
-                cleanup_attempt_files(&attempt_paths);
-                return Ok(None);
-            }
-            Err(error) => {
-                last_failure = error.to_string();
-                emit_stage(
-                    job.app,
-                    job.job_id,
-                    JobStage::Synthesizing,
-                    format!("Tentativa v14 {attempt_number} falhou na síntese: {last_failure}"),
-                    Some(job.context.progress(82)),
-                    Some(job.context),
-                )?;
-                continue;
-            }
-        }
-
-        let validation = validate_v14_attempt(V14ValidationJob {
-            app: job.app,
-            job_id: job.job_id,
-            context: job.context,
-            cancellation: job.cancellation,
-            transcriber: job.transcriber,
-            expected_text: job.target_text,
-            attempt_path: &attempt_path,
-            target_language: job.options.target_language,
-            attempt_number,
-        })
-        .await?;
-
-        if validation.accepted {
-            copy_validated_attempt(&attempt_path, job.output_path)?;
-            cleanup_attempt_files(&attempt_paths);
-            emit_stage(
-                job.app,
-                job.job_id,
-                JobStage::Synthesizing,
-                format!("Tentativa v14 aprovada: {}.", validation.message),
-                Some(job.context.progress(90)),
-                Some(job.context),
-            )?;
-            return Ok(Some(()));
-        }
-
-        last_failure = validation.message;
-        emit_stage(
-            job.app,
-            job.job_id,
-            JobStage::Synthesizing,
-            format!(
-                "Tentativa v14 {attempt_number}/{V14_SYNTHESIS_ATTEMPTS} reprovada: {last_failure}"
-            ),
-            Some(job.context.progress(88)),
-            Some(job.context),
-        )?;
+    if job.cancellation.is_cancelled() {
+        return Ok(None);
     }
 
-    cleanup_attempt_files(&attempt_paths);
+    remove_file_if_exists(job.output_path)?;
+    emit_stage(
+        job.app,
+        job.job_id,
+        JobStage::Synthesizing,
+        "Gerando síntese v14 única.",
+        Some(job.context.progress(65)),
+        Some(job.context),
+    )?;
+
+    let synth_result = cancellable_phase(
+        job.app,
+        job.job_id,
+        job.cancellation,
+        Some(job.context),
+        "síntese OmniVoice v14",
+        SYNTHESIS_TIMEOUT,
+        job.synthesizer.synthesize(SynthesisRequest {
+            text: job.target_text,
+            source_audio: job.source_audio,
+            reference_audio: job.reference_audio,
+            reference_text: &reference_text,
+            output_path: job.output_path,
+            options: job.options.clone(),
+            line_overrides: job.line_overrides,
+            hooks: job.hooks.clone(),
+        }),
+    )
+    .await;
+
+    match synth_result {
+        Ok(Some(())) => {}
+        Ok(None) => return Ok(None),
+        Err(_) if job.cancellation.is_cancelled() => return Ok(None),
+        Err(error) => return Err(error),
+    }
+
+    let validation = validate_v14_output(V14ValidationJob {
+        app: job.app,
+        job_id: job.job_id,
+        context: job.context,
+        cancellation: job.cancellation,
+        transcriber: job.transcriber,
+        expected_text: job.target_text,
+        output_path: job.output_path,
+        target_language: job.options.target_language,
+    })
+    .await?;
+
+    if validation.accepted {
+        emit_stage(
+            job.app,
+            job.job_id,
+            JobStage::Synthesizing,
+            format!("Síntese v14 aprovada: {}.", validation.message),
+            Some(job.context.progress(90)),
+            Some(job.context),
+        )?;
+        return Ok(Some(()));
+    }
+
+    remove_file_if_exists(job.output_path)?;
     Err(AppError::Internal(format!(
-        "Sintese v14 reprovada apos {V14_SYNTHESIS_ATTEMPTS} tentativas: {last_failure}"
+        "Síntese v14 reprovada: {}",
+        validation.message
     )))
 }
 
@@ -828,9 +813,9 @@ fn clean_reference_text(text: &str) -> String {
     cleaned.trim().to_string()
 }
 
-async fn validate_v14_attempt(job: V14ValidationJob<'_>) -> AppResult<V14AttemptValidation> {
-    if let Err(error) = validate_v14_audio_tail(job.attempt_path) {
-        return Ok(V14AttemptValidation {
+async fn validate_v14_output(job: V14ValidationJob<'_>) -> AppResult<V14OutputValidation> {
+    if let Err(error) = validate_v14_audio_tail(job.output_path) {
+        return Ok(V14OutputValidation {
             accepted: false,
             message: error.to_string(),
         });
@@ -840,7 +825,7 @@ async fn validate_v14_attempt(job: V14ValidationJob<'_>) -> AppResult<V14Attempt
         job.app,
         job.job_id,
         JobStage::Synthesizing,
-        format!("Conferindo texto v14 na tentativa {}.", job.attempt_number),
+        "Conferindo texto v14.",
         Some(job.context.progress(90)),
         Some(job.context),
     )?;
@@ -853,11 +838,11 @@ async fn validate_v14_attempt(job: V14ValidationJob<'_>) -> AppResult<V14Attempt
         "conferência Whisper v14 do áudio gerado",
         V14_VALIDATION_TIMEOUT,
         job.transcriber
-            .transcribe(job.attempt_path, job.target_language, job.target_language),
+            .transcribe(job.output_path, job.target_language, job.target_language),
     )
     .await?;
     let Some(transcription) = transcription else {
-        return Ok(V14AttemptValidation {
+        return Ok(V14OutputValidation {
             accepted: false,
             message: "Cancelado durante conferência Whisper.".to_string(),
         });
@@ -911,7 +896,7 @@ async fn validate_v14_attempt(job: V14ValidationJob<'_>) -> AppResult<V14Attempt
         )
     };
 
-    Ok(V14AttemptValidation { accepted, message })
+    Ok(V14OutputValidation { accepted, message })
 }
 
 fn validate_v14_audio_tail(path: &Path) -> AppResult<()> {
@@ -1174,53 +1159,6 @@ fn lcs_char_count(left: &[char], right: &[char]) -> usize {
     previous[right.len()]
 }
 
-fn synthesis_text_with_final_breath(text: &str, attempt_index: usize) -> String {
-    let trimmed = text.trim();
-    if trimmed.is_empty() || attempt_index == 0 {
-        return trimmed.to_string();
-    }
-
-    match attempt_index {
-        1 => format!("{trimmed} ."),
-        2 => format!("{trimmed} ..."),
-        _ => format!("{trimmed} . ."),
-    }
-}
-
-fn line_overrides_with_final_breath(
-    line_overrides: &[LineSynthesisOverride],
-    attempt_index: usize,
-) -> Vec<LineSynthesisOverride> {
-    let mut next = line_overrides.to_vec();
-    if attempt_index == 0 {
-        return next;
-    }
-
-    if let Some(line) = next
-        .iter_mut()
-        .rev()
-        .find(|line| !line.target_text.trim().is_empty())
-    {
-        line.target_text = synthesis_text_with_final_breath(&line.target_text, attempt_index);
-    }
-
-    next
-}
-
-fn synthesis_attempt_path(output_path: &Path, job_id: JobId, attempt_number: usize) -> PathBuf {
-    let stem = output_path
-        .file_stem()
-        .and_then(|value| value.to_str())
-        .filter(|value| !value.is_empty())
-        .unwrap_or("dub");
-    let file_name = format!("{stem}.{job_id}.attempt-{attempt_number}.wav");
-    output_path
-        .parent()
-        .filter(|path| !path.as_os_str().is_empty())
-        .map(|parent| parent.join(&file_name))
-        .unwrap_or_else(|| PathBuf::from(file_name))
-}
-
 #[cfg(feature = "ml")]
 fn synthesis_reference_path(output_path: &Path, job_id: JobId) -> PathBuf {
     let stem = output_path
@@ -1241,23 +1179,6 @@ fn same_audio_path(left: &Path, right: &Path) -> bool {
     match (std::fs::canonicalize(left), std::fs::canonicalize(right)) {
         (Ok(left), Ok(right)) => left == right,
         _ => left == right,
-    }
-}
-
-fn copy_validated_attempt(attempt_path: &Path, output_path: &Path) -> AppResult<()> {
-    if let Some(parent) = output_path
-        .parent()
-        .filter(|path| !path.as_os_str().is_empty())
-    {
-        std::fs::create_dir_all(parent)?;
-    }
-    std::fs::copy(attempt_path, output_path)?;
-    Ok(())
-}
-
-fn cleanup_attempt_files(paths: &[PathBuf]) {
-    for path in paths {
-        let _ = remove_file_if_exists(path);
     }
 }
 
@@ -1352,6 +1273,52 @@ fn apply_text_options(
     let target_text = crate::text::synchronize_punctuation(&target_text, &source_text);
     project_metadata::validate_text_native_tags(&target_text)?;
     Ok(target_text)
+}
+
+fn ignored_source_audio_reason(path: &Path) -> AppResult<Option<String>> {
+    let metadata = audio::get_audio_metadata(path)?;
+    let Some(duration_seconds) = metadata.duration_seconds else {
+        return Ok(None);
+    };
+
+    if duration_seconds > f64::from(OMNIVOICE_MAX_SYNTHESIS_SECONDS) {
+        return Ok(Some(format!(
+            "Ignorado: áudio com {duration_seconds:.2}s excede o limite OmniVoice de {:.2}s.",
+            OMNIVOICE_MAX_SYNTHESIS_SECONDS
+        )));
+    }
+
+    Ok(None)
+}
+
+fn ignored_source_audio_reasons(paths: &[PathBuf]) -> AppResult<HashMap<PathBuf, String>> {
+    let mut ignored = HashMap::new();
+    for path in paths {
+        if let Some(reason) = ignored_source_audio_reason(path)? {
+            ignored.insert(path.clone(), reason);
+        }
+    }
+    Ok(ignored)
+}
+
+fn emit_ignored_file(
+    app: &AppHandle,
+    job_id: JobId,
+    context: &FileContext,
+    reason: String,
+) -> AppResult<()> {
+    emit(
+        app,
+        EVENT_FILE_COMPLETE,
+        event(
+            job_id,
+            JobEventKind::FileComplete,
+            Some(JobStage::FileComplete),
+            reason,
+            Some(context.progress(100)),
+            Some(context),
+        ),
+    )
 }
 
 fn emit_stage(
@@ -1518,46 +1485,6 @@ mod tests {
 
         assert!(!metrics.tail_ok);
         assert!(metrics.coverage < 0.75);
-    }
-
-    #[test]
-    fn v14_retry_adds_final_breath_without_changing_first_attempt() {
-        assert_eq!(
-            synthesis_text_with_final_breath("fala final", 0),
-            "fala final"
-        );
-        assert_eq!(
-            synthesis_text_with_final_breath("fala final", 1),
-            "fala final ."
-        );
-        assert_eq!(
-            synthesis_text_with_final_breath("fala final", 2),
-            "fala final ..."
-        );
-    }
-
-    #[test]
-    fn v14_retry_adds_final_breath_to_last_line_override_only() {
-        let settings = dublagem_domain::NativeSynthesisSettings::default();
-        let overrides = vec![
-            LineSynthesisOverride {
-                line_index: 0,
-                target_text: "primeira linha".to_string(),
-                tags: Vec::new(),
-                settings: settings.clone(),
-            },
-            LineSynthesisOverride {
-                line_index: 1,
-                target_text: "ultima linha".to_string(),
-                tags: Vec::new(),
-                settings,
-            },
-        ];
-
-        let next = line_overrides_with_final_breath(&overrides, 2);
-
-        assert_eq!(next[0].target_text, "primeira linha");
-        assert_eq!(next[1].target_text, "ultima linha ...");
     }
 
     #[test]

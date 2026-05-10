@@ -7,6 +7,7 @@ export type AudioFileStatus =
   | "dubbed"
   | "approved"
   | "rejected"
+  | "ignored"
   | "missing_source"
   | "failed";
 export type JobEventKind =

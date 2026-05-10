@@ -22,6 +22,7 @@ VOICE_PROFILES_PTBR = {
 }
 
 SAMPLE_RATE_TTS = 24000
+OMNIVOICE_MAX_SYNTHESIS_SECONDS = 30.0
 REFERENCE_TARGET_SECONDS = 8.0
 REFERENCE_MAX_SECONDS = 10.0
 REFERENCE_MIN_SECONDS = 3.0
@@ -482,19 +483,6 @@ def validar_audio_final_completo(caminho_saida, texto_esperado, whisper_model=No
 
     return True, f"Final completo (sim={similaridade:.2f}, cobertura={cobertura:.2f}, margem={margem_final_ms:.0f} ms)."
 
-def texto_tts_com_respiro_final(texto, tentativa):
-    """Adiciona pontuacao invisivel nas novas tentativas para proteger a ultima palavra."""
-    texto = str(texto or "").strip()
-    if not texto:
-        return texto
-    if tentativa <= 0:
-        return texto
-    if tentativa == 1:
-        return texto + " ."
-    if tentativa == 2:
-        return texto + " ..."
-    return texto + " . ."
-
 def calcular_duracao_tts_alvo(caminho_original, pad_ms=200):
     perfil = _perfil_temporal_original(caminho_original, 24000)
     total_ms = int(perfil.get("total_ms") or 0)
@@ -820,6 +808,24 @@ class SingleDubbingWorkerV14(QThread):
                 prog_base = int((idx_p / total) * 100)
                 self.prog(prog_base)
 
+                try:
+                    duracao_original = get_duracao_exata(curr_path)
+                except Exception as exc:
+                    motivo = f"Falha ao medir duracao do audio: {exc}"
+                    self.log(f"❌ {motivo}", "error")
+                    self.file_done_signal.emit(False, motivo, "", nome, "", "")
+                    self.prog(int(((idx_p + 1) / total) * 100))
+                    continue
+                if duracao_original > OMNIVOICE_MAX_SYNTHESIS_SECONDS:
+                    motivo = (
+                        f"IGNORADO: audio com {duracao_original:.2f}s excede "
+                        f"o limite OmniVoice de {OMNIVOICE_MAX_SYNTHESIS_SECONDS:.2f}s."
+                    )
+                    self.log(f"⏭️ {nome} {motivo}", "warning")
+                    self.file_done_signal.emit(False, motivo, "", nome, "", "")
+                    self.prog(int(((idx_p + 1) / total) * 100))
+                    continue
+
                 use_custom   = (len(self.paths_en)==1)
                 txt_en       = self.custom_texts.get("en","") if use_custom else ""
                 txt_pt_final = self.custom_texts.get("pt","") if use_custom else ""
@@ -902,29 +908,24 @@ class SingleDubbingWorkerV14(QThread):
                         "Config geracao: "
                         f"ref={ref_dur:.2f}s, alvo={duracao_tts_alvo or 0.0:.2f}s, "
                         f"device={omni_device_label}, dtype={omni_dtype_label}, "
-                        "num_step=48, audio_chunk=15s."
+                        f"num_step=48, limite={OMNIVOICE_MAX_SYNTHESIS_SECONDS:.0f}s, sintese unica."
                     ),
                     "info",
                 )
                 if ref_text_uso:
                     self.log(f"Texto da referencia curta: {ref_text_uso[:120]}", "info")
 
-                # ═══ GERAÇÃO — IGUAL AO OMNI11 ═══
+                # ═══ GERAÇÃO — contrato único OmniVoice <= 30s ═══
                 audio_final_aprovado = None
                 motivo_falha = ""
-                max_tentativas = 6
-                for tentativa in range(max_tentativas):
-                    if self.isInterruptionRequested():
-                        motivo_falha = "Cancelado pelo usuário"
-                        break
+                if self.isInterruptionRequested():
+                    motivo_falha = "Cancelado pelo usuário"
+                else:
                     try:
-                        texto_tts = texto_tts_com_respiro_final(txt_pt_final, tentativa)
-                        self.log(f"⚙️ Gerando (tentativa {tentativa+1}/{max_tentativas})...","info")
-                        if texto_tts != txt_pt_final:
-                            self.log("Protecao anti-corte: adicionando respiro de pontuacao no fim.", "info")
+                        self.log("⚙️ Gerando síntese única...","info")
 
                         kwargs_geracao = dict(
-                            text=texto_tts,
+                            text=txt_pt_final,
                             voice_clone_prompt=voice_clone_prompt,
                             language=self.target_lang,
                             num_step=48,
@@ -935,11 +936,18 @@ class SingleDubbingWorkerV14(QThread):
                             postprocess_output=True,
                         )
                         if duracao_tts_alvo:
+                            if duracao_tts_alvo > OMNIVOICE_MAX_SYNTHESIS_SECONDS:
+                                raise ValueError(
+                                    "Duracao TTS acima do limite OmniVoice: "
+                                    f"{duracao_tts_alvo:.2f}s > {OMNIVOICE_MAX_SYNTHESIS_SECONDS:.2f}s."
+                                )
                             kwargs_geracao["duration"] = duracao_tts_alvo
 
                         temp_audio = self.models["omni"].generate(**kwargs_geracao)
 
-                        if temp_audio is not None:
+                        if temp_audio is None:
+                            motivo_falha = "OmniVoice não retornou áudio."
+                        else:
                             y_raw = temp_audio[0] if isinstance(temp_audio, (list, tuple)) else temp_audio
                             y_val = np.array(y_raw).astype(np.float32).flatten()
 
@@ -947,52 +955,50 @@ class SingleDubbingWorkerV14(QThread):
                             if not qualidade_ok:
                                 motivo_falha = qualidade_msg
                                 self.log(f"⚠️ {motivo_falha}", "warning")
-                                continue
-
-                            sf.write(temp_gen_path, y_val, 24000)
-                            res_temp = self.models["whisper"].transcribe(temp_gen_path, language=self.target_lang, temperature=0.0)
-                            texto_ouvido = res_temp["text"].strip()
-                            similaridade = calcular_similaridade_texto(txt_pt_final, texto_ouvido)
-                            cobertura, _, esperado_tokens, _ = calcular_cobertura_palavras(txt_pt_final, texto_ouvido)
-
-                            if similaridade > 0.52 and (len(esperado_tokens) <= 2 or cobertura >= 0.62):
-                                meta_sync = sincronizar_master_v10_1(y_val, saida_final, curr_path, self.pad_ms)
-                                taxa_d = float(meta_sync.get("taxa_desejada", 1.0)) if isinstance(meta_sync, dict) else 1.0
-                                taxa_a = float(meta_sync.get("taxa_aplicada", 1.0)) if isinstance(meta_sync, dict) else 1.0
-                                if abs(taxa_d - taxa_a) > 0.08:
-                                    self.log(
-                                        f"⚠️ Ajuste de tempo limitado ({taxa_a:.2f}x pedido {taxa_d:.2f}x); nao cortei a fala.",
-                                        "warning",
-                                    )
-                                if isinstance(meta_sync, dict):
-                                    orig_ms = int(meta_sync.get("duracao_original_ms") or 0)
-                                    final_ms = int(meta_sync.get("duracao_final_ms") or 0)
-                                    tolerancia_ms = max(120, int(orig_ms * 0.10))
-                                    if orig_ms > 0 and final_ms > 0 and abs(final_ms - orig_ms) > tolerancia_ms:
-                                        motivo_falha = (
-                                            f"Tempo fora do original ({final_ms} ms vs {orig_ms} ms; "
-                                            f"tol={tolerancia_ms} ms)."
-                                        )
-                                        self.log(f"⚠️ {motivo_falha}", "warning")
-                                        continue
-
-                                ok_final, detalhe_final = validar_audio_final_completo(
-                                    saida_final, txt_pt_final, self.models["whisper"], self.target_lang
-                                )
-                                if ok_final:
-                                    audio_final_aprovado = saida_final
-                                    self.log(f"✅ Aprovado: {detalhe_final}","success")
-                                    break
-                                motivo_falha = f"Conferencia final reprovou: {detalhe_final}"
-                                self.log(f"⚠️ {motivo_falha}","warning")
                             else:
-                                motivo_falha = f"Alucinação/omissao (sim={similaridade:.2f}, cobertura={cobertura:.2f})"
-                                self.log(f"⚠️ {motivo_falha}","warning")
+                                sf.write(temp_gen_path, y_val, 24000)
+                                res_temp = self.models["whisper"].transcribe(temp_gen_path, language=self.target_lang, temperature=0.0)
+                                texto_ouvido = res_temp["text"].strip()
+                                similaridade = calcular_similaridade_texto(txt_pt_final, texto_ouvido)
+                                cobertura, _, esperado_tokens, _ = calcular_cobertura_palavras(txt_pt_final, texto_ouvido)
+
+                                if similaridade > 0.52 and (len(esperado_tokens) <= 2 or cobertura >= 0.62):
+                                    meta_sync = sincronizar_master_v10_1(y_val, saida_final, curr_path, self.pad_ms)
+                                    taxa_d = float(meta_sync.get("taxa_desejada", 1.0)) if isinstance(meta_sync, dict) else 1.0
+                                    taxa_a = float(meta_sync.get("taxa_aplicada", 1.0)) if isinstance(meta_sync, dict) else 1.0
+                                    if abs(taxa_d - taxa_a) > 0.08:
+                                        self.log(
+                                            f"⚠️ Ajuste de tempo limitado ({taxa_a:.2f}x pedido {taxa_d:.2f}x); nao cortei a fala.",
+                                            "warning",
+                                        )
+                                    if isinstance(meta_sync, dict):
+                                        orig_ms = int(meta_sync.get("duracao_original_ms") or 0)
+                                        final_ms = int(meta_sync.get("duracao_final_ms") or 0)
+                                        tolerancia_ms = max(120, int(orig_ms * 0.10))
+                                        if orig_ms > 0 and final_ms > 0 and abs(final_ms - orig_ms) > tolerancia_ms:
+                                            motivo_falha = (
+                                                f"Tempo fora do original ({final_ms} ms vs {orig_ms} ms; "
+                                                f"tol={tolerancia_ms} ms)."
+                                            )
+                                            self.log(f"⚠️ {motivo_falha}", "warning")
+
+                                    if not motivo_falha:
+                                        ok_final, detalhe_final = validar_audio_final_completo(
+                                            saida_final, txt_pt_final, self.models["whisper"], self.target_lang
+                                        )
+                                        if ok_final:
+                                            audio_final_aprovado = saida_final
+                                            self.log(f"✅ Aprovado: {detalhe_final}","success")
+                                        else:
+                                            motivo_falha = f"Conferencia final reprovou: {detalhe_final}"
+                                            self.log(f"⚠️ {motivo_falha}","warning")
+                                else:
+                                    motivo_falha = f"Alucinação/omissao (sim={similaridade:.2f}, cobertura={cobertura:.2f})"
+                                    self.log(f"⚠️ {motivo_falha}","warning")
 
                     except Exception as e:
                         motivo_falha = str(e)
                         self.log(f"❌ {e}","error")
-                        continue
 
                 # ═══ APROVACAO FINAL — arquivo ja sincronizado e conferido ═══
                 if audio_final_aprovado is not None:

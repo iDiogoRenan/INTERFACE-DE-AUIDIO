@@ -237,7 +237,7 @@ pub fn read_wav_mono_f32(path: &Path) -> AppResult<Vec<f32>> {
     Ok(mix_interleaved_to_mono(&decoded.samples, decoded.channels))
 }
 
-#[cfg(feature = "ml")]
+#[cfg(all(feature = "ml", feature = "cuda"))]
 pub fn read_audio_mono_16khz_f32(path: &Path) -> AppResult<Vec<f32>> {
     let decoded = decode_audio_mono_f32(path)?;
     if decoded.sample_rate == WHISPER_SAMPLE_RATE {

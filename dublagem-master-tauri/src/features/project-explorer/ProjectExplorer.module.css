@@ -108,6 +108,10 @@
   color: var(--success);
 }
 
+.status[data-status="ignored"] {
+  color: var(--warning);
+}
+
 .status[data-status="failed"],
 .status[data-status="rejected"] {
   color: var(--danger);

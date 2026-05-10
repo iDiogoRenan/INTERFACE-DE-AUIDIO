@@ -353,7 +353,7 @@ describe("workspaceStore transcription hydration", () => {
       voiceMode: "design",
       instruct: "female, young adult, moderate pitch",
       speed: null,
-      durationSeconds: 60,
+      durationSeconds: 30,
       numStep: 8,
       guidanceScale: 10,
       positionTemperature: 0,
@@ -432,6 +432,21 @@ describe("workspaceStore transcription hydration", () => {
     expect(useWorkspaceStore.getState().activeJobId).toBeNull();
     expect(useWorkspaceStore.getState().isBusy).toBe(false);
     expect(useWorkspaceStore.getState().isCancelling).toBe(false);
+  });
+
+  it("marks files ignored when the backend completes without an output artifact", () => {
+    useWorkspaceStore.setState({ files: [fileA], selectedPath: fileA.path });
+
+    applyJobEvent(
+      jobEvent({
+        kind: "file_complete",
+        stage: "file_complete",
+        filePath: fileA.path,
+        message: "Ignorado: áudio com 31.00s excede o limite OmniVoice de 30.00s."
+      })
+    );
+
+    expect(useWorkspaceStore.getState().files[0].status).toBe("ignored");
   });
 
   it("keeps execution logs timestamped and sorted newest first", () => {

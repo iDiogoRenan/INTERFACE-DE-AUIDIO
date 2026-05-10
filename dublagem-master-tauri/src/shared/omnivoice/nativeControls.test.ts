@@ -39,7 +39,7 @@ describe("native OmniVoice synthesis settings", () => {
       voiceMode: "design",
       instruct: "female, young adult, moderate pitch",
       speed: null,
-      durationSeconds: 60,
+      durationSeconds: 30,
       numStep: 8,
       guidanceScale: 10,
       positionTemperature: 0,

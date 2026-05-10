@@ -663,6 +663,10 @@ export function applyJobEvent(payload: DubbingJobEvent): void {
         ? { ...file, status: "dubbed", transcription: completedTranscription ?? file.transcription }
         : file
     );
+  } else if (eventPath && payload.kind === "file_complete") {
+    update.files = state.files.map((file) =>
+      file.path === eventPath ? { ...file, status: "ignored" } : file
+    );
   }
 
   if (terminalEvent) {
@@ -670,7 +674,10 @@ export function applyJobEvent(payload: DubbingJobEvent): void {
     update.isBusy = false;
     update.isCancelling = false;
   }
-  if ((eventPath && payload.outputPath !== null) || terminalEvent) {
+  if (
+    (eventPath && (payload.outputPath !== null || payload.kind === "file_complete")) ||
+    terminalEvent
+  ) {
     update.submittedDubbingDrafts = removeSubmittedDraft(state.submittedDubbingDrafts, eventPath);
   }
 

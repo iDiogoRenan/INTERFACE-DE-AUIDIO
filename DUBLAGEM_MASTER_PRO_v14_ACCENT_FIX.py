@@ -618,6 +618,8 @@ class FileExplorer(QWidget):
     def _status_color(self, status):
         if "Pronto" in status:
             return "#3fb950"
+        if status.startswith("Ignorado"):
+            return "#d29922"
         if status.startswith("Falha") or status.startswith("Erro"):
             return "#f85149"
         return "#8b949e"
@@ -672,7 +674,10 @@ class FileExplorer(QWidget):
             print(f"Erro ao ler diretório: {e}")
 
     def update_status(self, name, ok, motivo):
-        self._status[name] = "Pronto" if ok else f"Falha: {motivo[:25]}"
+        if not ok and str(motivo or "").startswith("IGNORADO:"):
+            self._status[name] = "Ignorado"
+        else:
+            self._status[name] = "Pronto" if ok else f"Falha: {motivo[:25]}"
         self.refresh()
 
     def _on_click(self, item):
@@ -1400,10 +1405,14 @@ class MainWindow(QMainWindow):
             self.lbl_status.setText(f"✅ {original_name} concluído!")
             self.lbl_status.setStyleSheet("color:#3fb950; font-weight:bold;")
         else:
-            self._salvar_para_revisao_manual(original_name, mov)
             self.exp.update_status(original_name, False, mov)
-            self.lbl_status.setText(f"❌ {original_name} Falhou: {mov}")
-            self.lbl_status.setStyleSheet("color:#f85149;")
+            if str(mov or "").startswith("IGNORADO:"):
+                self.lbl_status.setText(f"⏭ {original_name} ignorado: {mov.replace('IGNORADO: ', '')}")
+                self.lbl_status.setStyleSheet("color:#d29922;")
+            else:
+                self._salvar_para_revisao_manual(original_name, mov)
+                self.lbl_status.setText(f"❌ {original_name} Falhou: {mov}")
+                self.lbl_status.setStyleSheet("color:#f85149;")
 
     def _save_result(self):
         if not self._current_result: return QMessageBox.warning(self, "Aviso", "Nenhum resultado gerado ainda.")

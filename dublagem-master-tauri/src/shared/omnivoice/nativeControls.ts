@@ -59,9 +59,11 @@ export const defaultNativeSynthesisSettings: NativeSynthesisSettings = {
   ...defaultOptions.nativeSynthesis
 };
 
+export const omnivoiceMaxSynthesisSeconds = 30;
+
 export const nativeSynthesisNumberControls = {
   speed: { min: 0.5, max: 2, step: 0.05 },
-  durationSeconds: { min: 0.25, max: 60, step: 0.05 },
+  durationSeconds: { min: 0.25, max: omnivoiceMaxSynthesisSeconds, step: 0.05 },
   numStep: { min: 8, max: 128, step: 1 },
   guidanceScale: { min: 0, max: 10, step: 0.1 },
   positionTemperature: { min: 0, max: 10, step: 0.1 },

@@ -31,7 +31,7 @@ Controles aceitos pelo backend:
 
 - `voiceMode`: aceita `clone`, `design` e `auto`. Em `design`, `instruct` deve conter uma descrição de voz; em `clone`, o prompt vem da referência curta extraída do áudio.
 - `speed`: opcional, entre `0.50` e `2.00`. Quando `durationSeconds` está definido, duração tem prioridade.
-- `durationSeconds`: opcional, entre `0.25` e `60.00`.
+- `durationSeconds`: opcional, entre `0.25` e `30.00`. Arquivos de origem acima de `30.00s` são ignorados automaticamente e marcados como `ignored`.
 - `numStep`: inteiro entre `8` e `128`.
 - `guidanceScale`, `positionTemperature`, `classTemperature`: números entre `0.00` e `10.00`.
 - `denoise`, `preprocessPrompt`, `postprocessOutput`: booleanos enviados diretamente para a configuração OmniVoice.

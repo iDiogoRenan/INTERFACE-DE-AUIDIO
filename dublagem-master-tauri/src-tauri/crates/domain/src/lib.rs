@@ -21,6 +21,8 @@ pub const OMNIVOICE_NATIVE_TAGS: &[&str] = &[
     "[dissatisfaction-hnn]",
 ];
 
+pub const OMNIVOICE_MAX_SYNTHESIS_SECONDS: f32 = 30.0;
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LanguageCode {
@@ -129,7 +131,12 @@ impl Default for NativeSynthesisSettings {
 impl NativeSynthesisSettings {
     pub fn validate(&self) -> Result<(), String> {
         validate_optional_range("speed", self.speed, 0.5, 2.0)?;
-        validate_optional_range("durationSeconds", self.duration_seconds, 0.25, 60.0)?;
+        validate_optional_range(
+            "durationSeconds",
+            self.duration_seconds,
+            0.25,
+            OMNIVOICE_MAX_SYNTHESIS_SECONDS,
+        )?;
         validate_range("numStep", self.num_step as f32, 8.0, 128.0)?;
         validate_range("guidanceScale", self.guidance_scale, 0.0, 10.0)?;
         validate_range("positionTemperature", self.position_temperature, 0.0, 10.0)?;
@@ -209,6 +216,7 @@ pub enum AudioFileStatus {
     Dubbed,
     Approved,
     Rejected,
+    Ignored,
     MissingSource,
     Failed,
 }
