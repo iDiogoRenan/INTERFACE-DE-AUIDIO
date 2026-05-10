@@ -161,6 +161,7 @@ pub async fn preview_synthesis_line(
             text: &request.text,
             source_audio: &request.source_audio,
             reference_audio,
+            reference_text: "",
             output_path: &output_path,
             options,
             line_overrides: &line_overrides,
@@ -247,6 +248,10 @@ fn preview_line_file_name(request: &SynthesisLinePreviewRequest) -> String {
     let mut hasher = sha2::Sha256::new();
     hasher.update(request.source_audio.to_string_lossy().as_bytes());
     hasher.update(request.text.as_bytes());
+    for tag in &request.tags {
+        hasher.update([0]);
+        hasher.update(tag.as_bytes());
+    }
     hasher.update(format!("{:?}", request.settings).as_bytes());
     let digest = hasher.finalize();
     let fingerprint = digest

@@ -34,6 +34,7 @@ pub struct AudioTimingProfile {
     pub trailing_silence_ms: u32,
     pub voice_ms: u32,
     pub peak_amplitude: f32,
+    pub rms_amplitude: f32,
 }
 
 #[cfg(feature = "ml")]
@@ -496,6 +497,7 @@ fn audio_timing_profile_from_samples(
             trailing_silence_ms: 0,
             voice_ms: 0,
             peak_amplitude: 0.95,
+            rms_amplitude: 0.08,
         };
     }
 
@@ -505,6 +507,10 @@ fn audio_timing_profile_from_samples(
         .fold(0.0_f32, |current, sample| current.max(sample.abs()))
         .clamp(0.05, 0.98);
     let active_range = active_sample_range(samples, peak);
+    let rms_amplitude = active_range
+        .map(|(start, end)| rms_amplitude(&samples[start..=end]))
+        .unwrap_or_else(|| rms_amplitude(samples))
+        .clamp(0.01, 0.5);
     let (leading_silence_ms, raw_trailing_silence_ms) = active_range
         .map(|(start, end)| {
             (
@@ -532,7 +538,17 @@ fn audio_timing_profile_from_samples(
         trailing_silence_ms,
         voice_ms,
         peak_amplitude: peak,
+        rms_amplitude,
     }
+}
+
+#[cfg(feature = "ml")]
+fn rms_amplitude(samples: &[f32]) -> f32 {
+    if samples.is_empty() {
+        return 0.0;
+    }
+
+    (samples.iter().map(|sample| sample * sample).sum::<f32>() / samples.len() as f32).sqrt()
 }
 
 #[cfg(feature = "ml")]

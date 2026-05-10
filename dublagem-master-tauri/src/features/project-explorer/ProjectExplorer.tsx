@@ -90,7 +90,6 @@ export function ProjectExplorer() {
                       <button
                         type="button"
                         disabled={!selectedPath}
-                        title={nativeTagDescriptions[tag]}
                         data-tag={tag}
                         onClick={() => {
                           insertNativeTag(tag);
@@ -115,12 +114,7 @@ export function ProjectExplorer() {
             </div>
           </div>
         ))}
-        <button
-          type="button"
-          className={styles.manageTags}
-          disabled
-          title="A lista e bloqueada para manter apenas tags nativas suportadas."
-        >
+        <button type="button" className={styles.manageTags} disabled>
           <Plus size={14} />
           Tags nativas bloqueadas
         </button>

@@ -21,6 +21,9 @@ const clientMocks = vi.hoisted(() => ({
     Promise.resolve("E:\\audio\\preview.wav")
   ),
   scanAudioFolder: vi.fn<(inputDir: string, outputDir: string) => Promise<AudioFileEntry[]>>(),
+  saveConfig: vi.fn<(config: AppConfig) => Promise<AppConfig>>((nextConfig) =>
+    Promise.resolve(nextConfig)
+  ),
   startDubbingJob: vi.fn<(request: DubbingRequest) => Promise<string>>(() =>
     Promise.resolve("job-1")
   )
@@ -35,7 +38,7 @@ vi.mock("../shared/tauri/client", () => ({
   isTauriRuntime: () => false,
   tauriClient: {
     loadConfig: vi.fn(),
-    saveConfig: vi.fn(),
+    saveConfig: clientMocks.saveConfig,
     loadProjectMetadata: clientMocks.loadProjectMetadata,
     saveProjectMetadata: clientMocks.saveProjectMetadata,
     scanAudioFolder: clientMocks.scanAudioFolder,
@@ -69,6 +72,7 @@ describe("workspaceStore transcription hydration", () => {
     clientMocks.saveProjectMetadata.mockClear();
     clientMocks.previewSynthesisLine.mockClear();
     clientMocks.scanAudioFolder.mockReset();
+    clientMocks.saveConfig.mockClear();
     clientMocks.startDubbingJob.mockClear();
     useWorkspaceStore.setState({
       config,
@@ -88,6 +92,7 @@ describe("workspaceStore transcription hydration", () => {
       totalFiles: null,
       isCancelling: false,
       lastOutputPath: null,
+      lastOutputRevision: 0,
       linePreviewPath: null,
       progress: 0,
       isBusy: false,
@@ -256,6 +261,122 @@ describe("workspaceStore transcription hydration", () => {
     expect(request.tags).toEqual(["[sigh]"]);
     expect(request.settings.voiceMode).toBe("auto");
     expect(useWorkspaceStore.getState().linePreviewPath).toBe("E:\\audio\\preview.wav");
+    expect(useWorkspaceStore.getState().lastOutputPath).toBe("E:\\audio\\preview.wav");
+    expect(useWorkspaceStore.getState().lastOutputRevision).toBe(1);
+  });
+
+  it("bumps the result player revision when a preview returns the same path", async () => {
+    useWorkspaceStore.getState().setTargetText("Linha para previa.");
+
+    await useWorkspaceStore.getState().previewSelectedLine();
+    await useWorkspaceStore.getState().previewSelectedLine();
+
+    expect(useWorkspaceStore.getState().lastOutputPath).toBe("E:\\audio\\preview.wav");
+    expect(useWorkspaceStore.getState().lastOutputRevision).toBe(2);
+  });
+
+  it("normalizes line synthesis controls before sending them to the backend", async () => {
+    useWorkspaceStore.getState().setTargetText("Linha com controles aceitos.");
+    useWorkspaceStore.getState().updateSelectedLineSettings({
+      voiceMode: "design",
+      instruct: "   ",
+      speed: Number.NaN,
+      durationSeconds: 99,
+      numStep: 2,
+      guidanceScale: 99,
+      positionTemperature: -5,
+      classTemperature: Number.NaN,
+      outputGainDb: -8,
+      sibilanceReduction: 0.8,
+      artifactReduction: 0.65
+    });
+
+    await useWorkspaceStore.getState().startDubbing();
+
+    const [[request]] = clientMocks.startDubbingJob.mock.calls;
+    expect(request.lineOverrides[0].settings).toMatchObject({
+      voiceMode: "design",
+      instruct: "female, young adult, moderate pitch",
+      speed: null,
+      durationSeconds: 60,
+      numStep: 8,
+      guidanceScale: 10,
+      positionTemperature: 0,
+      classTemperature: 0,
+      outputGainDb: -8,
+      sibilanceReduction: 0.8,
+      artifactReduction: 0.65
+    });
+  });
+
+  it("does not split whole-file synthesis for notes-only line metadata", async () => {
+    useWorkspaceStore.getState().setTargetText("Primeira linha.\nSegunda linha.");
+    useWorkspaceStore.getState().updateSelectedLineMetadata({ notes: "observacao interna" });
+
+    await useWorkspaceStore.getState().startDubbing();
+
+    const [[request]] = clientMocks.startDubbingJob.mock.calls;
+    expect(request.lineOverrides).toEqual([]);
+  });
+
+  it("persists selected synthesis controls as the next global default", async () => {
+    useWorkspaceStore.getState().setTargetText("Linha com padrao novo.");
+    useWorkspaceStore.getState().updateSelectedLineSettings({
+      outputGainDb: -6,
+      sibilanceReduction: 0.7,
+      artifactReduction: 0.4
+    });
+
+    await useWorkspaceStore.getState().saveSelectedLineSettingsAsDefault();
+
+    const [[savedConfig]] = clientMocks.saveConfig.mock.calls;
+    expect(savedConfig.options.nativeSynthesis).toMatchObject({
+      voiceMode: "clone",
+      instruct: null,
+      outputGainDb: -6,
+      sibilanceReduction: 0.7,
+      artifactReduction: 0.4
+    });
+    expect(useWorkspaceStore.getState().config.options.nativeSynthesis.outputGainDb).toBe(-6);
+  });
+
+  it("restores factory synthesis defaults for the selected line and global config", async () => {
+    useWorkspaceStore.getState().setTargetText("Linha com ajuste para reset.");
+    useWorkspaceStore.getState().updateSelectedLineSettings({
+      outputGainDb: -6,
+      sibilanceReduction: 0.7
+    });
+
+    await useWorkspaceStore.getState().resetSelectedLineSettingsToDefault();
+
+    const [[savedConfig]] = clientMocks.saveConfig.mock.calls;
+    expect(savedConfig.options.nativeSynthesis).toMatchObject({
+      outputGainDb: 0,
+      sibilanceReduction: 0,
+      artifactReduction: 0
+    });
+    expect(
+      useWorkspaceStore.getState().projectMetadata.files[fileA.name]?.lines["0"]?.settings
+    ).toMatchObject({
+      outputGainDb: 0,
+      sibilanceReduction: 0,
+      artifactReduction: 0
+    });
+  });
+
+  it("releases central controls when a terminal job event arrives", () => {
+    useWorkspaceStore.setState({ activeJobId: "job-1", isBusy: true, isCancelling: true });
+
+    applyJobEvent(
+      jobEvent({
+        kind: "failed",
+        stage: "failed"
+      })
+    );
+
+    expect(useWorkspaceStore.getState().activeJobId).toBeNull();
+    expect(useWorkspaceStore.getState().isBusy).toBe(false);
+    expect(useWorkspaceStore.getState().isCancelling).toBe(false);
   });
 
   it("reverts edited transcription fields to the selected file baseline", () => {

@@ -5,26 +5,26 @@ import {
   Check,
   CheckCircle2,
   ChevronDown,
+  ChevronRight,
   Circle,
   Loader2,
-  Mic2,
   Play,
   RotateCcw,
   Square,
   Undo2,
   Wand2
 } from "lucide-react";
-import type { ReactNode } from "react";
+import { useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { AudioPlayer } from "../audio-player/AudioPlayer";
 import {
   isNativeTag,
   nativeTagDescriptions,
+  nativeSynthesisNumberControls,
+  normalizeNativeSynthesisSettings,
   replaceLine,
   splitLines,
   unknownNativeTags,
-  voicePresets,
-  type NativeTag,
-  type VoicePresetId
+  type NativeTag
 } from "../../shared/omnivoice/nativeControls";
 import { useWorkspaceStore, selectedLineMetadata } from "../../stores/workspaceStore";
 import type {
@@ -58,6 +58,19 @@ const stageOrder = new Map<JobStage, number>([
   ["finished", 5]
 ]);
 
+const LINE_SECTION_OPEN_STORAGE_KEY = "nsg-gaming-dub.line-sidebar-sections.v1";
+
+type LineSectionKey = "properties" | "basicSettings" | "nativeAdjustments" | "audioPolish";
+type LineSectionOpenState = Record<LineSectionKey, boolean>;
+type SetLineSectionOpen = (section: LineSectionKey, isOpen: boolean) => void;
+
+const DEFAULT_LINE_SECTION_OPEN_STATE: LineSectionOpenState = {
+  properties: true,
+  basicSettings: true,
+  nativeAdjustments: false,
+  audioPolish: true
+};
+
 export function DubbingPanel() {
   const config = useWorkspaceStore((state) => state.config);
   const files = useWorkspaceStore((state) => state.files);
@@ -72,6 +85,12 @@ export function DubbingPanel() {
   const setSelectedLineIndex = useWorkspaceStore((state) => state.setSelectedLineIndex);
   const updateSelectedLineMetadata = useWorkspaceStore((state) => state.updateSelectedLineMetadata);
   const updateSelectedLineSettings = useWorkspaceStore((state) => state.updateSelectedLineSettings);
+  const saveSelectedLineSettingsAsDefault = useWorkspaceStore(
+    (state) => state.saveSelectedLineSettingsAsDefault
+  );
+  const resetSelectedLineSettingsToDefault = useWorkspaceStore(
+    (state) => state.resetSelectedLineSettingsToDefault
+  );
   const removeNativeTag = useWorkspaceStore((state) => state.removeNativeTag);
   const previewSelectedLine = useWorkspaceStore((state) => state.previewSelectedLine);
   const revertTranscription = useWorkspaceStore((state) => state.revertTranscription);
@@ -87,6 +106,7 @@ export function DubbingPanel() {
   const currentFileIndex = useWorkspaceStore((state) => state.currentFileIndex);
   const totalFiles = useWorkspaceStore((state) => state.totalFiles);
   const lastOutputPath = useWorkspaceStore((state) => state.lastOutputPath);
+  const lastOutputRevision = useWorkspaceStore((state) => state.lastOutputRevision);
   const logs = useWorkspaceStore((state) => state.logs);
   const selectedFile = files.find((file) => file.path === selectedPath) ?? null;
   const lineMetadata = selectedLineMetadata({
@@ -111,7 +131,7 @@ export function DubbingPanel() {
       <div className={styles.mainColumn}>
         <section className={styles.players} aria-label="Players de áudio">
           <AudioPlayer title="Origem" path={selectedPath} />
-          <AudioPlayer title="Resultado" path={lastOutputPath} />
+          <AudioPlayer title="Resultado" path={lastOutputPath} revision={lastOutputRevision} />
         </section>
 
         <section className={styles.editorGrid} aria-label="Transcrição editável">
@@ -142,13 +162,6 @@ export function DubbingPanel() {
         </section>
 
         <section className={styles.controls}>
-          <div className={styles.optionSummary}>
-            <Mic2 size={16} />
-            <span>
-              {config.options.mode} · {config.options.sourceLanguage.toUpperCase()} →{" "}
-              {config.options.targetLanguage.toUpperCase()} · pad {String(config.options.padMs)} ms
-            </span>
-          </div>
           <div className={styles.actions}>
             <button
               type="button"
@@ -189,7 +202,7 @@ export function DubbingPanel() {
         </section>
       </div>
 
-      <LinePropertiesPanel
+      <LinePropertiesSidebar
         selectedFile={selectedFile}
         selectedLineIndex={selectedLineIndex}
         targetText={targetText}
@@ -197,6 +210,12 @@ export function DubbingPanel() {
         isBusy={isBusy}
         onMetadataChange={updateSelectedLineMetadata}
         onSettingsChange={updateSelectedLineSettings}
+        onSaveSettingsAsDefault={() => {
+          void saveSelectedLineSettingsAsDefault();
+        }}
+        onResetSettingsToDefault={() => {
+          void resetSelectedLineSettingsToDefault();
+        }}
         onPreview={() => {
           void previewSelectedLine();
         }}
@@ -287,14 +306,12 @@ function TaggedLineEditor({
             data-selected={index === selectedLineIndex}
           >
             <span className={styles.lineNumber}>{index + 1}</span>
-            <textarea
+            <AutoSizingLineTextarea
               value={line}
-              rows={2}
               onFocus={() => {
                 onSelectLine(index);
               }}
-              onChange={(event) => {
-                const nextLine = event.currentTarget.value;
+              onChange={(nextLine) => {
                 const [unknownTag] = unknownNativeTags(nextLine);
                 if (unknownTag) {
                   onInvalidTag(unknownTag);
@@ -308,6 +325,56 @@ function TaggedLineEditor({
       </div>
     </section>
   );
+}
+
+interface AutoSizingLineTextareaProps {
+  value: string;
+  onFocus: () => void;
+  onChange: (value: string) => void;
+}
+
+function AutoSizingLineTextarea({ value, onFocus, onChange }: AutoSizingLineTextareaProps) {
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+  useLayoutEffect(() => {
+    const textarea = textareaRef.current;
+    if (!textarea || typeof ResizeObserver === "undefined") {
+      return;
+    }
+
+    const observer = new ResizeObserver(() => {
+      resizeLineTextarea(textarea);
+    });
+    observer.observe(textarea);
+
+    return () => {
+      observer.disconnect();
+    };
+  }, []);
+
+  useLayoutEffect(() => {
+    resizeLineTextarea(textareaRef.current);
+  }, [value]);
+
+  return (
+    <textarea
+      ref={textareaRef}
+      value={value}
+      rows={2}
+      onFocus={onFocus}
+      onChange={(event) => {
+        onChange(event.currentTarget.value);
+      }}
+    />
+  );
+}
+
+function resizeLineTextarea(textarea: HTMLTextAreaElement | null): void {
+  if (!textarea) {
+    return;
+  }
+  textarea.style.height = "auto";
+  textarea.style.height = `${String(textarea.scrollHeight)}px`;
 }
 
 interface SelectedNativeTagsProps {
@@ -328,7 +395,6 @@ function SelectedNativeTags({ tags, onRemoveTag }: SelectedNativeTagsProps) {
             <Tooltip.Trigger asChild>
               <button
                 type="button"
-                title={nativeTagDescriptions[tag]}
                 aria-label={`Remover ${tag}: ${nativeTagDescriptions[tag]}`}
                 onClick={() => {
                   onRemoveTag?.(tag);
@@ -350,7 +416,7 @@ function SelectedNativeTags({ tags, onRemoveTag }: SelectedNativeTagsProps) {
   );
 }
 
-interface LinePropertiesPanelProps {
+interface LinePropertiesSidebarProps {
   selectedFile: { metadata: { durationSeconds: number | null } | null } | null;
   selectedLineIndex: number;
   targetText: string;
@@ -358,11 +424,13 @@ interface LinePropertiesPanelProps {
   isBusy: boolean;
   onMetadataChange: (patch: Partial<ProjectLineMetadata>) => void;
   onSettingsChange: (patch: Partial<NativeSynthesisSettings>) => void;
+  onSaveSettingsAsDefault: () => void;
+  onResetSettingsToDefault: () => void;
   onPreview: () => void;
   onRegenerate: () => void;
 }
 
-function LinePropertiesPanel({
+function LinePropertiesSidebar({
   selectedFile,
   selectedLineIndex,
   targetText,
@@ -370,203 +438,477 @@ function LinePropertiesPanel({
   isBusy,
   onMetadataChange,
   onSettingsChange,
+  onSaveSettingsAsDefault,
+  onResetSettingsToDefault,
   onPreview,
   onRegenerate
-}: LinePropertiesPanelProps) {
-  const settings = metadata.settings;
-  const lineCount = splitLines(targetText).length;
+}: LinePropertiesSidebarProps) {
+  const [sectionOpenState, setSectionOpen] = usePersistentLineSectionOpenState();
+  const targetLines = splitLines(targetText);
+  const lineCount = targetLines.length;
+  const selectedLineText = targetLines[selectedLineIndex]?.trim() ?? "";
   const currentDuration = selectedFile?.metadata?.durationSeconds ?? null;
-
-  function applyPreset(presetId: VoicePresetId): void {
-    const preset = voicePresets.find((item) => item.id === presetId);
-    if (!preset) {
-      return;
-    }
-    onMetadataChange({ characterId: preset.id });
-    onSettingsChange(preset.settings);
-  }
+  const controlsDisabled = isBusy || !selectedFile;
 
   return (
-    <aside className={styles.properties} aria-label="Propriedades da linha">
-      <header>
-        <strong>Propriedades da linha</strong>
-        <span>
-          {selectedLineIndex + 1} / {lineCount}
-        </span>
-      </header>
-
-      <ControlGroup label="Personagem">
-        <RadixSelect
-          value={metadata.characterId ?? "source_clone"}
-          onValueChange={(value) => {
-            applyPreset(value as VoicePresetId);
-          }}
-          items={voicePresets.map((preset) => ({ value: preset.id, label: preset.label }))}
-        />
-      </ControlGroup>
-
-      <ControlGroup label="Modo de voz">
-        <RadixSelect
-          value={settings.voiceMode}
-          onValueChange={(value) => {
-            const voiceMode = value as VoiceMode;
-            onSettingsChange({
-              voiceMode,
-              instruct:
-                voiceMode === "design" && !settings.instruct
-                  ? "female, young adult, moderate pitch"
-                  : settings.instruct
-            });
-          }}
-          items={[
-            { value: "clone", label: "Clone" },
-            { value: "design", label: "Design" },
-            { value: "auto", label: "Auto" }
-          ]}
-        />
-      </ControlGroup>
-
-      <ControlGroup label="Instruct">
-        <input
-          value={settings.instruct ?? ""}
-          disabled={settings.voiceMode !== "design"}
-          onChange={(event) => {
-            onSettingsChange({ instruct: event.currentTarget.value.trim() || null });
-          }}
-        />
-      </ControlGroup>
-
-      <ControlGroup label="Velocidade">
-        <div className={styles.rangeRow}>
-          <input
-            type="range"
-            min={0.5}
-            max={2}
-            step={0.05}
-            value={settings.speed ?? 1}
-            onChange={(event) => {
-              onSettingsChange({ speed: Number(event.currentTarget.value) });
-            }}
-          />
-          <output>{(settings.speed ?? 1).toFixed(2)}x</output>
-        </div>
-      </ControlGroup>
-
-      <ControlGroup label="Duracao alvo">
-        <input
-          type="number"
-          min={0.25}
-          max={60}
-          step={0.05}
-          value={settings.durationSeconds ?? ""}
-          onChange={(event) => {
-            onSettingsChange({
-              durationSeconds:
-                event.currentTarget.value.length > 0 ? Number(event.currentTarget.value) : null
-            });
-          }}
-        />
-      </ControlGroup>
-
-      <dl className={styles.durationFacts}>
-        <div>
-          <dt>Duracao atual</dt>
-          <dd>{currentDuration ? `${currentDuration.toFixed(2)}s` : "-"}</dd>
-        </div>
-        <div>
-          <dt>Tags</dt>
-          <dd>{metadata.tags.length}</dd>
-        </div>
-      </dl>
-
-      <ControlGroup label="Notas">
-        <textarea
-          value={metadata.notes ?? ""}
-          rows={3}
-          maxLength={200}
-          onChange={(event) => {
-            onMetadataChange({ notes: event.currentTarget.value || null });
-          }}
-        />
-      </ControlGroup>
-
-      <details className={styles.advanced}>
-        <summary>Ajustes nativos</summary>
-        <NumberField
-          label="Steps"
-          value={settings.numStep}
-          min={8}
-          max={128}
-          step={1}
-          onChange={(numStep) => {
-            onSettingsChange({ numStep });
-          }}
-        />
-        <NumberField
-          label="Guidance"
-          value={settings.guidanceScale}
-          min={0}
-          max={10}
-          step={0.1}
-          onChange={(guidanceScale) => {
-            onSettingsChange({ guidanceScale });
-          }}
-        />
-        <NumberField
-          label="Position temp"
-          value={settings.positionTemperature}
-          min={0}
-          max={10}
-          step={0.1}
-          onChange={(positionTemperature) => {
-            onSettingsChange({ positionTemperature });
-          }}
-        />
-        <NumberField
-          label="Class temp"
-          value={settings.classTemperature}
-          min={0}
-          max={10}
-          step={0.1}
-          onChange={(classTemperature) => {
-            onSettingsChange({ classTemperature });
-          }}
-        />
-        <NativeCheckbox
-          label="Denoise"
-          checked={settings.denoise}
-          onCheckedChange={(denoise) => {
-            onSettingsChange({ denoise });
-          }}
-        />
-        <NativeCheckbox
-          label="Preprocess prompt"
-          checked={settings.preprocessPrompt}
-          onCheckedChange={(preprocessPrompt) => {
-            onSettingsChange({ preprocessPrompt });
-          }}
-        />
-        <NativeCheckbox
-          label="Postprocess output"
-          checked={settings.postprocessOutput}
-          onCheckedChange={(postprocessOutput) => {
-            onSettingsChange({ postprocessOutput });
-          }}
-        />
-      </details>
-
-      <div className={styles.propertyActions}>
-        <button type="button" disabled={isBusy} onClick={onPreview}>
-          <Play size={15} />
-          Previa desta linha
-        </button>
-        <button type="button" disabled={isBusy} onClick={onRegenerate}>
-          <RotateCcw size={15} />
-          Regenerar resultado
-        </button>
-      </div>
+    <aside className={styles.lineSidebar} aria-label="Propriedades da linha">
+      <LinePropertiesPanel
+        selectedLineIndex={selectedLineIndex}
+        lineCount={lineCount}
+        currentDuration={currentDuration}
+        metadata={metadata}
+        controlsDisabled={controlsDisabled}
+        sectionOpenState={sectionOpenState}
+        onSectionOpenChange={setSectionOpen}
+        onMetadataChange={onMetadataChange}
+        onSettingsChange={onSettingsChange}
+      />
+      <LineActionDock
+        controlsDisabled={controlsDisabled}
+        canPreviewLine={selectedLineText.length > 0}
+        onSaveSettingsAsDefault={onSaveSettingsAsDefault}
+        onResetSettingsToDefault={onResetSettingsToDefault}
+        onPreview={onPreview}
+        onRegenerate={onRegenerate}
+      />
     </aside>
   );
+}
+
+interface LinePropertiesPanelProps {
+  selectedLineIndex: number;
+  lineCount: number;
+  currentDuration: number | null;
+  metadata: ProjectLineMetadata;
+  controlsDisabled: boolean;
+  sectionOpenState: LineSectionOpenState;
+  onSectionOpenChange: SetLineSectionOpen;
+  onMetadataChange: (patch: Partial<ProjectLineMetadata>) => void;
+  onSettingsChange: (patch: Partial<NativeSynthesisSettings>) => void;
+}
+
+function LinePropertiesPanel({
+  selectedLineIndex,
+  lineCount,
+  currentDuration,
+  metadata,
+  controlsDisabled,
+  sectionOpenState,
+  onSectionOpenChange,
+  onMetadataChange,
+  onSettingsChange
+}: LinePropertiesPanelProps) {
+  const settings = metadata.settings;
+  const acceptedSettings = normalizeNativeSynthesisSettings(settings);
+  const isPropertiesOpen = sectionOpenState.properties;
+
+  return (
+    <section
+      className={`${styles.properties} ${isPropertiesOpen ? "" : styles.propertiesCollapsed}`}
+      aria-label="Conteúdo de propriedades da linha"
+    >
+      <button
+        type="button"
+        className={styles.propertiesHeader}
+        aria-expanded={isPropertiesOpen}
+        onClick={() => {
+          onSectionOpenChange("properties", !isPropertiesOpen);
+        }}
+      >
+        {isPropertiesOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+        <span className={styles.propertiesTitle}>
+          <strong>Propriedades da linha</strong>
+          <output>
+            {selectedLineIndex + 1} / {lineCount}
+          </output>
+        </span>
+      </button>
+
+      {isPropertiesOpen && (
+        <div className={styles.propertiesBody}>
+          <CollapsibleSection
+            title="Propriedades basicas"
+            isOpen={sectionOpenState.basicSettings}
+            onOpenChange={(isOpen) => {
+              onSectionOpenChange("basicSettings", isOpen);
+            }}
+          >
+            <ControlGroup label="Modo de voz">
+              <RadixSelect
+                value={acceptedSettings.voiceMode}
+                onValueChange={(value) => {
+                  const voiceMode = value as VoiceMode;
+                  onSettingsChange({
+                    voiceMode,
+                    instruct:
+                      voiceMode === "design"
+                        ? (acceptedSettings.instruct ?? "female, young adult, moderate pitch")
+                        : null
+                  });
+                }}
+                items={[
+                  { value: "clone", label: "Clone" },
+                  { value: "design", label: "Design" },
+                  { value: "auto", label: "Auto" }
+                ]}
+              />
+            </ControlGroup>
+
+            <ControlGroup label="Instruct">
+              <input
+                value={acceptedSettings.instruct ?? ""}
+                disabled={controlsDisabled || acceptedSettings.voiceMode !== "design"}
+                onChange={(event) => {
+                  onSettingsChange({ instruct: event.currentTarget.value.trim() || null });
+                }}
+              />
+            </ControlGroup>
+
+            <ControlGroup label="Velocidade">
+              <div className={styles.rangeRow}>
+                <input
+                  type="range"
+                  min={nativeSynthesisNumberControls.speed.min}
+                  max={nativeSynthesisNumberControls.speed.max}
+                  step={nativeSynthesisNumberControls.speed.step}
+                  value={acceptedSettings.speed ?? 1}
+                  disabled={controlsDisabled}
+                  onChange={(event) => {
+                    onSettingsChange({ speed: Number(event.currentTarget.value) });
+                  }}
+                />
+                <output>{(acceptedSettings.speed ?? 1).toFixed(2)}x</output>
+              </div>
+            </ControlGroup>
+
+            <ControlGroup label="Duracao alvo">
+              <input
+                type="number"
+                min={nativeSynthesisNumberControls.durationSeconds.min}
+                max={nativeSynthesisNumberControls.durationSeconds.max}
+                step={nativeSynthesisNumberControls.durationSeconds.step}
+                value={acceptedSettings.durationSeconds ?? ""}
+                disabled={controlsDisabled}
+                onChange={(event) => {
+                  const nextDuration = optionalNumberFromInput(event.currentTarget.value);
+                  onSettingsChange({
+                    durationSeconds: nextDuration
+                  });
+                }}
+              />
+            </ControlGroup>
+
+            <dl className={styles.durationFacts}>
+              <div>
+                <dt>Duracao atual</dt>
+                <dd>{currentDuration ? `${currentDuration.toFixed(2)}s` : "-"}</dd>
+              </div>
+              <div>
+                <dt>Tags</dt>
+                <dd>{metadata.tags.length}</dd>
+              </div>
+            </dl>
+
+            <ControlGroup label="Notas">
+              <textarea
+                value={metadata.notes ?? ""}
+                rows={3}
+                maxLength={200}
+                disabled={controlsDisabled}
+                onChange={(event) => {
+                  onMetadataChange({ notes: event.currentTarget.value || null });
+                }}
+              />
+            </ControlGroup>
+          </CollapsibleSection>
+
+          <CollapsibleSection
+            title="Ajustes nativos"
+            isOpen={sectionOpenState.nativeAdjustments}
+            onOpenChange={(isOpen) => {
+              onSectionOpenChange("nativeAdjustments", isOpen);
+            }}
+          >
+            <NumberField
+              label="Steps"
+              value={acceptedSettings.numStep}
+              min={nativeSynthesisNumberControls.numStep.min}
+              max={nativeSynthesisNumberControls.numStep.max}
+              step={nativeSynthesisNumberControls.numStep.step}
+              disabled={controlsDisabled}
+              onChange={(numStep) => {
+                onSettingsChange({ numStep });
+              }}
+            />
+            <NumberField
+              label="Guidance"
+              value={acceptedSettings.guidanceScale}
+              min={nativeSynthesisNumberControls.guidanceScale.min}
+              max={nativeSynthesisNumberControls.guidanceScale.max}
+              step={nativeSynthesisNumberControls.guidanceScale.step}
+              disabled={controlsDisabled}
+              onChange={(guidanceScale) => {
+                onSettingsChange({ guidanceScale });
+              }}
+            />
+            <NumberField
+              label="Position temp"
+              value={acceptedSettings.positionTemperature}
+              min={nativeSynthesisNumberControls.positionTemperature.min}
+              max={nativeSynthesisNumberControls.positionTemperature.max}
+              step={nativeSynthesisNumberControls.positionTemperature.step}
+              disabled={controlsDisabled}
+              onChange={(positionTemperature) => {
+                onSettingsChange({ positionTemperature });
+              }}
+            />
+            <NumberField
+              label="Class temp"
+              value={acceptedSettings.classTemperature}
+              min={nativeSynthesisNumberControls.classTemperature.min}
+              max={nativeSynthesisNumberControls.classTemperature.max}
+              step={nativeSynthesisNumberControls.classTemperature.step}
+              disabled={controlsDisabled}
+              onChange={(classTemperature) => {
+                onSettingsChange({ classTemperature });
+              }}
+            />
+            <NativeCheckbox
+              label="Denoise"
+              checked={acceptedSettings.denoise}
+              disabled={controlsDisabled}
+              onCheckedChange={(denoise) => {
+                onSettingsChange({ denoise });
+              }}
+            />
+            <NativeCheckbox
+              label="Preprocess prompt"
+              checked={acceptedSettings.preprocessPrompt}
+              disabled={controlsDisabled}
+              onCheckedChange={(preprocessPrompt) => {
+                onSettingsChange({ preprocessPrompt });
+              }}
+            />
+            <NativeCheckbox
+              label="Postprocess output"
+              checked={acceptedSettings.postprocessOutput}
+              disabled={controlsDisabled}
+              onCheckedChange={(postprocessOutput) => {
+                onSettingsChange({ postprocessOutput });
+              }}
+            />
+          </CollapsibleSection>
+
+          <CollapsibleSection
+            title="Polimento de audio"
+            isOpen={sectionOpenState.audioPolish}
+            onOpenChange={(isOpen) => {
+              onSectionOpenChange("audioPolish", isOpen);
+            }}
+          >
+            <NativeCheckbox
+              label="Casar loudness com origem"
+              checked={acceptedSettings.matchSourceLoudness}
+              disabled={controlsDisabled}
+              onCheckedChange={(matchSourceLoudness) => {
+                onSettingsChange({ matchSourceLoudness });
+              }}
+            />
+            <RangeField
+              label="Forca loudness"
+              value={acceptedSettings.loudnessMatchStrength}
+              min={nativeSynthesisNumberControls.loudnessMatchStrength.min}
+              max={nativeSynthesisNumberControls.loudnessMatchStrength.max}
+              step={nativeSynthesisNumberControls.loudnessMatchStrength.step}
+              disabled={controlsDisabled || !acceptedSettings.matchSourceLoudness}
+              formatValue={formatPercent}
+              onChange={(loudnessMatchStrength) => {
+                onSettingsChange({ loudnessMatchStrength });
+              }}
+            />
+            <RangeField
+              label="Ganho final"
+              value={acceptedSettings.outputGainDb}
+              min={nativeSynthesisNumberControls.outputGainDb.min}
+              max={nativeSynthesisNumberControls.outputGainDb.max}
+              step={nativeSynthesisNumberControls.outputGainDb.step}
+              disabled={controlsDisabled}
+              formatValue={formatDecibels}
+              onChange={(outputGainDb) => {
+                onSettingsChange({ outputGainDb });
+              }}
+            />
+            <RangeField
+              label="Reducao de sibilancia"
+              value={acceptedSettings.sibilanceReduction}
+              min={nativeSynthesisNumberControls.sibilanceReduction.min}
+              max={nativeSynthesisNumberControls.sibilanceReduction.max}
+              step={nativeSynthesisNumberControls.sibilanceReduction.step}
+              disabled={controlsDisabled}
+              formatValue={formatReduction}
+              onChange={(sibilanceReduction) => {
+                onSettingsChange({ sibilanceReduction });
+              }}
+            />
+            <RangeField
+              label="Reducao de metalizado"
+              value={acceptedSettings.artifactReduction}
+              min={nativeSynthesisNumberControls.artifactReduction.min}
+              max={nativeSynthesisNumberControls.artifactReduction.max}
+              step={nativeSynthesisNumberControls.artifactReduction.step}
+              disabled={controlsDisabled}
+              formatValue={formatReduction}
+              onChange={(artifactReduction) => {
+                onSettingsChange({ artifactReduction });
+              }}
+            />
+          </CollapsibleSection>
+        </div>
+      )}
+    </section>
+  );
+}
+
+interface LineActionDockProps {
+  controlsDisabled: boolean;
+  canPreviewLine: boolean;
+  onSaveSettingsAsDefault: () => void;
+  onResetSettingsToDefault: () => void;
+  onPreview: () => void;
+  onRegenerate: () => void;
+}
+
+function LineActionDock({
+  controlsDisabled,
+  canPreviewLine,
+  onSaveSettingsAsDefault,
+  onResetSettingsToDefault,
+  onPreview,
+  onRegenerate
+}: LineActionDockProps) {
+  return (
+    <section className={styles.propertyActions} aria-label="Controles da linha">
+      <button type="button" disabled={controlsDisabled} onClick={onSaveSettingsAsDefault}>
+        <CheckCircle2 size={15} />
+        Salvar padrao global
+      </button>
+      <button type="button" disabled={controlsDisabled} onClick={onResetSettingsToDefault}>
+        <Undo2 size={15} />
+        Restaurar defaults
+      </button>
+      <button type="button" disabled={controlsDisabled || !canPreviewLine} onClick={onPreview}>
+        <Play size={15} />
+        Previa desta linha
+      </button>
+      <button type="button" disabled={controlsDisabled} onClick={onRegenerate}>
+        <RotateCcw size={15} />
+        Regenerar resultado
+      </button>
+    </section>
+  );
+}
+
+interface CollapsibleSectionProps {
+  title: string;
+  isOpen: boolean;
+  onOpenChange: (isOpen: boolean) => void;
+  children: ReactNode;
+}
+
+function CollapsibleSection({ title, isOpen, onOpenChange, children }: CollapsibleSectionProps) {
+  const contentId = useId();
+
+  return (
+    <section className={styles.collapsibleSection}>
+      <button
+        type="button"
+        className={styles.collapsibleHeader}
+        aria-expanded={isOpen}
+        aria-controls={contentId}
+        onClick={() => {
+          onOpenChange(!isOpen);
+        }}
+      >
+        {isOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+        <span>{title}</span>
+      </button>
+      {isOpen && (
+        <div id={contentId} className={styles.collapsibleContent}>
+          {children}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function usePersistentLineSectionOpenState(): readonly [LineSectionOpenState, SetLineSectionOpen] {
+  const [sectionOpenState, setSectionOpenState] =
+    useState<LineSectionOpenState>(readLineSectionOpenState);
+
+  useEffect(() => {
+    writeLineSectionOpenState(sectionOpenState);
+  }, [sectionOpenState]);
+
+  const setSectionOpen: SetLineSectionOpen = (section, isOpen) => {
+    setSectionOpenState((current) => {
+      if (current[section] === isOpen) {
+        return current;
+      }
+      return { ...current, [section]: isOpen };
+    });
+  };
+
+  return [sectionOpenState, setSectionOpen];
+}
+
+function readLineSectionOpenState(): LineSectionOpenState {
+  if (typeof window === "undefined") {
+    return DEFAULT_LINE_SECTION_OPEN_STATE;
+  }
+
+  const storedState = localStorage.getItem(LINE_SECTION_OPEN_STORAGE_KEY);
+  if (!storedState) {
+    return DEFAULT_LINE_SECTION_OPEN_STATE;
+  }
+
+  try {
+    const parsedState: unknown = JSON.parse(storedState);
+    if (!isLineSectionOpenStateRecord(parsedState)) {
+      return DEFAULT_LINE_SECTION_OPEN_STATE;
+    }
+
+    return {
+      properties: readStoredBoolean(parsedState.properties, "properties"),
+      basicSettings: readStoredBoolean(parsedState.basicSettings, "basicSettings"),
+      nativeAdjustments: readStoredBoolean(parsedState.nativeAdjustments, "nativeAdjustments"),
+      audioPolish: readStoredBoolean(parsedState.audioPolish, "audioPolish")
+    };
+  } catch {
+    localStorage.removeItem(LINE_SECTION_OPEN_STORAGE_KEY);
+    return DEFAULT_LINE_SECTION_OPEN_STATE;
+  }
+}
+
+function writeLineSectionOpenState(sectionOpenState: LineSectionOpenState): void {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  try {
+    localStorage.setItem(LINE_SECTION_OPEN_STORAGE_KEY, JSON.stringify(sectionOpenState));
+  } catch {
+    return;
+  }
+}
+
+function isLineSectionOpenStateRecord(
+  value: unknown
+): value is Partial<Record<LineSectionKey, unknown>> {
+  return typeof value === "object" && value !== null;
+}
+
+function readStoredBoolean(value: unknown, fallbackKey: LineSectionKey): boolean {
+  return typeof value === "boolean" ? value : DEFAULT_LINE_SECTION_OPEN_STATE[fallbackKey];
 }
 
 interface ControlGroupProps {
@@ -624,10 +966,11 @@ interface NumberFieldProps {
   min: number;
   max: number;
   step: number;
+  disabled: boolean;
   onChange: (value: number) => void;
 }
 
-function NumberField({ label, value, min, max, step, onChange }: NumberFieldProps) {
+function NumberField({ label, value, min, max, step, disabled, onChange }: NumberFieldProps) {
   return (
     <label className={styles.numberField}>
       <span>{label}</span>
@@ -637,25 +980,97 @@ function NumberField({ label, value, min, max, step, onChange }: NumberFieldProp
         max={max}
         step={step}
         value={value}
+        disabled={disabled}
         onChange={(event) => {
-          onChange(Number(event.currentTarget.value));
+          const nextValue = Number(event.currentTarget.value);
+          if (Number.isFinite(nextValue)) {
+            onChange(nextValue);
+          }
         }}
       />
     </label>
   );
 }
 
+interface RangeFieldProps {
+  label: string;
+  value: number;
+  min: number;
+  max: number;
+  step: number;
+  disabled: boolean;
+  formatValue: (value: number) => string;
+  onChange: (value: number) => void;
+}
+
+function RangeField({
+  label,
+  value,
+  min,
+  max,
+  step,
+  disabled,
+  formatValue,
+  onChange
+}: RangeFieldProps) {
+  return (
+    <label className={styles.controlGroup}>
+      <span>{label}</span>
+      <div className={styles.rangeRow}>
+        <input
+          type="range"
+          min={min}
+          max={max}
+          step={step}
+          value={value}
+          disabled={disabled}
+          onChange={(event) => {
+            const nextValue = Number(event.currentTarget.value);
+            if (Number.isFinite(nextValue)) {
+              onChange(nextValue);
+            }
+          }}
+        />
+        <output>{formatValue(value)}</output>
+      </div>
+    </label>
+  );
+}
+
+function optionalNumberFromInput(value: string): number | null {
+  if (value.length === 0) {
+    return null;
+  }
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function formatPercent(value: number): string {
+  return `${String(Math.round(value * 100))}%`;
+}
+
+function formatDecibels(value: number): string {
+  return `${value > 0 ? "+" : ""}${value.toFixed(1)} dB`;
+}
+
+function formatReduction(value: number): string {
+  const percent = Math.round(value * 100);
+  return percent === 0 ? "off" : `-${String(percent)}%`;
+}
+
 interface NativeCheckboxProps {
   label: string;
   checked: boolean;
+  disabled: boolean;
   onCheckedChange: (checked: boolean) => void;
 }
 
-function NativeCheckbox({ label, checked, onCheckedChange }: NativeCheckboxProps) {
+function NativeCheckbox({ label, checked, disabled, onCheckedChange }: NativeCheckboxProps) {
   return (
     <label className={styles.nativeCheckbox}>
       <Checkbox.Root
         checked={checked}
+        disabled={disabled}
         onCheckedChange={(value) => {
           onCheckedChange(value === true);
         }}

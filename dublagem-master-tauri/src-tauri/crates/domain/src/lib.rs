@@ -79,6 +79,16 @@ pub struct NativeSynthesisSettings {
     pub denoise: bool,
     pub preprocess_prompt: bool,
     pub postprocess_output: bool,
+    #[serde(default = "default_match_source_loudness")]
+    pub match_source_loudness: bool,
+    #[serde(default = "default_loudness_match_strength")]
+    pub loudness_match_strength: f32,
+    #[serde(default)]
+    pub output_gain_db: f32,
+    #[serde(default)]
+    pub sibilance_reduction: f32,
+    #[serde(default)]
+    pub artifact_reduction: f32,
 }
 
 impl Default for NativeSynthesisSettings {
@@ -95,6 +105,11 @@ impl Default for NativeSynthesisSettings {
             denoise: true,
             preprocess_prompt: true,
             postprocess_output: true,
+            match_source_loudness: default_match_source_loudness(),
+            loudness_match_strength: default_loudness_match_strength(),
+            output_gain_db: 0.0,
+            sibilance_reduction: 0.0,
+            artifact_reduction: 0.0,
         }
     }
 }
@@ -107,6 +122,15 @@ impl NativeSynthesisSettings {
         validate_range("guidanceScale", self.guidance_scale, 0.0, 10.0)?;
         validate_range("positionTemperature", self.position_temperature, 0.0, 10.0)?;
         validate_range("classTemperature", self.class_temperature, 0.0, 10.0)?;
+        validate_range(
+            "loudnessMatchStrength",
+            self.loudness_match_strength,
+            0.0,
+            1.0,
+        )?;
+        validate_range("outputGainDb", self.output_gain_db, -12.0, 12.0)?;
+        validate_range("sibilanceReduction", self.sibilance_reduction, 0.0, 1.0)?;
+        validate_range("artifactReduction", self.artifact_reduction, 0.0, 1.0)?;
 
         if matches!(self.voice_mode, VoiceMode::Design)
             && self
@@ -121,6 +145,14 @@ impl NativeSynthesisSettings {
 
         Ok(())
     }
+}
+
+fn default_match_source_loudness() -> bool {
+    true
+}
+
+fn default_loudness_match_strength() -> f32 {
+    0.85
 }
 
 fn validate_optional_range(

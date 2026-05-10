@@ -4,6 +4,8 @@ import {
   createLineMetadata,
   mergeNativeTags,
   nativeTagSet,
+  nativeSynthesisSettingsEqual,
+  normalizeNativeSynthesisSettings,
   removeNativeTagsFromText,
   splitLines,
   tagsByLine,
@@ -55,6 +57,7 @@ interface WorkspaceState {
   totalFiles: number | null;
   isCancelling: boolean;
   lastOutputPath: string | null;
+  lastOutputRevision: number;
   linePreviewPath: string | null;
   progress: number;
   isBusy: boolean;
@@ -69,6 +72,8 @@ interface WorkspaceState {
   removeNativeTag: (tag: NativeTag) => void;
   updateSelectedLineMetadata: (patch: Partial<ProjectLineMetadata>) => void;
   updateSelectedLineSettings: (patch: Partial<NativeSynthesisSettings>) => void;
+  saveSelectedLineSettingsAsDefault: () => Promise<void>;
+  resetSelectedLineSettingsToDefault: () => Promise<void>;
   previewSelectedLine: () => Promise<void>;
   revertTranscription: () => void;
   startDubbing: () => Promise<void>;
@@ -105,6 +110,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   totalFiles: null,
   isCancelling: false,
   lastOutputPath: null,
+  lastOutputRevision: 0,
   linePreviewPath: null,
   progress: 0,
   isBusy: false,
@@ -160,6 +166,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       selectedPath: nextSelectedPath,
       selectedLineIndex: 0,
       lastOutputPath: outputPathForSelection(nextSelectedPath, files, config),
+      lastOutputRevision: stateNextOutputRevision(get()),
       transcriptionDrafts,
       transcriptionBaselines,
       ...draftStateForPath(nextSelectedPath, transcriptionDrafts, files)
@@ -177,6 +184,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
         selectedLineIndex: 0,
         linePreviewPath: null,
         lastOutputPath: outputPathForSelection(path, state.files, state.config),
+        lastOutputRevision: state.lastOutputRevision + 1,
         transcriptionBaselines,
         ...draftStateForPath(path, state.transcriptionDrafts, state.files)
       };
@@ -248,11 +256,47 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     set((state) => {
       const current = selectedLineMetadata(state);
       const projectMetadata = upsertSelectedLineMetadata(state, {
-        settings: { ...current.settings, ...patch }
+        settings: normalizeNativeSynthesisSettings({ ...current.settings, ...patch })
       });
       queueProjectMetadataSave(state.config.outputDir, projectMetadata);
       return { projectMetadata };
     });
+  },
+  saveSelectedLineSettingsAsDefault: async () => {
+    const state = get();
+    const settings = normalizeNativeSynthesisSettings(selectedLineMetadata(state).settings);
+    const nextConfig = configWithNativeSynthesis(state.config, settings);
+    try {
+      const saved = await tauriClient.saveConfig(nextConfig);
+      set({ config: saved });
+      get().appendLog("Ajustes de sintese salvos como padrao global.", "success");
+    } catch (unknownError: unknown) {
+      get().appendLog(errorMessage(unknownError), "error");
+    }
+  },
+  resetSelectedLineSettingsToDefault: async () => {
+    const defaultSettings = normalizeNativeSynthesisSettings(defaultOptions.nativeSynthesis);
+    const state = get();
+    const nextConfig = configWithNativeSynthesis(state.config, defaultSettings);
+    set((current) => {
+      const projectMetadata = upsertSelectedLineMetadata(current, {
+        characterId: null,
+        settings: defaultSettings
+      });
+      queueProjectMetadataSave(current.config.outputDir, projectMetadata);
+      return {
+        config: nextConfig,
+        projectMetadata
+      };
+    });
+
+    try {
+      const saved = await tauriClient.saveConfig(nextConfig);
+      set({ config: saved });
+      get().appendLog("Padroes de sintese restaurados.", "success");
+    } catch (unknownError: unknown) {
+      get().appendLog(errorMessage(unknownError), "error");
+    }
   },
   previewSelectedLine: async () => {
     const state = get();
@@ -271,9 +315,16 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
         sourceAudio: state.selectedPath,
         text,
         tags: lineMetadata.tags,
-        settings: lineMetadata.settings
+        settings: normalizeNativeSynthesisSettings(lineMetadata.settings)
       });
-      set({ linePreviewPath, lastOutputPath: linePreviewPath });
+      set((current) => {
+        const lastOutputRevision = current.lastOutputRevision + 1;
+        return {
+          linePreviewPath,
+          lastOutputPath: linePreviewPath,
+          lastOutputRevision
+        };
+      });
       state.appendLog("Previa da linha gerada.", "success");
     } catch (unknownError: unknown) {
       state.appendLog(errorMessage(unknownError), "error");
@@ -305,13 +356,17 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     });
   },
   startDubbing: async () => {
+    if (get().isBusy) {
+      get().appendLog("Aguarde o job atual terminar antes de iniciar outro.", "warning");
+      return;
+    }
     const { config, selectedPath, sourceText, targetText, files, projectMetadata } = get();
     if (!selectedPath || !config.outputDir) {
       get().appendLog("Selecione um arquivo e uma pasta de destino.", "warning");
       return;
     }
 
-    set({
+    set((state) => ({
       isBusy: true,
       isCancelling: false,
       progress: 0,
@@ -320,15 +375,20 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       currentFileName: null,
       currentFileIndex: null,
       totalFiles: null,
-      lastOutputPath: null
-    });
+      lastOutputPath: null,
+      lastOutputRevision: state.lastOutputRevision + 1
+    }));
     try {
+      const nativeSynthesis = normalizeNativeSynthesisSettings(config.options.nativeSynthesis);
       const jobId = await tauriClient.startDubbingJob({
         inputPaths: [selectedPath],
         outputDir: config.outputDir,
         guideAudio: config.guideAudio,
         modelDir: config.modelDir,
-        options: config.options,
+        options: {
+          ...config.options,
+          nativeSynthesis
+        },
         customSourceText: sourceText.trim().length > 0 ? sourceText : null,
         customTargetText: targetText.trim().length > 0 ? targetText : null,
         lineOverrides: buildLineOverrides({
@@ -336,13 +396,21 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
           files,
           projectMetadata,
           targetText,
-          baseSettings: config.options.nativeSynthesis
+          baseSettings: nativeSynthesis
         })
       });
-      set({ activeJobId: jobId });
+      if (get().isBusy) {
+        set({ activeJobId: jobId });
+      }
     } catch (unknownError: unknown) {
       get().appendLog(errorMessage(unknownError), "error");
-      set({ isBusy: false, isCancelling: false, progress: 0, currentStage: "failed" });
+      set({
+        activeJobId: null,
+        isBusy: false,
+        isCancelling: false,
+        progress: 0,
+        currentStage: "failed"
+      });
     }
   },
   cancelJob: async () => {
@@ -490,6 +558,7 @@ export function applyJobEvent(payload: DubbingJobEvent): void {
   }
   if (shouldHydrateSelectedEditor && payload.outputPath !== null) {
     update.lastOutputPath = payload.outputPath;
+    update.lastOutputRevision = state.lastOutputRevision + 1;
   }
   if (eventPath && payload.outputPath !== null) {
     const transcriptionBaselines = update.transcriptionBaselines ?? state.transcriptionBaselines;
@@ -501,7 +570,24 @@ export function applyJobEvent(payload: DubbingJobEvent): void {
     );
   }
 
+  if (isTerminalJobEvent(payload)) {
+    update.activeJobId = null;
+    update.isBusy = false;
+    update.isCancelling = false;
+  }
+
   useWorkspaceStore.setState(update);
+}
+
+function isTerminalJobEvent(payload: DubbingJobEvent): boolean {
+  return (
+    payload.kind === "finished" ||
+    payload.kind === "failed" ||
+    payload.kind === "cancelled" ||
+    payload.stage === "finished" ||
+    payload.stage === "failed" ||
+    payload.stage === "cancelled"
+  );
 }
 
 async function loadProjectMetadataForConfig(config: AppConfig): Promise<ProjectMetadata> {
@@ -852,8 +938,7 @@ function hasFileLineOverrides(
     return (
       line.tags.length > 0 ||
       line.characterId !== null ||
-      line.notes !== null ||
-      JSON.stringify(line.settings) !== JSON.stringify(baseSettings)
+      !nativeSynthesisSettingsEqual(line.settings, baseSettings)
     );
   });
 }
@@ -877,7 +962,24 @@ function fileKeyForPath(path: string | null, files: AudioFileEntry[]): string | 
 }
 
 function cloneSettings(settings: NativeSynthesisSettings): NativeSynthesisSettings {
-  return { ...settings };
+  return normalizeNativeSynthesisSettings(settings);
+}
+
+function configWithNativeSynthesis(
+  config: AppConfig,
+  nativeSynthesis: NativeSynthesisSettings
+): AppConfig {
+  return {
+    ...config,
+    options: {
+      ...config.options,
+      nativeSynthesis: normalizeNativeSynthesisSettings(nativeSynthesis)
+    }
+  };
+}
+
+function stateNextOutputRevision(state: Pick<WorkspaceState, "lastOutputRevision">): number {
+  return state.lastOutputRevision + 1;
 }
 
 function queueProjectMetadataSave(outputDir: string | null, metadata: ProjectMetadata): void {

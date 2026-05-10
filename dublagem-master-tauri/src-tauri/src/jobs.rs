@@ -4,13 +4,14 @@ use crate::{
     project_metadata,
     speech::{
         runtime::SpeechRuntime, SynthesisCancellationCheck, SynthesisHooks,
-        SynthesisProgressCallback, SynthesisRequest, Transcriber,
+        SynthesisProgressCallback, SynthesisRequest, Transcriber, VoiceSynthesizer,
     },
     state::AppState,
     translation::{legacy_ptbr_postprocess, TranslationProvider},
 };
 use dublagem_domain::{
-    DubbingJobEvent, DubbingRequest, JobEventKind, JobId, JobStage, TranslationRequest,
+    DubbingJobEvent, DubbingOptions, DubbingRequest, JobEventKind, JobId, JobStage, LanguageCode,
+    LineSynthesisOverride, TranslationRequest,
 };
 use std::{
     collections::HashMap,
@@ -35,6 +36,8 @@ const MODEL_LOADING_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 const TRANSCRIPTION_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const TRANSLATION_TIMEOUT: Duration = Duration::from_secs(2 * 60);
 const SYNTHESIS_TIMEOUT: Duration = Duration::from_secs(20 * 60);
+const SYNTHESIS_VALIDATION_ATTEMPTS: usize = 6;
+const SYNTHESIS_VALIDATION_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 
 #[derive(Default)]
 pub struct JobManager {
@@ -264,47 +267,39 @@ async fn run_job(
             &app,
             job_id,
             JobStage::Synthesizing,
-            "Sintetizando voz com OmniVoice/Candle na GPU.",
+            "Sintetizando e validando voz com OmniVoice/Candle na GPU.",
             Some(context.progress(65)),
             Some(&context),
         )?;
 
-        let synth_result = cancellable_phase(
-            &app,
+        let synthesis_report = synthesize_with_validation(SynthesisValidationJob {
+            app: &app,
             job_id,
-            &cancellation,
-            Some(&context),
-            "sintese OmniVoice",
-            SYNTHESIS_TIMEOUT,
-            synthesizer.synthesize(SynthesisRequest {
-                text: &target_text,
-                source_audio: input_path,
-                reference_audio,
-                output_path: &output_path,
-                options: request.options.clone(),
-                line_overrides: &request.line_overrides,
-                hooks: synthesis_hooks,
-            }),
-        )
-        .await;
-        let synth_result = match synth_result {
-            Ok(value) => value,
-            Err(_) if cancellation.is_cancelled() => {
-                emit_cancelled(&app, job_id, Some(&context))?;
-                return Ok(());
-            }
-            Err(error) => return Err(error),
-        };
-        if synth_result.is_none() {
+            context: &context,
+            cancellation: &cancellation,
+            synthesizer: synthesizer.as_ref(),
+            transcriber: transcriber.as_ref(),
+            target_text: &target_text,
+            source_text: &source_text,
+            source_audio: input_path,
+            reference_audio,
+            output_path: &output_path,
+            options: &request.options,
+            line_overrides: &request.line_overrides,
+            hooks: synthesis_hooks,
+        })
+        .await?;
+        if synthesis_report.is_none() {
             emit_cancelled(&app, job_id, Some(&context))?;
             return Ok(());
         }
+        let synthesis_report = synthesis_report.expect("checked is_some");
 
         emit_stage(
             &app,
             job_id,
             JobStage::WritingOutput,
-            "Arquivo de saida escrito.",
+            format!("Arquivo aprovado e escrito: {}.", synthesis_report.message),
             Some(context.progress(92)),
             Some(&context),
         )?;
@@ -512,6 +507,555 @@ where
     }
 }
 
+struct SynthesisValidationJob<'a> {
+    app: &'a AppHandle,
+    job_id: JobId,
+    context: &'a FileContext,
+    cancellation: &'a CancellationToken,
+    synthesizer: &'a dyn VoiceSynthesizer,
+    transcriber: &'a dyn Transcriber,
+    target_text: &'a str,
+    source_text: &'a str,
+    source_audio: &'a Path,
+    reference_audio: &'a Path,
+    output_path: &'a Path,
+    options: &'a DubbingOptions,
+    line_overrides: &'a [LineSynthesisOverride],
+    hooks: SynthesisHooks,
+}
+
+#[derive(Debug, Clone)]
+struct SynthesisValidationReport {
+    message: String,
+}
+
+struct AttemptValidationJob<'a> {
+    app: &'a AppHandle,
+    job_id: JobId,
+    context: &'a FileContext,
+    cancellation: &'a CancellationToken,
+    transcriber: &'a dyn Transcriber,
+    expected_text: &'a str,
+    attempt_path: &'a Path,
+    target_language: LanguageCode,
+    attempt_number: usize,
+}
+
+#[derive(Debug, Clone)]
+struct AttemptValidation {
+    accepted: bool,
+    message: String,
+}
+
+#[derive(Debug, Clone)]
+struct TextValidationMetrics {
+    similarity: f32,
+    coverage: f32,
+    tail_ok: bool,
+    expected_tokens: Vec<String>,
+    heard_tokens: Vec<String>,
+}
+
+async fn synthesize_with_validation(
+    job: SynthesisValidationJob<'_>,
+) -> AppResult<Option<SynthesisValidationReport>> {
+    let mut attempt_paths = Vec::with_capacity(SYNTHESIS_VALIDATION_ATTEMPTS);
+    let mut last_failure = String::new();
+
+    for attempt_index in 0..SYNTHESIS_VALIDATION_ATTEMPTS {
+        if job.cancellation.is_cancelled() {
+            cleanup_attempt_files(&attempt_paths);
+            return Ok(None);
+        }
+
+        let attempt_number = attempt_index + 1;
+        let attempt_path = synthesis_attempt_path(job.output_path, job.job_id, attempt_number);
+        remove_file_if_exists(&attempt_path)?;
+        attempt_paths.push(attempt_path.clone());
+        let attempt_text = synthesis_text_with_final_breath(job.target_text, attempt_index);
+
+        emit_stage(
+            job.app,
+            job.job_id,
+            JobStage::Synthesizing,
+            format!(
+                "Gerando tentativa {attempt_number}/{SYNTHESIS_VALIDATION_ATTEMPTS} com OmniVoice."
+            ),
+            Some(job.context.progress(65)),
+            Some(job.context),
+        )?;
+
+        let synth_result = cancellable_phase(
+            job.app,
+            job.job_id,
+            job.cancellation,
+            Some(job.context),
+            "sintese OmniVoice",
+            SYNTHESIS_TIMEOUT,
+            job.synthesizer.synthesize(SynthesisRequest {
+                text: &attempt_text,
+                source_audio: job.source_audio,
+                reference_audio: job.reference_audio,
+                reference_text: job.source_text,
+                output_path: &attempt_path,
+                options: job.options.clone(),
+                line_overrides: job.line_overrides,
+                hooks: job.hooks.clone(),
+            }),
+        )
+        .await;
+
+        match synth_result {
+            Ok(Some(())) => {}
+            Ok(None) => {
+                cleanup_attempt_files(&attempt_paths);
+                return Ok(None);
+            }
+            Err(_) if job.cancellation.is_cancelled() => {
+                cleanup_attempt_files(&attempt_paths);
+                return Ok(None);
+            }
+            Err(error) => {
+                last_failure = error.to_string();
+                emit_stage(
+                    job.app,
+                    job.job_id,
+                    JobStage::Synthesizing,
+                    format!("Tentativa {attempt_number} falhou na sintese: {last_failure}"),
+                    Some(job.context.progress(82)),
+                    Some(job.context),
+                )?;
+                continue;
+            }
+        }
+
+        let validation = validate_synthesis_attempt(AttemptValidationJob {
+            app: job.app,
+            job_id: job.job_id,
+            context: job.context,
+            cancellation: job.cancellation,
+            transcriber: job.transcriber,
+            expected_text: job.target_text,
+            attempt_path: &attempt_path,
+            target_language: job.options.target_language,
+            attempt_number,
+        })
+        .await?;
+        if validation.accepted {
+            copy_validated_attempt(&attempt_path, job.output_path)?;
+            cleanup_attempt_files(&attempt_paths);
+            return Ok(Some(SynthesisValidationReport {
+                message: validation.message,
+            }));
+        }
+
+        last_failure = validation.message;
+        emit_stage(
+            job.app,
+            job.job_id,
+            JobStage::Synthesizing,
+            format!(
+                "Tentativa {attempt_number}/{SYNTHESIS_VALIDATION_ATTEMPTS} reprovada: {last_failure}"
+            ),
+            Some(job.context.progress(88)),
+            Some(job.context),
+        )?;
+    }
+
+    cleanup_attempt_files(&attempt_paths);
+    Err(AppError::Internal(format!(
+        "Sintese reprovada apos {SYNTHESIS_VALIDATION_ATTEMPTS} tentativas: {last_failure}"
+    )))
+}
+
+async fn validate_synthesis_attempt(job: AttemptValidationJob<'_>) -> AppResult<AttemptValidation> {
+    if let Err(error) = validate_generated_audio(job.attempt_path) {
+        return Ok(AttemptValidation {
+            accepted: false,
+            message: error.to_string(),
+        });
+    }
+
+    emit_stage(
+        job.app,
+        job.job_id,
+        JobStage::Synthesizing,
+        format!(
+            "Validando texto gerado na tentativa {}.",
+            job.attempt_number
+        ),
+        Some(job.context.progress(90)),
+        Some(job.context),
+    )?;
+
+    let transcription = cancellable_phase(
+        job.app,
+        job.job_id,
+        job.cancellation,
+        Some(job.context),
+        "validacao Whisper do audio gerado",
+        SYNTHESIS_VALIDATION_TIMEOUT,
+        job.transcriber
+            .transcribe(job.attempt_path, job.target_language, job.target_language),
+    )
+    .await?;
+    let Some(transcription) = transcription else {
+        return Ok(AttemptValidation {
+            accepted: false,
+            message: "Cancelado durante validacao Whisper.".to_string(),
+        });
+    };
+
+    let heard_text = transcription.source_text.trim().to_string();
+    let metrics = text_validation_metrics(job.expected_text, &heard_text);
+    let accepted = metrics.similarity >= 0.55
+        && (metrics.expected_tokens.len() <= 2 || metrics.coverage >= 0.70)
+        && metrics.tail_ok;
+    let message = if accepted {
+        format!(
+            "Final completo (sim={:.2}, cobertura={:.2}).",
+            metrics.similarity, metrics.coverage
+        )
+    } else if metrics.similarity < 0.55 {
+        format!(
+            "Texto divergente (sim={:.2}). Ouvido: '{}'",
+            metrics.similarity, heard_text
+        )
+    } else if metrics.expected_tokens.len() > 2 && metrics.coverage < 0.70 {
+        format!(
+            "Palavras faltando (cobertura={:.2}). Ouvido: '{}'",
+            metrics.coverage, heard_text
+        )
+    } else {
+        format!(
+            "Final incompleto. Esperado terminar com '{}', ouvido no fim: '{}'",
+            metrics
+                .expected_tokens
+                .iter()
+                .rev()
+                .take(3)
+                .cloned()
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect::<Vec<_>>()
+                .join(" "),
+            metrics
+                .heard_tokens
+                .iter()
+                .rev()
+                .take(8)
+                .cloned()
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect::<Vec<_>>()
+                .join(" ")
+        )
+    };
+
+    Ok(AttemptValidation { accepted, message })
+}
+
+fn validate_generated_audio(path: &Path) -> AppResult<()> {
+    let samples = audio::read_wav_mono_f32(path)?;
+    let report = audio::quality_report(&samples);
+    if !report.is_acceptable {
+        return Err(AppError::Internal(format!(
+            "Audio gerado reprovado: {}",
+            report.issues.join("; ")
+        )));
+    }
+    validate_generated_audio_tail(path, &samples)
+}
+
+fn validate_generated_audio_tail(path: &Path, samples: &[f32]) -> AppResult<()> {
+    let metadata = audio::get_audio_metadata(path)?;
+    let sample_rate = metadata.sample_rate.unwrap_or(24_000).max(1) as usize;
+    let Some((active_start, active_end)) = active_sample_range_for_validation(samples) else {
+        return Err(AppError::Internal(
+            "Audio final sem fala audivel.".to_string(),
+        ));
+    };
+
+    let margin_samples = samples.len().saturating_sub(active_end + 1);
+    let margin_ms = margin_samples as f32 * 1000.0 / sample_rate as f32;
+    if margin_ms < 20.0 {
+        return Err(AppError::Internal(format!(
+            "Risco de corte no fim: so {margin_ms:.0} ms apos a ultima voz."
+        )));
+    }
+
+    let tail_samples = (sample_rate as f32 * 0.04).round().max(1.0) as usize;
+    let tail_start = samples.len().saturating_sub(tail_samples);
+    let voice_rms = rms_for_validation(&samples[active_start..=active_end]);
+    let tail_rms = rms_for_validation(&samples[tail_start..]);
+    if tail_rms > (voice_rms * 0.08).max(1.0e-5) {
+        return Err(AppError::Internal(
+            "Ultimos 40 ms ainda tem energia; risco de corte final.".to_string(),
+        ));
+    }
+
+    Ok(())
+}
+
+fn active_sample_range_for_validation(samples: &[f32]) -> Option<(usize, usize)> {
+    let peak = samples
+        .iter()
+        .fold(0.0_f32, |current, sample| current.max(sample.abs()));
+    if peak <= 0.0001 {
+        return None;
+    }
+    let threshold = (peak * 10_f32.powf(-38.0 / 20.0)).max(0.0001);
+    let start = samples
+        .iter()
+        .position(|sample| sample.abs() >= threshold)?;
+    let end = samples
+        .iter()
+        .rposition(|sample| sample.abs() >= threshold)?;
+    Some((start, end))
+}
+
+fn rms_for_validation(samples: &[f32]) -> f32 {
+    if samples.is_empty() {
+        return 0.0;
+    }
+    (samples.iter().map(|sample| sample * sample).sum::<f32>() / samples.len() as f32).sqrt()
+}
+
+fn text_validation_metrics(expected_text: &str, heard_text: &str) -> TextValidationMetrics {
+    let expected_similarity_text = normalized_similarity_text(expected_text);
+    let heard_similarity_text = normalized_similarity_text(heard_text);
+    let similarity = sequence_similarity(&expected_similarity_text, &heard_similarity_text);
+    let expected_tokens = normalized_qc_tokens(expected_text);
+    let heard_tokens = normalized_qc_tokens(heard_text);
+    let coverage = if expected_tokens.is_empty() {
+        1.0
+    } else {
+        fuzzy_lcs_count(&expected_tokens, &heard_tokens) as f32 / expected_tokens.len() as f32
+    };
+    let tail_ok = expected_tail_is_present(&expected_tokens, &heard_tokens);
+
+    TextValidationMetrics {
+        similarity,
+        coverage,
+        tail_ok,
+        expected_tokens,
+        heard_tokens,
+    }
+}
+
+fn normalized_similarity_text(value: &str) -> String {
+    normalized_qc_tokens(value).join(" ")
+}
+
+fn normalized_qc_tokens(value: &str) -> Vec<String> {
+    let mut normalized = String::new();
+    for character in value.chars() {
+        if let Some(folded) = fold_validation_char(character) {
+            normalized.push(folded);
+        } else {
+            normalized.push(' ');
+        }
+    }
+
+    for (from, to) in [
+        ("dchi", "di"),
+        ("dche", "de"),
+        ("tchi", "ti"),
+        ("tche", "te"),
+        ("chi", "ti"),
+        ("che", "te"),
+    ] {
+        normalized = normalized.replace(from, to);
+    }
+
+    normalized
+        .split_whitespace()
+        .filter(|token| !token.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+fn fold_validation_char(character: char) -> Option<char> {
+    let lower = character.to_lowercase().next().unwrap_or(character);
+    if lower.is_ascii_alphanumeric() {
+        return Some(lower);
+    }
+
+    match lower {
+        'á' | 'à' | 'â' | 'ã' | 'ä' | 'å' => Some('a'),
+        'é' | 'è' | 'ê' | 'ë' => Some('e'),
+        'í' | 'ì' | 'î' | 'ï' => Some('i'),
+        'ó' | 'ò' | 'ô' | 'õ' | 'ö' => Some('o'),
+        'ú' | 'ù' | 'û' | 'ü' => Some('u'),
+        'ç' => Some('c'),
+        'ñ' => Some('n'),
+        _ => None,
+    }
+}
+
+fn expected_tail_is_present(expected_tokens: &[String], heard_tokens: &[String]) -> bool {
+    if expected_tokens.is_empty() {
+        return true;
+    }
+    let meaningful_expected = expected_tokens
+        .iter()
+        .filter(|token| token.len() > 2)
+        .collect::<Vec<_>>();
+    let final_tokens = if meaningful_expected.is_empty() {
+        expected_tokens.iter().collect::<Vec<_>>()
+    } else {
+        meaningful_expected
+    };
+    let final_tokens = final_tokens
+        .into_iter()
+        .rev()
+        .take(3)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<Vec<_>>();
+    let heard_window_len = 8_usize.max(final_tokens.len() + 3);
+    let heard_window = heard_tokens
+        .iter()
+        .rev()
+        .take(heard_window_len)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<Vec<_>>();
+
+    let mut position = 0;
+    for token in final_tokens {
+        let mut found = false;
+        while position < heard_window.len() {
+            if tokens_look_equal(token, heard_window[position]) {
+                found = true;
+                position += 1;
+                break;
+            }
+            position += 1;
+        }
+        if !found {
+            return false;
+        }
+    }
+    true
+}
+
+fn fuzzy_lcs_count(expected: &[String], heard: &[String]) -> usize {
+    if expected.is_empty() || heard.is_empty() {
+        return 0;
+    }
+
+    let mut previous = vec![0; heard.len() + 1];
+    for expected_token in expected {
+        let mut current = vec![0; heard.len() + 1];
+        for (heard_index, heard_token) in heard.iter().enumerate() {
+            current[heard_index + 1] = if tokens_look_equal(expected_token, heard_token) {
+                previous[heard_index] + 1
+            } else {
+                previous[heard_index + 1].max(current[heard_index])
+            };
+        }
+        previous = current;
+    }
+    previous[heard.len()]
+}
+
+fn tokens_look_equal(left: &str, right: &str) -> bool {
+    if left == right {
+        return true;
+    }
+    if left.len() <= 2 || right.len() <= 2 {
+        return false;
+    }
+    sequence_similarity(left, right) >= 0.78
+}
+
+fn sequence_similarity(left: &str, right: &str) -> f32 {
+    let left_chars = left.chars().collect::<Vec<_>>();
+    let right_chars = right.chars().collect::<Vec<_>>();
+    if left_chars.is_empty() && right_chars.is_empty() {
+        return 1.0;
+    }
+    if left_chars.is_empty() || right_chars.is_empty() {
+        return 0.0;
+    }
+
+    let matches = lcs_char_count(&left_chars, &right_chars);
+    (2.0 * matches as f32) / (left_chars.len() + right_chars.len()) as f32
+}
+
+fn lcs_char_count(left: &[char], right: &[char]) -> usize {
+    let mut previous = vec![0; right.len() + 1];
+    for left_char in left {
+        let mut current = vec![0; right.len() + 1];
+        for (right_index, right_char) in right.iter().enumerate() {
+            current[right_index + 1] = if left_char == right_char {
+                previous[right_index] + 1
+            } else {
+                previous[right_index + 1].max(current[right_index])
+            };
+        }
+        previous = current;
+    }
+    previous[right.len()]
+}
+
+fn synthesis_text_with_final_breath(text: &str, attempt_index: usize) -> String {
+    let trimmed = text.trim();
+    if trimmed.is_empty() || attempt_index == 0 {
+        return trimmed.to_string();
+    }
+
+    match attempt_index {
+        1 => format!("{trimmed} ."),
+        2 => format!("{trimmed} ..."),
+        _ => format!("{trimmed} . ."),
+    }
+}
+
+fn synthesis_attempt_path(output_path: &Path, job_id: JobId, attempt_number: usize) -> PathBuf {
+    let stem = output_path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.is_empty())
+        .unwrap_or("dub");
+    let file_name = format!("{stem}.{job_id}.attempt-{attempt_number}.wav");
+    output_path
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .map(|parent| parent.join(&file_name))
+        .unwrap_or_else(|| PathBuf::from(file_name))
+}
+
+fn copy_validated_attempt(attempt_path: &Path, output_path: &Path) -> AppResult<()> {
+    if let Some(parent) = output_path
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+    {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::copy(attempt_path, output_path)?;
+    Ok(())
+}
+
+fn cleanup_attempt_files(paths: &[PathBuf]) {
+    for path in paths {
+        let _ = remove_file_if_exists(path);
+    }
+}
+
+fn remove_file_if_exists(path: &Path) -> AppResult<()> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+    }
+}
+
 fn synthesis_hooks(
     app: AppHandle,
     job_id: JobId,
@@ -714,4 +1258,50 @@ fn event(
 fn emit(app: &AppHandle, event: &str, payload: DubbingJobEvent) -> AppResult<()> {
     app.emit(event, payload)
         .map_err(|error| AppError::Internal(error.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validation_metrics_accept_close_transcriptions() {
+        let metrics =
+            text_validation_metrics("Olá, posso ficar aqui agora?", "Ola posso ficar aqui agora");
+
+        assert!(metrics.similarity >= 0.90);
+        assert!(metrics.coverage >= 0.90);
+        assert!(metrics.tail_ok);
+    }
+
+    #[test]
+    fn validation_metrics_reject_missing_final_words() {
+        let metrics = text_validation_metrics(
+            "Precisamos encontrar a chave antes do amanhecer",
+            "Precisamos encontrar a chave",
+        );
+
+        assert!(!metrics.tail_ok);
+        assert!(metrics.coverage < 0.75);
+    }
+
+    #[test]
+    fn retry_text_adds_final_breath_after_first_attempt() {
+        assert_eq!(
+            synthesis_text_with_final_breath("fala final", 0),
+            "fala final"
+        );
+        assert_eq!(
+            synthesis_text_with_final_breath("fala final", 1),
+            "fala final ."
+        );
+        assert_eq!(
+            synthesis_text_with_final_breath("fala final", 2),
+            "fala final ..."
+        );
+        assert_eq!(
+            synthesis_text_with_final_breath("fala final", 3),
+            "fala final . ."
+        );
+    }
 }

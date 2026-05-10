@@ -1,4 +1,4 @@
-import type { NativeSynthesisSettings, ProjectLineMetadata } from "../tauri/types";
+import type { NativeSynthesisSettings, ProjectLineMetadata, VoiceMode } from "../tauri/types";
 import { defaultOptions } from "../tauri/types";
 
 export const nativeTagGroups = [
@@ -59,44 +59,98 @@ export const defaultNativeSynthesisSettings: NativeSynthesisSettings = {
   ...defaultOptions.nativeSynthesis
 };
 
-export const voicePresets = [
-  {
-    id: "source_clone",
-    label: "Voz do audio",
-    settings: { voiceMode: "clone", instruct: null }
-  },
-  {
-    id: "alysia",
-    label: "Alysia",
-    settings: {
-      voiceMode: "design",
-      instruct: "female, young adult, moderate pitch"
-    }
-  },
-  {
-    id: "elder_male",
-    label: "Grave experiente",
-    settings: {
-      voiceMode: "design",
-      instruct: "male, elderly, low pitch"
-    }
-  },
-  {
-    id: "child_bright",
-    label: "Infantil brilhante",
-    settings: {
-      voiceMode: "design",
-      instruct: "female, child, high pitch"
-    }
-  },
-  {
-    id: "auto",
-    label: "Automatico",
-    settings: { voiceMode: "auto", instruct: null }
-  }
-] as const;
+export const nativeSynthesisNumberControls = {
+  speed: { min: 0.5, max: 2, step: 0.05 },
+  durationSeconds: { min: 0.25, max: 60, step: 0.05 },
+  numStep: { min: 8, max: 128, step: 1 },
+  guidanceScale: { min: 0, max: 10, step: 0.1 },
+  positionTemperature: { min: 0, max: 10, step: 0.1 },
+  classTemperature: { min: 0, max: 10, step: 0.1 },
+  loudnessMatchStrength: { min: 0, max: 1, step: 0.05 },
+  outputGainDb: { min: -12, max: 12, step: 0.5 },
+  sibilanceReduction: { min: 0, max: 1, step: 0.05 },
+  artifactReduction: { min: 0, max: 1, step: 0.05 }
+} as const;
 
-export type VoicePresetId = (typeof voicePresets)[number]["id"];
+type NativeSynthesisNumberControl = keyof typeof nativeSynthesisNumberControls;
+
+export function normalizeNativeSynthesisSettings(
+  settings: NativeSynthesisSettings
+): NativeSynthesisSettings {
+  const runtimeSettings: Partial<NativeSynthesisSettings> = settings;
+  const voiceMode = normalizeVoiceMode(settings.voiceMode);
+  const instruct = normalizeInstruct(voiceMode, settings.instruct);
+
+  return {
+    voiceMode,
+    instruct,
+    speed: normalizeOptionalNativeNumber(settings.speed, "speed"),
+    durationSeconds: normalizeOptionalNativeNumber(settings.durationSeconds, "durationSeconds"),
+    numStep: Math.round(normalizeNativeNumber(settings.numStep, "numStep")),
+    guidanceScale: normalizeNativeNumber(settings.guidanceScale, "guidanceScale"),
+    positionTemperature: normalizeNativeNumber(settings.positionTemperature, "positionTemperature"),
+    classTemperature: normalizeNativeNumber(settings.classTemperature, "classTemperature"),
+    denoise: runtimeSettings.denoise ?? defaultNativeSynthesisSettings.denoise,
+    preprocessPrompt:
+      runtimeSettings.preprocessPrompt ?? defaultNativeSynthesisSettings.preprocessPrompt,
+    postprocessOutput:
+      runtimeSettings.postprocessOutput ?? defaultNativeSynthesisSettings.postprocessOutput,
+    matchSourceLoudness:
+      runtimeSettings.matchSourceLoudness ?? defaultNativeSynthesisSettings.matchSourceLoudness,
+    loudnessMatchStrength: normalizeNativeNumber(
+      settings.loudnessMatchStrength,
+      "loudnessMatchStrength"
+    ),
+    outputGainDb: normalizeNativeNumber(settings.outputGainDb, "outputGainDb"),
+    sibilanceReduction: normalizeNativeNumber(settings.sibilanceReduction, "sibilanceReduction"),
+    artifactReduction: normalizeNativeNumber(settings.artifactReduction, "artifactReduction")
+  };
+}
+
+export function nativeSynthesisSettingsEqual(
+  first: NativeSynthesisSettings,
+  second: NativeSynthesisSettings
+): boolean {
+  return (
+    JSON.stringify(normalizeNativeSynthesisSettings(first)) ===
+    JSON.stringify(normalizeNativeSynthesisSettings(second))
+  );
+}
+
+function normalizeOptionalNativeNumber(
+  value: number | null,
+  control: NativeSynthesisNumberControl
+): number | null {
+  return value === null || !Number.isFinite(value) ? null : normalizeNativeNumber(value, control);
+}
+
+function normalizeNativeNumber(value: number, control: NativeSynthesisNumberControl): number {
+  const spec = nativeSynthesisNumberControls[control];
+  if (!Number.isFinite(value)) {
+    return nativeSynthesisDefaultNumber(control);
+  }
+  return Math.min(spec.max, Math.max(spec.min, value));
+}
+
+function nativeSynthesisDefaultNumber(control: NativeSynthesisNumberControl): number {
+  const value = defaultNativeSynthesisSettings[control];
+  return typeof value === "number" ? value : nativeSynthesisNumberControls[control].min;
+}
+
+function normalizeVoiceMode(value: unknown): VoiceMode {
+  return value === "clone" || value === "design" || value === "auto"
+    ? value
+    : defaultNativeSynthesisSettings.voiceMode;
+}
+
+function normalizeInstruct(voiceMode: VoiceMode, value: string | null): string | null {
+  if (voiceMode !== "design") {
+    return null;
+  }
+
+  const trimmed = value?.trim() ?? "";
+  return trimmed.length > 0 ? trimmed : "female, young adult, moderate pitch";
+}
 
 export interface TextSegment {
   value: string;
@@ -203,7 +257,7 @@ export function createLineMetadata(
     tags: tagsInText(line),
     characterId: null,
     notes: null,
-    settings: { ...baseSettings }
+    settings: normalizeNativeSynthesisSettings(baseSettings)
   };
 }
 
@@ -214,7 +268,6 @@ export function hasLineSpecificSynthesis(metadata: ProjectLineMetadata | undefin
   return (
     metadata.tags.length > 0 ||
     metadata.characterId !== null ||
-    metadata.notes !== null ||
-    JSON.stringify(metadata.settings) !== JSON.stringify(defaultNativeSynthesisSettings)
+    !nativeSynthesisSettingsEqual(metadata.settings, defaultNativeSynthesisSettings)
   );
 }

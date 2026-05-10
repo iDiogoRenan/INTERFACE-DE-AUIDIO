@@ -35,8 +35,7 @@
   background: var(--surface-1);
 }
 
-.lineEditor header,
-.properties header {
+.lineEditor header {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -54,7 +53,7 @@
 }
 
 .editorHeading > span,
-.properties header strong,
+.collapsibleHeader span,
 .controlGroup > span,
 .numberField span {
   color: var(--text-muted);
@@ -64,7 +63,7 @@
 }
 
 .editorHeading > output,
-.properties header span {
+.propertiesTitle output {
   color: var(--text-muted);
   font-size: 11px;
   font-weight: 750;
@@ -141,38 +140,31 @@
 .lineNumber {
   color: var(--text-muted);
   font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
-  font-size: 12px;
-  padding-top: 9px;
+  font-size: 13px;
+  padding-top: 12px;
   text-align: right;
 }
 
 .lineRow textarea {
   grid-column: 2;
-  min-height: 42px;
-  resize: vertical;
+  min-height: 54px;
+  overflow-y: hidden;
+  resize: none;
   border: 1px solid var(--border);
   background: var(--surface-0);
   color: var(--text);
-  padding: 7px 8px;
+  padding: 9px 10px;
   outline: none;
   font: inherit;
-  font-size: 12px;
-  line-height: 1.35;
+  font-size: 14px;
+  line-height: 1.45;
 }
 
 .controls {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  justify-content: flex-end;
   gap: 16px;
-}
-
-.optionSummary {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  color: var(--text-muted);
-  font-size: 13px;
 }
 
 .actions,
@@ -208,16 +200,104 @@
   background: color-mix(in srgb, var(--accent) 18%, var(--surface-2));
 }
 
+.lineSidebar {
+  display: grid;
+  grid-template-rows: minmax(0, 1fr) auto;
+  align-self: stretch;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  background: var(--surface-1);
+}
+
 .properties {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  background: transparent;
+}
+
+.propertiesCollapsed {
+  grid-template-rows: auto;
+  align-self: start;
+}
+
+.propertiesHeader {
+  display: grid;
+  grid-template-columns: 14px minmax(0, 1fr);
+  align-items: center;
+  gap: 7px;
+  min-height: 36px;
+  border: 0;
+  border-bottom: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  padding: 0 10px;
+  text-align: left;
+}
+
+.propertiesCollapsed .propertiesHeader {
+  border-bottom: 0;
+}
+
+.propertiesTitle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-width: 0;
+}
+
+.propertiesTitle strong {
+  overflow: hidden;
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 800;
+  text-overflow: ellipsis;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.propertiesBody {
   display: grid;
   align-content: start;
   gap: 10px;
-  min-width: 0;
   min-height: 0;
   overflow: auto;
-  border: 1px solid var(--border);
-  background: var(--surface-1);
   padding-bottom: 10px;
+}
+
+.collapsibleSection {
+  display: grid;
+  border-top: 1px solid var(--border);
+}
+
+.propertiesBody .collapsibleSection:first-child {
+  border-top: 0;
+}
+
+.collapsibleHeader {
+  display: grid;
+  grid-template-columns: 14px minmax(0, 1fr);
+  align-items: center;
+  gap: 7px;
+  min-height: 36px;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+  padding: 0 10px;
+  text-align: left;
+}
+
+.collapsibleContent {
+  display: grid;
+  align-content: start;
+  gap: 10px;
+  padding: 0 0 10px;
 }
 
 .controlGroup,
@@ -239,15 +319,6 @@
   padding: 7px 8px;
 }
 
-.controlGroup input:disabled {
-  color: var(--text-muted);
-  opacity: 0.7;
-}
-
-.controlGroup textarea {
-  resize: vertical;
-}
-
 .selectTrigger {
   display: inline-flex;
   align-items: center;
@@ -257,7 +328,7 @@
 }
 
 .selectContent {
-  z-index: 20;
+  z-index: 60;
   min-width: var(--radix-select-trigger-width);
   overflow: hidden;
   border: 1px solid var(--border-strong);
@@ -278,9 +349,24 @@
   background: color-mix(in srgb, var(--accent) 18%, var(--surface-2));
 }
 
+.controlGroup input:disabled {
+  color: var(--text-muted);
+  opacity: 0.7;
+}
+
+.controlGroup textarea:disabled,
+.nativeCheckbox button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.controlGroup textarea {
+  resize: vertical;
+}
+
 .rangeRow {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 48px;
+  grid-template-columns: minmax(0, 1fr) 62px;
   align-items: center;
   gap: 8px;
 }
@@ -325,22 +411,6 @@
   font-weight: 850;
 }
 
-.advanced {
-  display: grid;
-  gap: 8px;
-  border-top: 1px solid var(--border);
-  padding: 10px 0 0;
-}
-
-.advanced summary {
-  cursor: pointer;
-  color: var(--text-muted);
-  font-size: 11px;
-  font-weight: 850;
-  padding: 0 10px;
-  text-transform: uppercase;
-}
-
 .nativeCheckbox {
   display: flex;
   align-items: center;
@@ -368,7 +438,11 @@
 .propertyActions {
   display: grid;
   grid-template-columns: 1fr;
-  padding: 0 10px;
+  gap: 8px;
+  border-top: 1px solid var(--border);
+  background: var(--surface-1);
+  align-self: end;
+  padding: 10px;
 }
 
 .spin {
@@ -509,7 +583,7 @@
   }
 
   .lineRow textarea {
-    min-height: 34px;
+    min-height: 48px;
   }
 
   .jobStatus {
@@ -523,7 +597,7 @@
     grid-template-columns: minmax(0, 1fr);
   }
 
-  .properties {
+  .lineSidebar {
     grid-row: auto;
   }
 }

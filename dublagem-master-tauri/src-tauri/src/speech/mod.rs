@@ -35,6 +35,7 @@ pub struct SynthesisRequest<'a> {
     pub text: &'a str,
     pub source_audio: &'a Path,
     pub reference_audio: &'a Path,
+    pub reference_text: &'a str,
     pub output_path: &'a Path,
     pub options: DubbingOptions,
     pub line_overrides: &'a [LineSynthesisOverride],

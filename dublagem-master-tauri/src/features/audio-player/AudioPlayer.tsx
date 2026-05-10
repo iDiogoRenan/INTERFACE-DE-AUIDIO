@@ -14,10 +14,12 @@ import styles from "./AudioPlayer.module.css";
 interface AudioPlayerProps {
   title: string;
   path: string | null;
+  revision?: number;
 }
 
 interface PreviewState {
   path: string;
+  revision: number;
   source: string | null;
   error: string | null;
 }
@@ -45,7 +47,7 @@ const waveformTheme: WaveformTheme = {
   text: "#c6d0d9"
 };
 
-export function AudioPlayer({ title, path }: AudioPlayerProps) {
+export function AudioPlayer({ title, path, revision = 0 }: AudioPlayerProps) {
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const [isPlaying, setIsPlaying] = useState(false);
@@ -54,7 +56,7 @@ export function AudioPlayer({ title, path }: AudioPlayerProps) {
   const [preview, setPreview] = useState<PreviewState | null>(null);
   const [waveform, setWaveform] = useState<WaveformState | null>(null);
   const [playbackError, setPlaybackError] = useState<PlaybackError | null>(null);
-  const currentPreview = preview?.path === path ? preview : null;
+  const currentPreview = preview?.path === path && preview.revision === revision ? preview : null;
   const source = currentPreview?.source ?? null;
   const currentWaveform = waveform?.source === source ? waveform : null;
   const decodedDuration = currentWaveform?.durationSeconds ?? 0;
@@ -129,6 +131,7 @@ export function AudioPlayer({ title, path }: AudioPlayerProps) {
         if (!cancelled) {
           setPreview({
             path,
+            revision,
             source: null,
             error: "Player disponivel apenas no app desktop."
           });
@@ -145,7 +148,8 @@ export function AudioPlayer({ title, path }: AudioPlayerProps) {
         if (!cancelled) {
           setPreview({
             path,
-            source: convertFileSrc(previewPath),
+            revision,
+            source: withRevision(convertFileSrc(previewPath), revision),
             error: null
           });
         }
@@ -154,6 +158,7 @@ export function AudioPlayer({ title, path }: AudioPlayerProps) {
         if (!cancelled) {
           setPreview({
             path,
+            revision,
             source: null,
             error: errorMessage(unknownError)
           });
@@ -163,7 +168,7 @@ export function AudioPlayer({ title, path }: AudioPlayerProps) {
     return () => {
       cancelled = true;
     };
-  }, [path]);
+  }, [path, revision]);
 
   useEffect(() => {
     if (!source) {
@@ -425,4 +430,9 @@ function normalizeDuration(durationSeconds: number): number {
   }
 
   return durationSeconds;
+}
+
+function withRevision(source: string, revision: number): string {
+  const separator = source.includes("?") ? "&" : "?";
+  return `${source}${separator}audioRevision=${encodeURIComponent(String(revision))}`;
 }

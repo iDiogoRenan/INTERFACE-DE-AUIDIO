@@ -57,6 +57,11 @@ export interface NativeSynthesisSettings {
   denoise: boolean;
   preprocessPrompt: boolean;
   postprocessOutput: boolean;
+  matchSourceLoudness: boolean;
+  loudnessMatchStrength: number;
+  outputGainDb: number;
+  sibilanceReduction: number;
+  artifactReduction: number;
 }
 
 export interface AppConfig {
@@ -188,6 +193,11 @@ export const defaultOptions: DubbingOptions = {
     classTemperature: 0,
     denoise: true,
     preprocessPrompt: true,
-    postprocessOutput: true
+    postprocessOutput: true,
+    matchSourceLoudness: true,
+    loudnessMatchStrength: 0.85,
+    outputGainDb: 0,
+    sibilanceReduction: 0,
+    artifactReduction: 0
   }
 };

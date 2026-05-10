@@ -31,7 +31,7 @@ const SYNTHESIS_SEGMENT_MIN_CHARS: usize = 24;
 #[cfg(feature = "ml")]
 const SYNTHESIS_SEGMENT_MAX_CHARS: usize = 180;
 #[cfg(feature = "ml")]
-const INTERNAL_CHUNK_SECONDS: f32 = 12.0;
+const INTERNAL_CHUNK_SECONDS: f32 = 15.0;
 #[cfg(feature = "ml")]
 const REFERENCE_TARGET_SECONDS: f32 = 8.0;
 #[cfg(feature = "ml")]
@@ -42,6 +42,7 @@ const REFERENCE_MAX_SECONDS: f32 = 10.0;
 #[cfg(feature = "ml")]
 struct ShortReferencePrompt {
     audio: ReferenceAudioInput,
+    text: String,
 }
 
 #[cfg(feature = "ml")]
@@ -52,6 +53,7 @@ struct OwnedSynthesisRequest {
     text: String,
     source_audio: PathBuf,
     reference_audio: PathBuf,
+    reference_text: String,
     output_path: PathBuf,
     options: DubbingOptions,
     line_overrides: Vec<LineSynthesisOverride>,
@@ -65,6 +67,7 @@ impl OwnedSynthesisRequest {
             text: request.text.to_string(),
             source_audio: request.source_audio.to_path_buf(),
             reference_audio: request.reference_audio.to_path_buf(),
+            reference_text: request.reference_text.to_string(),
             output_path: request.output_path.to_path_buf(),
             options: request.options,
             line_overrides: request.line_overrides.to_vec(),
@@ -273,10 +276,16 @@ fn synthesize_blocking_with_pipeline(
         .iter()
         .any(|segment| matches!(segment.settings.voice_mode, VoiceMode::Clone))
     {
-        let short_reference = prepare_short_reference(&request.reference_audio)?;
+        let short_reference =
+            prepare_short_reference(&request.reference_audio, &request.reference_text, timing)?;
         Some(
             pipeline
-                .create_voice_clone_prompt_from_audio(&short_reference.audio, None, true, None)
+                .create_voice_clone_prompt_from_audio(
+                    &short_reference.audio,
+                    non_empty_str(&short_reference.text),
+                    true,
+                    None,
+                )
                 .map_err(map_omnivoice_error)?,
         )
     } else {
@@ -297,12 +306,13 @@ fn synthesize_blocking_with_pipeline(
             &request.options,
             &segment.settings,
         )?;
-        segment_audio.push(audio);
+        segment_audio.push(apply_segment_audio_polish(audio, &segment.settings));
         request.hooks.report(index + 1, segments.len());
     }
 
+    let level_settings = audio_level_settings(&segments);
     let audio = concatenate_segments(segment_audio)?;
-    let audio = apply_original_timing(audio, timing);
+    let audio = apply_original_timing(audio, timing, level_settings);
 
     if let Some(parent) = request
         .output_path
@@ -325,25 +335,81 @@ struct SynthesisSegmentPlan {
 }
 
 #[cfg(feature = "ml")]
+#[derive(Debug, Clone, Copy)]
+struct AudioLevelSettings {
+    match_source_loudness: bool,
+    loudness_match_strength: f32,
+    output_gain_db: f32,
+}
+
+#[cfg(feature = "ml")]
+fn audio_level_settings(segments: &[SynthesisSegmentPlan]) -> AudioLevelSettings {
+    let defaults = NativeSynthesisSettings::default();
+    let Some(first) = segments.first() else {
+        return AudioLevelSettings {
+            match_source_loudness: defaults.match_source_loudness,
+            loudness_match_strength: defaults.loudness_match_strength,
+            output_gain_db: defaults.output_gain_db,
+        };
+    };
+
+    let count = segments.len() as f32;
+    AudioLevelSettings {
+        match_source_loudness: segments
+            .iter()
+            .any(|segment| segment.settings.match_source_loudness),
+        loudness_match_strength: segments
+            .iter()
+            .map(|segment| segment.settings.loudness_match_strength)
+            .sum::<f32>()
+            / count,
+        output_gain_db: segments
+            .iter()
+            .map(|segment| segment.settings.output_gain_db)
+            .sum::<f32>()
+            / count,
+    }
+    .with_fallbacks(&first.settings)
+}
+
+#[cfg(feature = "ml")]
+impl AudioLevelSettings {
+    fn with_fallbacks(self, fallback: &NativeSynthesisSettings) -> Self {
+        Self {
+            match_source_loudness: self.match_source_loudness,
+            loudness_match_strength: finite_or(
+                self.loudness_match_strength,
+                NativeSynthesisSettings::default().loudness_match_strength,
+            )
+            .clamp(0.0, 1.0),
+            output_gain_db: finite_or(self.output_gain_db, fallback.output_gain_db)
+                .clamp(-12.0, 12.0),
+        }
+    }
+}
+
+#[cfg(feature = "ml")]
 fn synthesis_segments_for_request(
     request: &OwnedSynthesisRequest,
     target_duration: Option<f32>,
 ) -> AppResult<Vec<SynthesisSegmentPlan>> {
-    let lines = if request.line_overrides.is_empty() {
-        vec![SynthesisLinePlan {
-            text: request.text.clone(),
-            duration_seconds: effective_duration(
-                &request.options.native_synthesis,
-                target_duration,
-            ),
-            settings: request.options.native_synthesis.clone(),
-        }]
-    } else {
-        synthesis_line_plans(&request.line_overrides, target_duration)
-    };
+    if request.line_overrides.is_empty() {
+        let text = request.text.trim();
+        return Ok((!text.is_empty())
+            .then(|| SynthesisSegmentPlan {
+                text: text.to_string(),
+                duration_seconds: effective_duration(
+                    &request.options.native_synthesis,
+                    target_duration,
+                ),
+                settings: request.options.native_synthesis.clone(),
+            })
+            .into_iter()
+            .collect());
+    }
 
     let mut segments = Vec::new();
-    for line in lines {
+    for line in synthesis_line_plans(&request.line_overrides, target_duration) {
         let text_segments = synthesis_segments(&line.text, line.duration_seconds);
         let durations = segment_durations(&text_segments, line.duration_seconds);
         segments.extend(text_segments.into_iter().zip(durations).map(
@@ -558,7 +624,11 @@ fn design_instruct(settings: &NativeSynthesisSettings) -> Option<String> {
 }
 
 #[cfg(feature = "ml")]
-fn prepare_short_reference(reference_audio: &Path) -> AppResult<ShortReferencePrompt> {
+fn prepare_short_reference(
+    reference_audio: &Path,
+    source_text: &str,
+    timing: AudioTimingProfile,
+) -> AppResult<ShortReferencePrompt> {
     let decoded = decode_audio_mono_f32(reference_audio)?;
     let peak = decoded
         .samples
@@ -600,9 +670,40 @@ fn prepare_short_reference(reference_audio: &Path) -> AppResult<ShortReferencePr
         ));
     }
 
+    let duration_seconds = samples.len() as f32 / decoded.sample_rate as f32;
+    let text = reference_text_excerpt(
+        source_text,
+        duration_seconds,
+        timing
+            .target_voice_duration_seconds()
+            .unwrap_or(duration_seconds),
+    );
+
     Ok(ShortReferencePrompt {
         audio: ReferenceAudioInput::Waveform(WaveformInput::mono(samples, decoded.sample_rate)),
+        text,
     })
+}
+
+#[cfg(feature = "ml")]
+fn reference_text_excerpt(
+    source_text: &str,
+    reference_seconds: f32,
+    source_voice_seconds: f32,
+) -> String {
+    let words = source_text.split_whitespace().collect::<Vec<_>>();
+    if words.is_empty() {
+        return String::new();
+    }
+
+    let ratio = if source_voice_seconds > f32::EPSILON {
+        (reference_seconds / source_voice_seconds).clamp(0.03, 1.0)
+    } else {
+        1.0
+    };
+    let word_count =
+        ((words.len() as f32 * ratio).ceil() as usize).clamp(4.min(words.len()), words.len());
+    words[..word_count].join(" ")
 }
 
 #[cfg(feature = "ml")]
@@ -741,10 +842,42 @@ fn concatenate_segments(segments: Vec<DecodedAudio>) -> AppResult<DecodedAudio> 
 }
 
 #[cfg(feature = "ml")]
-fn apply_original_timing(audio: DecodedAudio, timing: AudioTimingProfile) -> DecodedAudio {
+fn apply_segment_audio_polish(
+    mut audio: DecodedAudio,
+    settings: &NativeSynthesisSettings,
+) -> DecodedAudio {
+    reduce_sibilance(
+        &mut audio.samples,
+        audio.sample_rate,
+        settings.sibilance_reduction,
+    );
+    reduce_metallic_artifacts(
+        &mut audio.samples,
+        audio.sample_rate,
+        settings.artifact_reduction,
+    );
+    audio
+}
+
+#[cfg(feature = "ml")]
+fn apply_original_timing(
+    audio: DecodedAudio,
+    timing: AudioTimingProfile,
+    level_settings: AudioLevelSettings,
+) -> DecodedAudio {
     let sample_rate = audio.sample_rate;
     let mut voice_samples = trim_leading_silence(audio.samples);
-    normalize_peak(&mut voice_samples, timing.peak_amplitude * 0.96);
+    if level_settings.match_source_loudness {
+        match_source_loudness(
+            &mut voice_samples,
+            timing.rms_amplitude,
+            timing.peak_amplitude * 0.98,
+            level_settings.loudness_match_strength,
+        );
+    } else {
+        normalize_peak(&mut voice_samples, timing.peak_amplitude * 0.96);
+    }
+    apply_output_gain(&mut voice_samples, level_settings.output_gain_db, 0.98);
 
     let leading = ms_to_samples(timing.leading_silence_ms, sample_rate);
     let trailing = ms_to_samples(timing.trailing_silence_ms, sample_rate);
@@ -758,6 +891,191 @@ fn apply_original_timing(audio: DecodedAudio, timing: AudioTimingProfile) -> Dec
     }
 
     DecodedAudio::new(samples, sample_rate)
+}
+
+#[cfg(feature = "ml")]
+fn match_source_loudness(samples: &mut [f32], target_rms: f32, peak_limit: f32, strength: f32) {
+    let strength = strength.clamp(0.0, 1.0);
+    if strength <= f32::EPSILON {
+        limit_peak(samples, peak_limit);
+        return;
+    }
+
+    let current_rms = rms_level(samples);
+    if current_rms <= f32::EPSILON {
+        return;
+    }
+
+    let target_rms = target_rms.clamp(0.01, peak_limit.max(0.02) * 0.82);
+    let desired_gain = target_rms / current_rms;
+    let blended_gain = 1.0 + (desired_gain - 1.0) * strength;
+    apply_gain_with_peak_guard(samples, blended_gain, peak_limit);
+}
+
+#[cfg(feature = "ml")]
+fn apply_output_gain(samples: &mut [f32], gain_db: f32, peak_limit: f32) {
+    if gain_db.abs() <= f32::EPSILON {
+        limit_peak(samples, peak_limit);
+        return;
+    }
+
+    let gain = 10_f32.powf(gain_db.clamp(-12.0, 12.0) / 20.0);
+    apply_gain_with_peak_guard(samples, gain, peak_limit);
+}
+
+#[cfg(feature = "ml")]
+fn apply_gain_with_peak_guard(samples: &mut [f32], gain: f32, peak_limit: f32) {
+    if samples.is_empty() || !gain.is_finite() {
+        return;
+    }
+
+    let peak = peak_level(samples);
+    if peak <= f32::EPSILON {
+        return;
+    }
+
+    let peak_limit = peak_limit.clamp(0.05, 0.98);
+    let guarded_gain = if gain > 1.0 {
+        gain.min(peak_limit / peak)
+    } else {
+        gain
+    };
+    for sample in &mut *samples {
+        *sample = sanitize_sample(*sample * guarded_gain);
+    }
+    limit_peak(samples, peak_limit);
+}
+
+#[cfg(feature = "ml")]
+fn limit_peak(samples: &mut [f32], peak_limit: f32) {
+    let peak = peak_level(samples);
+    let peak_limit = peak_limit.clamp(0.05, 0.98);
+    if peak <= peak_limit || peak <= f32::EPSILON {
+        return;
+    }
+
+    let gain = peak_limit / peak;
+    for sample in samples {
+        *sample = sanitize_sample(*sample * gain);
+    }
+}
+
+#[cfg(feature = "ml")]
+fn reduce_sibilance(samples: &mut [f32], sample_rate: u32, strength: f32) {
+    let strength = strength.clamp(0.0, 1.0);
+    if samples.is_empty() || sample_rate == 0 || strength <= f32::EPSILON {
+        return;
+    }
+
+    let highpass_alpha = one_pole_highpass_alpha(4_500.0, sample_rate);
+    let lowpass_alpha = one_pole_lowpass_alpha(11_000.0, sample_rate);
+    let threshold = (rms_level(samples) * (1.35 - 0.55 * strength)).max(0.006);
+    let attack = smoothing_coefficient(0.003, sample_rate);
+    let release = smoothing_coefficient(0.045, sample_rate);
+    let mut previous_input = 0.0;
+    let mut highpassed = 0.0;
+    let mut bandpassed = 0.0;
+    let mut envelope = 0.0;
+
+    for sample in samples {
+        let input = *sample;
+        highpassed = highpass_alpha * (highpassed + input - previous_input);
+        previous_input = input;
+        bandpassed += lowpass_alpha * (highpassed - bandpassed);
+
+        let magnitude = bandpassed.abs();
+        let coefficient = if magnitude > envelope {
+            attack
+        } else {
+            release
+        };
+        envelope = coefficient * envelope + (1.0 - coefficient) * magnitude;
+        let over_threshold = if envelope > threshold {
+            (envelope - threshold) / envelope
+        } else {
+            0.0
+        };
+        let reduction = over_threshold * strength;
+        *sample = sanitize_sample(input - bandpassed * reduction);
+    }
+}
+
+#[cfg(feature = "ml")]
+fn reduce_metallic_artifacts(samples: &mut [f32], sample_rate: u32, strength: f32) {
+    let strength = strength.clamp(0.0, 1.0);
+    if samples.is_empty() || sample_rate == 0 || strength <= f32::EPSILON {
+        return;
+    }
+
+    let cutoff = 12_000.0 - 8_500.0 * strength;
+    let lowpass_alpha = one_pole_lowpass_alpha(cutoff, sample_rate);
+    let high_damping = 0.78 * strength;
+    let temporal_smoothing = 0.22 * strength;
+    let mut lowpassed = 0.0;
+    let mut previous_output = 0.0;
+
+    for sample in samples {
+        let input = *sample;
+        lowpassed += lowpass_alpha * (input - lowpassed);
+        let softened = lowpassed + (input - lowpassed) * (1.0 - high_damping);
+        let output = softened * (1.0 - temporal_smoothing) + previous_output * temporal_smoothing;
+        previous_output = output;
+        *sample = sanitize_sample(output);
+    }
+}
+
+#[cfg(feature = "ml")]
+fn peak_level(samples: &[f32]) -> f32 {
+    samples
+        .iter()
+        .fold(0.0_f32, |current, sample| current.max(sample.abs()))
+}
+
+#[cfg(feature = "ml")]
+fn rms_level(samples: &[f32]) -> f32 {
+    if samples.is_empty() {
+        return 0.0;
+    }
+
+    (samples.iter().map(|sample| sample * sample).sum::<f32>() / samples.len() as f32).sqrt()
+}
+
+#[cfg(feature = "ml")]
+fn one_pole_lowpass_alpha(cutoff_hz: f32, sample_rate: u32) -> f32 {
+    let nyquist = sample_rate as f32 * 0.5;
+    let cutoff_hz = cutoff_hz.clamp(20.0, (nyquist * 0.92).max(20.0));
+    let dt = 1.0 / sample_rate as f32;
+    let rc = 1.0 / (std::f32::consts::TAU * cutoff_hz);
+    dt / (rc + dt)
+}
+
+#[cfg(feature = "ml")]
+fn one_pole_highpass_alpha(cutoff_hz: f32, sample_rate: u32) -> f32 {
+    let nyquist = sample_rate as f32 * 0.5;
+    let cutoff_hz = cutoff_hz.clamp(20.0, (nyquist * 0.92).max(20.0));
+    let dt = 1.0 / sample_rate as f32;
+    let rc = 1.0 / (std::f32::consts::TAU * cutoff_hz);
+    rc / (rc + dt)
+}
+
+#[cfg(feature = "ml")]
+fn smoothing_coefficient(time_seconds: f32, sample_rate: u32) -> f32 {
+    (-1.0 / (time_seconds * sample_rate as f32)).exp()
+}
+
+#[cfg(feature = "ml")]
+fn finite_or(value: f32, fallback: f32) -> f32 {
+    if value.is_finite() {
+        value
+    } else {
+        fallback
+    }
+}
+
+#[cfg(feature = "ml")]
+fn non_empty_str(value: &str) -> Option<&str> {
+    let trimmed = value.trim();
+    (!trimmed.is_empty()).then_some(trimmed)
 }
 
 #[cfg(feature = "ml")]
@@ -832,6 +1150,29 @@ mod tests {
     }
 
     #[test]
+    fn whole_file_synthesis_keeps_text_in_one_omnivoice_request() {
+        let request = OwnedSynthesisRequest {
+            text: "Primeira frase. Segunda frase longa para simular um arquivo maior.".to_string(),
+            source_audio: PathBuf::from("source.wav"),
+            reference_audio: PathBuf::from("source.wav"),
+            reference_text: "Original first sentence. Original second sentence.".to_string(),
+            output_path: PathBuf::from("out.wav"),
+            options: DubbingOptions::default(),
+            line_overrides: Vec::new(),
+            hooks: SynthesisHooks::default(),
+        };
+
+        let segments = synthesis_segments_for_request(&request, Some(32.0)).unwrap();
+
+        assert_eq!(segments.len(), 1);
+        assert_eq!(segments[0].duration_seconds, Some(32.0));
+        assert_eq!(
+            segments[0].text,
+            "Primeira frase. Segunda frase longa para simular um arquivo maior."
+        );
+    }
+
+    #[test]
     fn segment_durations_preserve_total_shape() {
         let segments = vec!["curto".to_string(), "um trecho um pouco maior".to_string()];
 
@@ -839,6 +1180,15 @@ mod tests {
 
         assert_eq!(durations.len(), 2);
         assert!(durations[1].expect("long duration") > durations[0].expect("short duration"));
+    }
+
+    #[test]
+    fn reference_text_excerpt_matches_short_reference_window() {
+        let text = "one two three four five six seven eight nine ten";
+
+        let excerpt = reference_text_excerpt(text, 8.0, 40.0);
+
+        assert_eq!(excerpt, "one two three four");
     }
 
     #[test]
@@ -856,6 +1206,7 @@ mod tests {
             denoise: false,
             preprocess_prompt: false,
             postprocess_output: false,
+            ..NativeSynthesisSettings::default()
         };
 
         let request = generation_request("Ola".to_string(), None, None, &options, &settings);
@@ -921,5 +1272,57 @@ mod tests {
             ),
             "[sigh] Ola mundo."
         );
+    }
+
+    #[test]
+    fn audio_polish_matches_source_loudness_without_clipping() {
+        let timing = AudioTimingProfile {
+            total_ms: 100,
+            leading_silence_ms: 0,
+            trailing_silence_ms: 0,
+            voice_ms: 100,
+            peak_amplitude: 0.4,
+            rms_amplitude: 0.18,
+        };
+        let audio = DecodedAudio::new(vec![0.04; 100], 1_000);
+
+        let polished = apply_original_timing(
+            audio,
+            timing,
+            AudioLevelSettings {
+                match_source_loudness: true,
+                loudness_match_strength: 1.0,
+                output_gain_db: 0.0,
+            },
+        );
+
+        assert!(rms_level(&polished.samples) > 0.15);
+        assert!(peak_level(&polished.samples) <= 0.4);
+    }
+
+    #[test]
+    fn audio_polish_output_gain_can_reduce_final_level() {
+        let timing = AudioTimingProfile {
+            total_ms: 100,
+            leading_silence_ms: 0,
+            trailing_silence_ms: 0,
+            voice_ms: 100,
+            peak_amplitude: 0.6,
+            rms_amplitude: 0.3,
+        };
+        let audio = DecodedAudio::new(vec![0.4; 100], 1_000);
+
+        let polished = apply_original_timing(
+            audio,
+            timing,
+            AudioLevelSettings {
+                match_source_loudness: false,
+                loudness_match_strength: 0.0,
+                output_gain_db: -6.0,
+            },
+        );
+
+        assert!(rms_level(&polished.samples) < 0.31);
+        assert!(peak_level(&polished.samples) < 0.31);
     }
 }

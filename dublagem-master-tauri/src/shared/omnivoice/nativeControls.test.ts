@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   insertTagIntoLine,
   nativeTags,
+  normalizeNativeSynthesisSettings,
   removeNativeTagsFromText,
   replaceLine,
   splitLines,
@@ -10,6 +11,42 @@ import {
   textSegments,
   unknownNativeTags
 } from "./nativeControls";
+import { defaultOptions, type NativeSynthesisSettings } from "../tauri/types";
+
+describe("native OmniVoice synthesis settings", () => {
+  it("normalizes UI values to the backend accepted ranges", () => {
+    const settings: NativeSynthesisSettings = {
+      ...defaultOptions.nativeSynthesis,
+      voiceMode: "design",
+      instruct: "   ",
+      speed: Number.NaN,
+      durationSeconds: 99,
+      numStep: 2,
+      guidanceScale: 99,
+      positionTemperature: -2,
+      classTemperature: Number.NaN,
+      loudnessMatchStrength: 99,
+      outputGainDb: -99,
+      sibilanceReduction: Number.NaN,
+      artifactReduction: 2
+    };
+
+    expect(normalizeNativeSynthesisSettings(settings)).toMatchObject({
+      voiceMode: "design",
+      instruct: "female, young adult, moderate pitch",
+      speed: null,
+      durationSeconds: 60,
+      numStep: 8,
+      guidanceScale: 10,
+      positionTemperature: 0,
+      classTemperature: 0,
+      loudnessMatchStrength: 1,
+      outputGainDb: -12,
+      sibilanceReduction: 0,
+      artifactReduction: 1
+    });
+  });
+});
 
 describe("native OmniVoice controls", () => {
   it("contains only the official native non-verbal tags", () => {
