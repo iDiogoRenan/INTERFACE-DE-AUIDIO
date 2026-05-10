@@ -1,6 +1,7 @@
 export type LanguageCode = "auto" | "en" | "pt" | "fr" | "sv";
 export type DubbingMode = "classico" | "antisotaque";
 export type VoiceMode = "clone" | "design" | "auto";
+export type SpeechModelId = "omnivoice";
 export type AudioFileStatus =
   | "pending"
   | "dubbed"
@@ -64,6 +65,10 @@ export interface NativeSynthesisSettings {
   artifactReduction: number;
 }
 
+export interface SpeechModelPreset {
+  nativeSynthesis: NativeSynthesisSettings;
+}
+
 export interface AppConfig {
   inputDir: string | null;
   outputDir: string | null;
@@ -71,6 +76,8 @@ export interface AppConfig {
   approvedDir: string | null;
   modelDir: string | null;
   voicePoolDir: string | null;
+  activeSpeechModel: SpeechModelId;
+  speechModelPresets: Record<SpeechModelId, SpeechModelPreset | undefined>;
   options: DubbingOptions;
 }
 

@@ -13,6 +13,11 @@ import {
 } from "../shared/omnivoice/nativeControls";
 import { emptyProjectMetadata, isTauriRuntime, tauriClient } from "../shared/tauri/client";
 import {
+  activeNativeSynthesisSettings,
+  configWithActiveNativeSynthesis,
+  defaultSpeechModelPresets
+} from "../shared/speechModels";
+import {
   defaultOptions,
   type AppConfig,
   type AudioFileEntry,
@@ -99,6 +104,8 @@ const initialConfig: AppConfig = {
   approvedDir: null,
   modelDir: null,
   voicePoolDir: "voice_pool_ptbr",
+  activeSpeechModel: "omnivoice",
+  speechModelPresets: defaultSpeechModelPresets,
   options: defaultOptions
 };
 
@@ -277,7 +284,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   saveSelectedLineSettingsAsDefault: async () => {
     const state = get();
     const settings = normalizeNativeSynthesisSettings(selectedLineMetadata(state).settings);
-    const nextConfig = configWithNativeSynthesis(state.config, settings);
+    const nextConfig = configWithActiveNativeSynthesis(state.config, settings);
     try {
       const saved = await tauriClient.saveConfig(nextConfig);
       set({ config: saved });
@@ -289,7 +296,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   resetSelectedLineSettingsToDefault: async () => {
     const defaultSettings = normalizeNativeSynthesisSettings(defaultOptions.nativeSynthesis);
     const state = get();
-    const nextConfig = configWithNativeSynthesis(state.config, defaultSettings);
+    const nextConfig = configWithActiveNativeSynthesis(state.config, defaultSettings);
     set((current) => {
       const projectMetadata = upsertSelectedLineMetadata(current, {
         characterId: null,
@@ -398,7 +405,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
         : removeSubmittedDraft(state.submittedDubbingDrafts, selectedPath)
     }));
     try {
-      const nativeSynthesis = normalizeNativeSynthesisSettings(config.options.nativeSynthesis);
+      const nativeSynthesis = activeNativeSynthesisSettings(config);
       const jobId = await tauriClient.startDubbingJob({
         inputPaths: [selectedPath],
         outputDir: config.outputDir,
@@ -925,7 +932,7 @@ function syncProjectTargetText(
     const key = String(index);
     if (nextLines[key] || tags.length > 0) {
       const currentLine =
-        nextLines[key] ?? createLineMetadata(line, state.config.options.nativeSynthesis);
+        nextLines[key] ?? createLineMetadata(line, activeNativeSynthesisSettings(state.config));
       nextLines[key] = {
         ...currentLine,
         tags: mergeNativeTags(currentLine.tags, tags)
@@ -982,12 +989,12 @@ export function selectedLineMetadata(state: WorkspaceState): ProjectLineMetadata
   const fileKey = fileKeyForPath(state.selectedPath, state.files);
   const line = splitLines(state.targetText)[state.selectedLineIndex] ?? "";
   if (!fileKey) {
-    return createLineMetadata(line, state.config.options.nativeSynthesis);
+    return createLineMetadata(line, activeNativeSynthesisSettings(state.config));
   }
 
   return (
     state.projectMetadata.files[fileKey]?.lines[String(state.selectedLineIndex)] ??
-    createLineMetadata(line, state.config.options.nativeSynthesis)
+    createLineMetadata(line, activeNativeSynthesisSettings(state.config))
   );
 }
 
@@ -1050,19 +1057,6 @@ function fileKeyForPath(path: string | null, files: AudioFileEntry[]): string | 
 
 function cloneSettings(settings: NativeSynthesisSettings): NativeSynthesisSettings {
   return normalizeNativeSynthesisSettings(settings);
-}
-
-function configWithNativeSynthesis(
-  config: AppConfig,
-  nativeSynthesis: NativeSynthesisSettings
-): AppConfig {
-  return {
-    ...config,
-    options: {
-      ...config.options,
-      nativeSynthesis: normalizeNativeSynthesisSettings(nativeSynthesis)
-    }
-  };
 }
 
 function stateNextOutputRevision(state: Pick<WorkspaceState, "lastOutputRevision">): number {

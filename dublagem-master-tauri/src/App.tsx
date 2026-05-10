@@ -5,8 +5,17 @@ import { DubbingPanel } from "./features/dubbing/DubbingPanel";
 import { ProjectExplorer } from "./features/project-explorer/ProjectExplorer";
 import { SettingsPanel } from "./features/settings/SettingsPanel";
 import { ValidationPanel } from "./features/validation/ValidationPanel";
-import { ACTIVE_SPEECH_MODELS, APP_DISPLAY_NAME } from "./shared/app/metadata";
+import { APP_DISPLAY_NAME } from "./shared/app/metadata";
+import {
+  activeAsrModel,
+  availableSpeechModels,
+  configWithActiveSpeechModel,
+  modelDescriptor,
+  modelRuntimeLabel,
+  modelRuntimeState
+} from "./shared/speechModels";
 import { isTauriRuntime } from "./shared/tauri/client";
+import type { AppConfig, JobStage, SpeechModelId } from "./shared/tauri/types";
 import { useWorkspaceStore } from "./stores/workspaceStore";
 import styles from "./App.module.css";
 
@@ -23,6 +32,10 @@ interface StoredWindowSize {
 
 function App() {
   const load = useWorkspaceStore((state) => state.load);
+  const config = useWorkspaceStore((state) => state.config);
+  const saveConfig = useWorkspaceStore((state) => state.saveConfig);
+  const isBusy = useWorkspaceStore((state) => state.isBusy);
+  const currentStage = useWorkspaceStore((state) => state.currentStage);
   const appendLog = useWorkspaceStore((state) => state.appendLog);
 
   useEffect(() => {
@@ -48,14 +61,27 @@ function App() {
           <div>
             <h1>{APP_DISPLAY_NAME}</h1>
             <p>Fluxo local em Rust para transcrição, tradução, síntese e validação.</p>
-            <dl className={styles.modelBadges} aria-label="Modelos ativos">
-              {ACTIVE_SPEECH_MODELS.map((model) => (
-                <div className={styles.modelBadge} key={model.label}>
-                  <dt>{model.label}</dt>
-                  <dd>{model.value}</dd>
-                </div>
-              ))}
-            </dl>
+            <ModelHeaderControl
+              config={config}
+              currentStage={currentStage}
+              isBusy={isBusy}
+              onModelChange={(modelId) => {
+                if (isBusy) {
+                  appendLog("Troca de modelo bloqueada durante geração.", "warning");
+                  return;
+                }
+                void saveConfig(configWithActiveSpeechModel(config, modelId)).catch(
+                  (unknownError: unknown) => {
+                    appendLog(
+                      unknownError instanceof Error
+                        ? unknownError.message
+                        : "Falha ao salvar modelo ativo.",
+                      "error"
+                    );
+                  }
+                );
+              }}
+            />
           </div>
           <Tabs.List className={styles.tabs}>
             <Tabs.Trigger value="dubbing">
@@ -84,6 +110,73 @@ function App() {
         </Tabs.Content>
       </Tabs.Root>
     </main>
+  );
+}
+
+interface ModelHeaderControlProps {
+  config: AppConfig;
+  currentStage: JobStage | null;
+  isBusy: boolean;
+  onModelChange: (modelId: SpeechModelId) => void;
+}
+
+function ModelHeaderControl({
+  config,
+  currentStage,
+  isBusy,
+  onModelChange
+}: ModelHeaderControlProps) {
+  const activeModel = modelDescriptor(config.activeSpeechModel);
+  const runtimeState = modelRuntimeState(isBusy, currentStage);
+
+  return (
+    <div className={styles.modelControl} aria-label="Modelo de síntese ativo">
+      <label>
+        <span>Modelo</span>
+        <select
+          value={config.activeSpeechModel}
+          disabled={isBusy}
+          onChange={(event) => {
+            onModelChange(event.currentTarget.value as SpeechModelId);
+          }}
+        >
+          {availableSpeechModels.map((model) => (
+            <option key={model.id} value={model.id}>
+              {model.label}
+            </option>
+          ))}
+        </select>
+      </label>
+      <dl>
+        <div>
+          <dt>TTS engine</dt>
+          <dd>{activeModel.engine}</dd>
+        </div>
+        <div>
+          <dt>TTS versão</dt>
+          <dd>{activeModel.version}</dd>
+        </div>
+        <div>
+          <dt>ASR</dt>
+          <dd>{activeAsrModel.label}</dd>
+        </div>
+        <div>
+          <dt>ASR modelo</dt>
+          <dd>{activeAsrModel.model}</dd>
+        </div>
+        <div>
+          <dt>ASR engine</dt>
+          <dd>{activeAsrModel.engine}</dd>
+        </div>
+        <div>
+          <dt>VAD</dt>
+          <dd>{activeAsrModel.vadModel}</dd>
+        </div>
+      </dl>
+      <span className={styles.modelStatus} data-state={runtimeState}>
+        {modelRuntimeLabel(runtimeState)}
+      </span>
+    </div>
   );
 }
 

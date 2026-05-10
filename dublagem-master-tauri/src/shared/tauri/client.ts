@@ -11,6 +11,7 @@ import type {
   TranslationResult,
   TranscriptionResult
 } from "./types";
+import { defaultSpeechModelPresets } from "../speechModels";
 import { defaultOptions } from "./types";
 
 type CommandArgs = Record<string, unknown>;
@@ -62,6 +63,8 @@ const defaultConfig: AppConfig = {
   approvedDir: null,
   modelDir: null,
   voicePoolDir: "voice_pool_ptbr",
+  activeSpeechModel: "omnivoice",
+  speechModelPresets: defaultSpeechModelPresets,
   options: defaultOptions
 };
 

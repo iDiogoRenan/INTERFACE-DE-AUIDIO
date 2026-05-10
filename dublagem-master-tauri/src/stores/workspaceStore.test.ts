@@ -9,6 +9,7 @@ import {
   type ProjectMetadata,
   type SynthesisLinePreviewRequest
 } from "../shared/tauri/types";
+import { defaultSpeechModelPresets } from "../shared/speechModels";
 
 const clientMocks = vi.hoisted(() => ({
   loadProjectMetadata: vi.fn<() => Promise<ProjectMetadata>>(() =>
@@ -55,6 +56,8 @@ const config: AppConfig = {
   approvedDir: null,
   modelDir: "E:\\audio\\models",
   voicePoolDir: "voice_pool_ptbr",
+  activeSpeechModel: "omnivoice",
+  speechModelPresets: defaultSpeechModelPresets,
   options: defaultOptions
 };
 

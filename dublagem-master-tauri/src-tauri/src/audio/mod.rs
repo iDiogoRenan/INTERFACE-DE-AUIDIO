@@ -1,6 +1,7 @@
 use crate::error::{AppError, AppResult};
 use dublagem_domain::{
-    AudioFileEntry, AudioFileStatus, AudioMetadata, CachedTranscription, QualityReport,
+    AudioFileEntry, AudioFileStatus, AudioMetadata, CachedTranscription, QualityClassification,
+    QualityReport,
 };
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, fs::File, path::Path};
@@ -416,6 +417,9 @@ pub fn quality_report(samples: &[f32]) -> QualityReport {
     if samples.is_empty() {
         return QualityReport {
             is_acceptable: false,
+            score: 0,
+            classification: QualityClassification::Critica,
+            summary: "Crítica: áudio vazio.".to_string(),
             zcr_average: 0.0,
             peak_amplitude: 0.0,
             rms: 0.0,
@@ -434,24 +438,68 @@ pub fn quality_report(samples: &[f32]) -> QualityReport {
     let rms =
         (samples.iter().map(|sample| sample * sample).sum::<f32>() / samples.len() as f32).sqrt();
     let mut issues = Vec::new();
+    let mut score: i16 = 100;
 
     if peak_amplitude <= 0.0001 {
         issues.push("Audio praticamente mudo.".to_string());
+        score -= 100;
     }
     if peak_amplitude > 0.985 {
         issues.push("Audio proximo de clipping.".to_string());
+        score -= 28;
     }
     if zcr_average > 0.45 {
         issues.push(format!("ZCR alto demais ({zcr_average:.2})."));
+        score -= 18;
     }
+    if rms < 0.015 {
+        issues.push("Fala muito baixa ou com silêncio excessivo.".to_string());
+        score -= 18;
+    }
+    if rms > 0.35 {
+        issues.push("Volume médio alto; pode haver compressão ou distorção.".to_string());
+        score -= 10;
+    }
+    let score = score.clamp(0, 100) as u8;
+    let classification = quality_classification(score);
 
     QualityReport {
-        is_acceptable: issues.is_empty(),
+        is_acceptable: score >= 55,
+        score,
+        classification,
+        summary: quality_summary(classification, &issues),
         zcr_average,
         peak_amplitude,
         rms,
         issues,
     }
+}
+
+fn quality_classification(score: u8) -> QualityClassification {
+    match score {
+        90..=100 => QualityClassification::Excelente,
+        75..=89 => QualityClassification::Boa,
+        55..=74 => QualityClassification::Aceitavel,
+        35..=54 => QualityClassification::Ruim,
+        _ => QualityClassification::Critica,
+    }
+}
+
+fn quality_summary(classification: QualityClassification, issues: &[String]) -> String {
+    if issues.is_empty() {
+        return format!(
+            "{}: fala clara, pouco ruído e volume estável.",
+            classification.label_pt_br()
+        );
+    }
+
+    let reason = issues
+        .iter()
+        .take(2)
+        .map(|issue| issue.trim_end_matches('.'))
+        .collect::<Vec<_>>()
+        .join("; ");
+    format!("{}: {}.", classification.label_pt_br(), reason)
 }
 
 fn status_for_file(name: &str, output_dir: Option<&Path>) -> AudioFileStatus {

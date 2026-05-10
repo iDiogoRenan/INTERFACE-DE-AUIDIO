@@ -39,7 +39,7 @@ fn with_discovered_models(mut config: AppConfig) -> AppConfig {
     if config.model_dir.is_none() {
         config.model_dir = crate::speech::models::discover_model_dir();
     }
-    config
+    config.normalize_model_presets()
 }
 
 #[cfg(test)]

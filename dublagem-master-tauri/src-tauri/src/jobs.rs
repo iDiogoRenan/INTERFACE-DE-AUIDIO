@@ -46,10 +46,14 @@ pub struct JobManager {
 }
 
 impl JobManager {
-    pub async fn register(&self, job_id: JobId) -> CancellationToken {
+    pub async fn register(&self, job_id: JobId) -> AppResult<CancellationToken> {
         let token = CancellationToken::new();
-        self.active.lock().await.insert(job_id, token.clone());
-        token
+        let mut active = self.active.lock().await;
+        if !active.is_empty() {
+            return Err(AppError::JobAlreadyRunning);
+        }
+        active.insert(job_id, token.clone());
+        Ok(token)
     }
 
     pub async fn cancel(&self, job_id: JobId) -> AppResult<()> {
@@ -92,7 +96,7 @@ pub async fn start_dubbing_job(
     request: DubbingRequest,
 ) -> AppResult<JobId> {
     let job_id = Uuid::new_v4();
-    let cancellation = state.jobs.register(job_id).await;
+    let cancellation = state.jobs.register(job_id).await?;
     let jobs = Arc::clone(&state.jobs);
     let translator = Arc::clone(&state.translator);
     let speech = Arc::clone(&state.speech);
@@ -698,6 +702,21 @@ async fn resolve_v14_reference_text(job: &V14SynthesisJob<'_>) -> AppResult<Opti
             return Ok(Some(fallback));
         }
     };
+
+    let reference_quality = audio::quality_report(&reference.samples);
+    emit_stage(
+        job.app,
+        job.job_id,
+        JobStage::Synthesizing,
+        format!(
+            "Referência OmniVoice {} ({}/100): {}",
+            reference_quality.classification.label_pt_br(),
+            reference_quality.score,
+            reference_quality.summary
+        ),
+        Some(job.context.progress(62)),
+        Some(job.context),
+    )?;
 
     emit_stage(
         job.app,
@@ -1462,6 +1481,23 @@ fn emit(app: &AppHandle, event: &str, payload: DubbingJobEvent) -> AppResult<()>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn job_manager_allows_only_one_active_generation() {
+        let manager = JobManager::default();
+        let first_job = Uuid::new_v4();
+        let second_job = Uuid::new_v4();
+
+        manager.register(first_job).await.expect("first job");
+        let second = manager.register(second_job).await;
+
+        assert!(matches!(second, Err(AppError::JobAlreadyRunning)));
+        manager.finish(first_job).await;
+        manager
+            .register(second_job)
+            .await
+            .expect("second after finish");
+    }
 
     #[test]
     fn v14_metrics_accept_close_transcription() {

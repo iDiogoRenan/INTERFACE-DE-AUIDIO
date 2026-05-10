@@ -65,6 +65,18 @@ pub enum VoiceMode {
     Auto,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SpeechModelId {
+    #[default]
+    #[serde(rename = "omnivoice")]
+    OmniVoice,
+}
+
+impl SpeechModelId {
+    pub const ALL: [Self; 1] = [Self::OmniVoice];
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NativeSynthesisSettings {
@@ -145,6 +157,19 @@ impl NativeSynthesisSettings {
 
         Ok(())
     }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SpeechModelPreset {
+    pub native_synthesis: NativeSynthesisSettings,
+}
+
+pub fn default_speech_model_presets() -> BTreeMap<SpeechModelId, SpeechModelPreset> {
+    SpeechModelId::ALL
+        .into_iter()
+        .map(|model_id| (model_id, SpeechModelPreset::default()))
+        .collect()
 }
 
 fn default_match_source_loudness() -> bool {
@@ -228,6 +253,10 @@ pub struct AppConfig {
     pub approved_dir: Option<PathBuf>,
     pub model_dir: Option<PathBuf>,
     pub voice_pool_dir: Option<PathBuf>,
+    #[serde(default)]
+    pub active_speech_model: SpeechModelId,
+    #[serde(default)]
+    pub speech_model_presets: BTreeMap<SpeechModelId, SpeechModelPreset>,
     pub options: DubbingOptions,
 }
 
@@ -240,8 +269,47 @@ impl Default for AppConfig {
             approved_dir: None,
             model_dir: None,
             voice_pool_dir: Some(PathBuf::from("voice_pool_ptbr")),
+            active_speech_model: SpeechModelId::default(),
+            speech_model_presets: default_speech_model_presets(),
             options: DubbingOptions::default(),
         }
+    }
+}
+
+impl AppConfig {
+    pub fn normalize_model_presets(mut self) -> Self {
+        let active_model = self.active_speech_model;
+        let legacy_active_settings = self.options.native_synthesis.clone();
+
+        for model_id in SpeechModelId::ALL {
+            self.speech_model_presets
+                .entry(model_id)
+                .or_insert_with(|| SpeechModelPreset {
+                    native_synthesis: if model_id == active_model {
+                        legacy_active_settings.clone()
+                    } else {
+                        NativeSynthesisSettings::default()
+                    },
+                });
+        }
+
+        if let Some(active_preset) = self.speech_model_presets.get(&active_model) {
+            self.options.native_synthesis = active_preset.native_synthesis.clone();
+        }
+
+        self
+    }
+
+    pub fn with_active_native_synthesis(
+        mut self,
+        native_synthesis: NativeSynthesisSettings,
+    ) -> Self {
+        self.options.native_synthesis = native_synthesis.clone();
+        self.speech_model_presets.insert(
+            self.active_speech_model,
+            SpeechModelPreset { native_synthesis },
+        );
+        self.normalize_model_presets()
     }
 }
 
@@ -276,10 +344,35 @@ pub struct CachedTranscription {
 #[serde(rename_all = "camelCase")]
 pub struct QualityReport {
     pub is_acceptable: bool,
+    pub score: u8,
+    pub classification: QualityClassification,
+    pub summary: String,
     pub zcr_average: f32,
     pub peak_amplitude: f32,
     pub rms: f32,
     pub issues: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QualityClassification {
+    Excelente,
+    Boa,
+    Aceitavel,
+    Ruim,
+    Critica,
+}
+
+impl QualityClassification {
+    pub const fn label_pt_br(self) -> &'static str {
+        match self {
+            Self::Excelente => "Excelente",
+            Self::Boa => "Boa",
+            Self::Aceitavel => "Aceitável",
+            Self::Ruim => "Ruim",
+            Self::Critica => "Crítica",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

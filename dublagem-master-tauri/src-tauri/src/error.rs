@@ -18,6 +18,8 @@ pub enum AppError {
     TranslationUnavailable(String),
     #[error("processamento não encontrado: {0}")]
     JobNotFound(String),
+    #[error("já existe uma geração em andamento")]
+    JobAlreadyRunning,
     #[error("erro de io: {0}")]
     Io(String),
     #[error("erro interno: {0}")]

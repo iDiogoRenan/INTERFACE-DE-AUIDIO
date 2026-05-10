@@ -22,6 +22,8 @@ use omnivoice_infer::{
 };
 #[cfg(feature = "cuda")]
 use omnivoice_infer::{DTypeSpec, DeviceSpec, RuntimeOptions};
+#[cfg(feature = "ml")]
+use serde::Serialize;
 use std::path::{Path, PathBuf};
 #[cfg(feature = "ml")]
 use std::sync::{Arc, Mutex};
@@ -30,6 +32,14 @@ use std::sync::{Arc, Mutex};
 const INTERNAL_CHUNK_SECONDS: f32 = 15.0;
 #[cfg(feature = "ml")]
 const INTERNAL_CHUNK_THRESHOLD_SECONDS: f32 = 30.0;
+#[cfg(feature = "ml")]
+const QUALITY_TEXT_CHUNK_TARGET_CHARS: usize = 200;
+#[cfg(feature = "ml")]
+const QUALITY_TEXT_CHUNK_MIN_CHARS: usize = 42;
+#[cfg(feature = "ml")]
+const SEGMENT_CROSSFADE_MS: u32 = 35;
+#[cfg(feature = "ml")]
+const OMNIVOICE_MODEL_ID: &str = "omnivoice";
 
 #[cfg(feature = "ml")]
 struct ShortReferencePrompt {
@@ -284,21 +294,30 @@ fn synthesize_blocking_with_pipeline(
         None
     };
     let mut segment_audio = Vec::with_capacity(segments.len());
+    let chunk_store = ChunkArtifactStore::prepare(&request.output_path)?;
 
     for (index, segment) in segments.iter().enumerate() {
         if request.hooks.is_cancelled() {
             return Err(AppError::Internal("síntese cancelada".to_string()));
         }
 
-        let audio = synthesize_segment(
+        let audio = match synthesize_segment(
             pipeline,
             &segment.text,
             segment.duration_seconds,
             voice_clone_prompt_for(&segment.settings, voice_clone_prompt.as_ref())?,
             &request.options,
             &segment.settings,
-        )?;
-        segment_audio.push(apply_segment_audio_polish(audio, &segment.settings));
+        ) {
+            Ok(audio) => audio,
+            Err(error) => {
+                chunk_store.write_failed_chunk(index, segments.len(), segment, &request, &error)?;
+                return Err(error);
+            }
+        };
+        let audio = apply_segment_audio_polish(audio, &segment.settings);
+        chunk_store.write_chunk(index, segments.len(), segment, &audio, &request)?;
+        segment_audio.push(audio);
         request.hooks.report(index + 1, segments.len());
     }
 
@@ -324,6 +343,8 @@ struct SynthesisSegmentPlan {
     text: String,
     duration_seconds: Option<f32>,
     settings: NativeSynthesisSettings,
+    line_index: Option<usize>,
+    original_duration_seconds: Option<f32>,
 }
 
 #[cfg(feature = "ml")]
@@ -332,6 +353,109 @@ struct AudioLevelSettings {
     match_source_loudness: bool,
     loudness_match_strength: f32,
     output_gain_db: f32,
+}
+
+#[cfg(feature = "ml")]
+struct ChunkArtifactStore {
+    dir: PathBuf,
+}
+
+#[cfg(feature = "ml")]
+impl ChunkArtifactStore {
+    fn prepare(output_path: &Path) -> AppResult<Self> {
+        let dir = chunk_artifact_dir(output_path);
+        if dir.is_dir() {
+            std::fs::remove_dir_all(&dir)?;
+        }
+        std::fs::create_dir_all(&dir)?;
+        Ok(Self { dir })
+    }
+
+    fn write_chunk(
+        &self,
+        index: usize,
+        total: usize,
+        segment: &SynthesisSegmentPlan,
+        audio: &DecodedAudio,
+        request: &OwnedSynthesisRequest,
+    ) -> AppResult<()> {
+        let audio_path = self.dir.join(format!("{:04}.wav", index + 1));
+        audio.write_wav(&audio_path).map_err(map_omnivoice_error)?;
+
+        let metadata_path = self.dir.join(format!("{:04}.json", index + 1));
+        let metadata = ChunkGenerationMetadata {
+            model_used: OMNIVOICE_MODEL_ID,
+            chunk_index: index + 1,
+            total_chunks: total,
+            line_index: segment.line_index,
+            text: &segment.text,
+            original_duration_seconds: segment.original_duration_seconds,
+            reference_audio: request.reference_audio.display().to_string(),
+            reference_text: &request.reference_text,
+            parameters: &segment.settings,
+            status: "generated",
+            audio_path: audio_path.display().to_string(),
+            error_message: None,
+        };
+        std::fs::write(metadata_path, serde_json::to_string_pretty(&metadata)?)?;
+        Ok(())
+    }
+
+    fn write_failed_chunk(
+        &self,
+        index: usize,
+        total: usize,
+        segment: &SynthesisSegmentPlan,
+        request: &OwnedSynthesisRequest,
+        error: &AppError,
+    ) -> AppResult<()> {
+        let metadata_path = self.dir.join(format!("{:04}.json", index + 1));
+        let metadata = ChunkGenerationMetadata {
+            model_used: OMNIVOICE_MODEL_ID,
+            chunk_index: index + 1,
+            total_chunks: total,
+            line_index: segment.line_index,
+            text: &segment.text,
+            original_duration_seconds: segment.original_duration_seconds,
+            reference_audio: request.reference_audio.display().to_string(),
+            reference_text: &request.reference_text,
+            parameters: &segment.settings,
+            status: "failed",
+            audio_path: String::new(),
+            error_message: Some(error.to_string()),
+        };
+        std::fs::write(metadata_path, serde_json::to_string_pretty(&metadata)?)?;
+        Ok(())
+    }
+}
+
+#[cfg(feature = "ml")]
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ChunkGenerationMetadata<'a> {
+    model_used: &'static str,
+    chunk_index: usize,
+    total_chunks: usize,
+    line_index: Option<usize>,
+    text: &'a str,
+    original_duration_seconds: Option<f32>,
+    reference_audio: String,
+    reference_text: &'a str,
+    parameters: &'a NativeSynthesisSettings,
+    status: &'static str,
+    audio_path: String,
+    error_message: Option<String>,
+}
+
+#[cfg(feature = "ml")]
+fn chunk_artifact_dir(output_path: &Path) -> PathBuf {
+    let parent = output_path.parent().unwrap_or_else(|| Path::new("."));
+    let stem = output_path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("audio");
+    parent.join("_chunks").join(stem)
 }
 
 #[cfg(feature = "ml")]
@@ -385,44 +509,76 @@ fn synthesis_segments_for_request(
     request: &OwnedSynthesisRequest,
     target_duration: Option<f32>,
 ) -> AppResult<Vec<SynthesisSegmentPlan>> {
-    Ok(whole_file_synthesis_plan(request, target_duration)
-        .into_iter()
-        .collect())
-}
-
-#[cfg(feature = "ml")]
-fn whole_file_synthesis_plan(
-    request: &OwnedSynthesisRequest,
-    target_duration: Option<f32>,
-) -> Option<SynthesisSegmentPlan> {
-    let text = whole_file_synthesis_text(request);
-    let text = text.trim();
-    (!text.is_empty()).then(|| SynthesisSegmentPlan {
-        text: text.to_string(),
-        duration_seconds: effective_duration(&request.options.native_synthesis, target_duration),
-        settings: request.options.native_synthesis.clone(),
-    })
-}
-
-#[cfg(feature = "ml")]
-fn whole_file_synthesis_text(request: &OwnedSynthesisRequest) -> String {
-    if request.line_overrides.is_empty() {
-        return request
-            .text
-            .split_whitespace()
-            .collect::<Vec<_>>()
-            .join(" ");
+    let mut segments = if request.line_overrides.is_empty() {
+        global_synthesis_segments(request)
+    } else {
+        line_override_synthesis_segments(request)
+    };
+    if segments.is_empty() && !request.text.trim().is_empty() {
+        segments = global_synthesis_segments(request);
     }
 
+    let single_segment = segments.len() == 1;
+    for segment in &mut segments {
+        segment.duration_seconds = effective_duration(
+            &segment.settings,
+            single_segment.then_some(target_duration).flatten(),
+        );
+        segment.original_duration_seconds = segment.duration_seconds.or(target_duration);
+    }
+
+    Ok(segments)
+}
+
+#[cfg(feature = "ml")]
+fn global_synthesis_segments(request: &OwnedSynthesisRequest) -> Vec<SynthesisSegmentPlan> {
+    split_text_for_quality_chunks(&whole_file_synthesis_text(request))
+        .into_iter()
+        .map(|text| SynthesisSegmentPlan {
+            text,
+            duration_seconds: None,
+            settings: request.options.native_synthesis.clone(),
+            line_index: None,
+            original_duration_seconds: None,
+        })
+        .collect()
+}
+
+#[cfg(feature = "ml")]
+fn line_override_synthesis_segments(request: &OwnedSynthesisRequest) -> Vec<SynthesisSegmentPlan> {
     let mut sorted = request
         .line_overrides
         .iter()
         .filter(|line| !line.target_text.trim().is_empty())
         .collect::<Vec<_>>();
     sorted.sort_by_key(|line| line.line_index);
+
     sorted
         .into_iter()
-        .map(|line| tagged_synthesis_text(&line.tags, line.target_text.trim()))
+        .flat_map(|line| {
+            let line_index = line.line_index;
+            let settings = line.settings.clone();
+            split_text_for_quality_chunks(&tagged_synthesis_text(
+                &line.tags,
+                line.target_text.trim(),
+            ))
+            .into_iter()
+            .map(move |text| SynthesisSegmentPlan {
+                text,
+                duration_seconds: None,
+                settings: settings.clone(),
+                line_index: Some(line_index),
+                original_duration_seconds: None,
+            })
+        })
+        .collect()
+}
+
+#[cfg(feature = "ml")]
+fn whole_file_synthesis_text(request: &OwnedSynthesisRequest) -> String {
+    request
+        .text
+        .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ")
 }
@@ -446,6 +602,110 @@ fn tagged_synthesis_text(tags: &[String], text: &str) -> String {
     format!("{} {}", missing_tags.join(" "), text)
         .trim()
         .to_string()
+}
+
+#[cfg(feature = "ml")]
+fn split_text_for_quality_chunks(text: &str) -> Vec<String> {
+    let mut remaining = normalized_synthesis_whitespace(text);
+    if remaining.is_empty() {
+        return Vec::new();
+    }
+
+    let mut chunks = Vec::new();
+    while remaining.chars().count() > QUALITY_TEXT_CHUNK_TARGET_CHARS {
+        let split_at = preferred_quality_split_index(&remaining);
+        let head = naturalized_terminal_punctuation(&remaining[..split_at]);
+        if !head.is_empty() {
+            chunks.push(head);
+        }
+        remaining = remaining[split_at..]
+            .trim_start_matches(|character: char| character.is_whitespace() || character == ',')
+            .to_string();
+        if remaining.is_empty() {
+            break;
+        }
+    }
+    if !remaining.is_empty() {
+        chunks.push(naturalized_terminal_punctuation(&remaining));
+    }
+
+    merge_short_quality_chunks(chunks)
+}
+
+#[cfg(feature = "ml")]
+fn normalized_synthesis_whitespace(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+#[cfg(feature = "ml")]
+fn preferred_quality_split_index(text: &str) -> usize {
+    let maximum = byte_index_after_char_limit(text, QUALITY_TEXT_CHUNK_TARGET_CHARS);
+    let minimum = byte_index_after_char_limit(text, QUALITY_TEXT_CHUNK_MIN_CHARS);
+    let mut sentence = None;
+    let mut phrase = None;
+    let mut whitespace = None;
+
+    for (index, character) in text.char_indices() {
+        let end = index + character.len_utf8();
+        if end > maximum {
+            break;
+        }
+        if end < minimum {
+            continue;
+        }
+        if matches!(character, '.' | '!' | '?' | '…') {
+            sentence = Some(end);
+        } else if matches!(character, ',' | ';' | ':') {
+            phrase = Some(end);
+        } else if character.is_whitespace() {
+            whitespace = Some(end);
+        }
+    }
+
+    sentence.or(phrase).or(whitespace).unwrap_or(maximum).max(1)
+}
+
+#[cfg(feature = "ml")]
+fn byte_index_after_char_limit(text: &str, limit: usize) -> usize {
+    text.char_indices()
+        .nth(limit)
+        .map(|(index, _)| index)
+        .unwrap_or(text.len())
+}
+
+#[cfg(feature = "ml")]
+fn naturalized_terminal_punctuation(text: &str) -> String {
+    let trimmed = text.trim().trim_end_matches([',', ';', ':']).trim_end();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    if trimmed.ends_with('.')
+        || trimmed.ends_with('!')
+        || trimmed.ends_with('?')
+        || trimmed.ends_with('…')
+    {
+        trimmed.to_string()
+    } else {
+        format!("{trimmed}.")
+    }
+}
+
+#[cfg(feature = "ml")]
+fn merge_short_quality_chunks(chunks: Vec<String>) -> Vec<String> {
+    let mut merged: Vec<String> = Vec::new();
+    for chunk in chunks.into_iter().filter(|chunk| !chunk.is_empty()) {
+        if let Some(previous) = merged.last_mut() {
+            let combined = normalized_synthesis_whitespace(&format!("{previous} {chunk}"));
+            if chunk.chars().count() < QUALITY_TEXT_CHUNK_MIN_CHARS
+                && combined.chars().count() <= QUALITY_TEXT_CHUNK_TARGET_CHARS
+            {
+                *previous = naturalized_terminal_punctuation(&combined);
+                continue;
+            }
+        }
+        merged.push(chunk);
+    }
+    merged
 }
 
 #[cfg(feature = "ml")]
@@ -627,10 +887,35 @@ fn concatenate_segments(segments: Vec<DecodedAudio>) -> AppResult<DecodedAudio> 
                 sample_rate, segment.sample_rate
             )));
         }
-        samples.extend(segment.samples.into_iter().map(sanitize_sample));
+        append_segment_with_crossfade(&mut samples, segment.samples, sample_rate);
     }
 
     Ok(DecodedAudio::new(samples, sample_rate))
+}
+
+#[cfg(feature = "ml")]
+fn append_segment_with_crossfade(samples: &mut Vec<f32>, mut next: Vec<f32>, sample_rate: u32) {
+    if samples.is_empty() || next.is_empty() || sample_rate == 0 {
+        samples.extend(next.into_iter().map(sanitize_sample));
+        return;
+    }
+
+    let fade_samples = ms_to_samples(SEGMENT_CROSSFADE_MS, sample_rate)
+        .min(samples.len() / 4)
+        .min(next.len() / 4);
+    if fade_samples == 0 {
+        samples.extend(next.into_iter().map(sanitize_sample));
+        return;
+    }
+
+    let start = samples.len() - fade_samples;
+    for index in 0..fade_samples {
+        let fade_in = (index + 1) as f32 / (fade_samples + 1) as f32;
+        let fade_out = 1.0 - fade_in;
+        samples[start + index] =
+            sanitize_sample(samples[start + index] * fade_out + next[index] * fade_in);
+    }
+    samples.extend(next.drain(fade_samples..).map(sanitize_sample));
 }
 
 #[cfg(feature = "ml")]
@@ -937,9 +1222,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn whole_file_synthesis_keeps_text_in_one_omnivoice_request() {
+    fn whole_file_synthesis_uses_quality_chunks() {
         let request = OwnedSynthesisRequest {
-            text: "Primeira frase. Segunda frase longa para simular um arquivo maior. Terceira frase para garantir que o texto continue inteiro sem segmentacao propria."
+            text: "Primeira frase. Segunda frase longa para simular um arquivo maior. Terceira frase para garantir que o texto continue segmentado por pontuação natural quando passa do alvo de caracteres por geração. Quarta frase para forçar a criação de outro chunk independente."
                 .to_string(),
             source_audio: PathBuf::from("source.wav"),
             reference_audio: PathBuf::from("source.wav"),
@@ -952,16 +1237,18 @@ mod tests {
 
         let segments = synthesis_segments_for_request(&request, Some(32.0)).unwrap();
 
-        assert_eq!(segments.len(), 1);
-        assert_eq!(segments[0].duration_seconds, Some(32.0));
-        assert_eq!(
-            segments[0].text,
-            "Primeira frase. Segunda frase longa para simular um arquivo maior. Terceira frase para garantir que o texto continue inteiro sem segmentacao propria."
-        );
+        assert!(segments.len() > 1);
+        assert!(segments
+            .iter()
+            .all(|segment| segment.text.chars().count() <= QUALITY_TEXT_CHUNK_TARGET_CHARS));
+        assert!(segments
+            .iter()
+            .all(|segment| segment.duration_seconds.is_none()));
+        assert_eq!(segments[0].original_duration_seconds, Some(32.0));
     }
 
     #[test]
-    fn line_overrides_keep_whole_file_generation() {
+    fn line_overrides_become_independent_segments_with_line_settings() {
         let base_settings = NativeSynthesisSettings::default();
         let line_settings = NativeSynthesisSettings {
             speed: Some(1.2),
@@ -997,10 +1284,13 @@ mod tests {
 
         let segments = synthesis_segments_for_request(&request, Some(12.0)).unwrap();
 
-        assert_eq!(segments.len(), 1);
-        assert_eq!(segments[0].duration_seconds, Some(12.0));
-        assert_eq!(segments[0].text, "[sigh] Primeira frase. Segunda frase.");
-        assert_eq!(segments[0].settings, request.options.native_synthesis);
+        assert_eq!(segments.len(), 2);
+        assert_eq!(segments[0].duration_seconds, None);
+        assert_eq!(segments[0].text, "[sigh] Primeira frase.");
+        assert_eq!(segments[0].line_index, Some(0));
+        assert_eq!(segments[0].settings.speed, Some(1.2));
+        assert_eq!(segments[1].line_index, Some(1));
+        assert_eq!(segments[1].settings, request.options.native_synthesis);
     }
 
     #[test]
