@@ -55,6 +55,25 @@ test("shows native OmniVoice tag and line property controls", async ({ page }) =
   await expect(page.getByRole("button", { name: "Regenerar resultado" })).toBeVisible();
 });
 
+test("places filtered-list dubbing action above the tag palette", async ({ page }) => {
+  await page.setViewportSize({ width: 1600, height: 960 });
+  await page.goto("/");
+
+  const listButton = page.getByRole("button", { name: /Dublar lista/u });
+  const tagPalette = page.getByRole("region", { name: "Paleta de marcadores OmniVoice" });
+
+  await expect(listButton).toBeVisible();
+  await expect(listButton).toBeDisabled();
+
+  const listButtonBox = await listButton.boundingBox();
+  const tagPaletteBox = await tagPalette.boundingBox();
+  if (!listButtonBox || !tagPaletteBox) {
+    throw new Error("Filtered-list action geometry was not available.");
+  }
+
+  expect(listButtonBox.y + listButtonBox.height).toBeLessThanOrEqual(tagPaletteBox.y);
+});
+
 test("persists right sidebar collapsed sections", async ({ page }) => {
   await page.setViewportSize({ width: 1600, height: 960 });
   await page.goto("/");
@@ -194,7 +213,7 @@ test("aligns sidebar and workspace panel intersections", async ({ page }) => {
   await page.goto("/");
 
   const metrics = await page.evaluate(() => {
-    const sidebar = document.querySelector("aside");
+    const sidebar = document.querySelector('[aria-label="Explorador do projeto"]');
     const sidebarHeader = sidebar?.firstElementChild;
     const sidebarFilter = sidebar?.querySelector("label");
     const workspace = document.querySelector("main")?.children.item(1);

@@ -1,6 +1,6 @@
 .panel {
   display: grid;
-  grid-template-rows: var(--workspace-header-block-size, 88px) auto minmax(0, 1fr) auto;
+  grid-template-rows: var(--workspace-header-block-size, 88px) auto minmax(0, 1fr) auto auto;
   min-width: 300px;
   border-right: 1px solid var(--border);
   background: var(--surface-0);
@@ -10,7 +10,8 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  min-block-size: 100%;
+  block-size: 100%;
+  min-block-size: 0;
   padding: 18px;
   border-bottom: 1px solid var(--border);
 }
@@ -110,6 +111,35 @@
 .status[data-status="failed"],
 .status[data-status="rejected"] {
   color: var(--danger);
+}
+
+.listActions {
+  border-top: 1px solid var(--border);
+  padding: 12px;
+}
+
+.listDubbingButton {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  width: 100%;
+  min-height: 38px;
+  border: 1px solid color-mix(in srgb, var(--accent) 55%, var(--border));
+  background: color-mix(in srgb, var(--accent) 18%, var(--surface-2));
+  color: var(--text);
+  cursor: pointer;
+  font-weight: 700;
+  padding: 0 14px;
+}
+
+.listDubbingButton:disabled {
+  cursor: not-allowed;
+  opacity: 0.52;
+}
+
+.spin {
+  animation: spin 900ms linear infinite;
 }
 
 .tagPalette {
@@ -213,4 +243,10 @@
 
 .tooltipArrow {
   fill: var(--surface-2);
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
 }

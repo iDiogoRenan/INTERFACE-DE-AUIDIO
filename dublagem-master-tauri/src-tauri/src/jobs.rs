@@ -264,7 +264,7 @@ async fn run_job(
             Some(&target_text),
         )?;
 
-        let output_path = request.output_dir.join(&context.file_name);
+        let output_path = audio::dubbed_output_path(&request.output_dir, &context.file_name);
         let reference_audio = request.guide_audio.as_deref().unwrap_or(input_path);
         let synthesis_hooks =
             synthesis_hooks(app.clone(), job_id, context.clone(), cancellation.clone());

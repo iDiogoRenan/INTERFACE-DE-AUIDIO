@@ -4,7 +4,11 @@ use dublagem_domain::{
     QualityReport,
 };
 use serde::{Deserialize, Serialize};
-use std::{collections::BTreeMap, fs::File, path::Path};
+use std::{
+    collections::BTreeMap,
+    fs::File,
+    path::{Path, PathBuf},
+};
 #[cfg(feature = "ml")]
 use symphonia::core::{
     audio::SampleBuffer,
@@ -92,10 +96,11 @@ pub fn scan_audio_folder(
         }
 
         let name = entry.file_name().to_string_lossy().to_string();
+        let family = audio_family_from_filename(&name);
         let status = status_for_file(&name, output_dir);
         let transcription = transcription_cache.get(&name).cloned();
         entries.push(AudioFileEntry {
-            family: audio_family_from_filename(&name),
+            family,
             metadata: get_audio_metadata(&path).ok(),
             name,
             path,
@@ -128,6 +133,12 @@ pub fn save_transcription_cache(
     let payload = serde_json::to_string_pretty(&cache)?;
     std::fs::write(path, payload)?;
     Ok(())
+}
+
+pub fn dubbed_output_path(output_dir: &Path, file_name: &str) -> PathBuf {
+    output_dir
+        .join(audio_family_from_filename(file_name))
+        .join(file_name)
 }
 
 pub fn get_audio_metadata(path: &Path) -> AppResult<AudioMetadata> {
@@ -504,7 +515,7 @@ fn quality_summary(classification: QualityClassification, issues: &[String]) -> 
 
 fn status_for_file(name: &str, output_dir: Option<&Path>) -> AudioFileStatus {
     output_dir
-        .map(|dir| dir.join(name).exists())
+        .map(|dir| dubbed_output_path(dir, name).exists())
         .filter(|exists| *exists)
         .map(|_| AudioFileStatus::Dubbed)
         .unwrap_or(AudioFileStatus::Pending)
@@ -939,7 +950,10 @@ mod tests {
         let file_name = "line_cache.wav";
 
         std::fs::write(input_dir.path().join(file_name), b"not real wav").expect("input audio");
-        std::fs::write(output_dir.path().join(file_name), b"dubbed audio").expect("output audio");
+        let output_path = dubbed_output_path(output_dir.path(), file_name);
+        std::fs::create_dir_all(output_path.parent().expect("output parent"))
+            .expect("family output dir");
+        std::fs::write(output_path, b"dubbed audio").expect("output audio");
         std::fs::write(
             output_dir.path().join(TRANSCRIPTION_CACHE_FILE),
             r#"{"line_cache.wav":{"en":"Original cached text.","pt":"Texto traduzido em cache."}}"#,
@@ -1004,6 +1018,17 @@ mod tests {
         for (filename, expected) in cases {
             assert_eq!(audio_family_from_filename(filename), expected);
         }
+    }
+
+    #[test]
+    fn builds_dubbed_output_path_inside_family_folder() {
+        let path = dubbed_output_path(
+            Path::new(r"E:\audio\saida"),
+            "unique_kliff_0090_0120_player_00000.wav",
+        );
+
+        assert!(path
+            .ends_with(Path::new("unique_kliff").join("unique_kliff_0090_0120_player_00000.wav")));
     }
 
     #[test]

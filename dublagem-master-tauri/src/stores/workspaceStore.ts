@@ -91,11 +91,16 @@ interface WorkspaceState {
   previewSelectedLine: () => Promise<void>;
   revertTranscription: () => void;
   startDubbing: () => Promise<void>;
+  startDubbingList: (paths: readonly string[]) => Promise<void>;
   cancelJob: () => Promise<void>;
   appendLog: (message: string, level?: LogEntry["level"], timestamp?: string) => void;
 }
 
 const maximumLogEntries = 200;
+
+interface StartDubbingPathsOptions {
+  includeSelectedDraft: boolean;
+}
 
 const initialConfig: AppConfig = {
   inputDir: null,
@@ -109,305 +114,62 @@ const initialConfig: AppConfig = {
   options: defaultOptions
 };
 
-export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
-  config: initialConfig,
-  files: [],
-  projectMetadata: emptyProjectMetadata(),
-  selectedPath: null,
-  selectedLineIndex: 0,
-  sourceText: "",
-  targetText: "",
-  transcriptionDrafts: {},
-  transcriptionBaselines: {},
-  submittedDubbingDrafts: {},
-  logs: [],
-  activeJobId: null,
-  currentStage: null,
-  currentStatus: "Aguardando processamento.",
-  currentFileName: null,
-  currentFileIndex: null,
-  totalFiles: null,
-  isCancelling: false,
-  lastOutputPath: null,
-  lastOutputRevision: 0,
-  linePreviewPath: null,
-  progress: 0,
-  isBusy: false,
-  load: async () => {
-    const config = await tauriClient.loadConfig();
-    const projectMetadata = await loadProjectMetadataForConfig(config);
-    set({ config, projectMetadata });
-    if (isTauriRuntime()) {
-      await registerJobListeners();
-    }
-  },
-  saveConfig: async (config) => {
-    const saved = await tauriClient.saveConfig(config);
-    const projectMetadata = await loadProjectMetadataForConfig(saved);
-    set({ config: saved, projectMetadata });
-  },
-  scan: async () => {
-    const { config, selectedPath } = get();
-    if (!config.inputDir) {
-      get().appendLog("Selecione a pasta de origem antes de escanear.", "warning");
-      return;
-    }
-    const [files, loadedProjectMetadata] = await Promise.all([
-      tauriClient.scanAudioFolder(config.inputDir, config.outputDir),
-      loadProjectMetadataForConfig(config)
-    ]);
-    const nextSelectedPath = files.some((file) => file.path === selectedPath)
-      ? selectedPath
-      : (files[0]?.path ?? null);
-    const fileTranscriptions = transcriptionsFromFiles(files);
-    const projectMetadata = ensureProjectBaselineMetadata(
-      loadedProjectMetadata,
-      files,
-      fileTranscriptions
-    );
-    const metadataTranscriptions = transcriptionsFromProjectMetadata(projectMetadata, files);
-    const metadataBaselines = transcriptionBaselinesFromProjectMetadata(projectMetadata, files);
-    const transcriptionDrafts = {
-      ...fileTranscriptions,
-      ...metadataTranscriptions,
-      ...get().transcriptionDrafts
-    };
-    const transcriptionBaselines = {
-      ...fileTranscriptions,
-      ...metadataBaselines
-    };
-    if (projectMetadata !== loadedProjectMetadata) {
-      queueProjectMetadataSave(config.outputDir, projectMetadata);
-    }
-    set({
-      files,
-      projectMetadata,
-      selectedPath: nextSelectedPath,
-      selectedLineIndex: 0,
-      lastOutputPath: outputPathForSelection(nextSelectedPath, files, config),
-      lastOutputRevision: stateNextOutputRevision(get()),
-      transcriptionDrafts,
-      transcriptionBaselines,
-      ...draftStateForPath(nextSelectedPath, transcriptionDrafts, files)
-    });
-  },
-  selectFile: (path) => {
-    set((state) => {
-      const transcriptionBaselines = baselineStateForPath(
-        path,
-        state.transcriptionBaselines,
-        state.files
-      );
-      return {
-        selectedPath: path,
-        selectedLineIndex: 0,
-        linePreviewPath: null,
-        lastOutputPath: outputPathForSelection(path, state.files, state.config),
-        lastOutputRevision: state.lastOutputRevision + 1,
-        transcriptionBaselines,
-        ...draftStateForPath(path, state.transcriptionDrafts, state.files)
-      };
-    });
-  },
-  setSelectedLineIndex: (lineIndex) => {
-    set({ selectedLineIndex: Math.max(0, lineIndex) });
-  },
-  setSourceText: (sourceText) => {
-    set((state) => {
-      const transcriptionDrafts = upsertDraft(state.transcriptionDrafts, state.selectedPath, {
-        sourceText
-      });
-      const projectMetadata = upsertProjectFileDraft(state, { sourceText });
-      queueProjectMetadataSave(state.config.outputDir, projectMetadata);
-      return { sourceText, transcriptionDrafts, projectMetadata };
-    });
-  },
-  setTargetText: (targetText) => {
-    set((state) => {
-      const inlineTagsByLine = tagsByLine(targetText);
-      const sanitizedTargetText = removeNativeTagsFromText(targetText);
-      const transcriptionDrafts = upsertDraft(state.transcriptionDrafts, state.selectedPath, {
-        targetText: sanitizedTargetText
-      });
-      const projectMetadata = syncProjectTargetText(
-        upsertProjectFileDraft(state, { targetText: sanitizedTargetText }),
-        state,
-        sanitizedTargetText,
-        inlineTagsByLine
-      );
-      queueProjectMetadataSave(state.config.outputDir, projectMetadata);
-      return { targetText: sanitizedTargetText, transcriptionDrafts, projectMetadata };
-    });
-  },
-  insertNativeTag: (tag) => {
-    if (!nativeTagSet.has(tag)) {
-      get().appendLog(`Marcador OmniVoice não suportado: ${tag}`, "warning");
-      return;
-    }
-
-    set((state) => {
-      const current = selectedLineMetadata(state);
-      const projectMetadata = upsertSelectedLineMetadata(state, {
-        tags: mergeNativeTags(current.tags, [tag])
-      });
-      queueProjectMetadataSave(state.config.outputDir, projectMetadata);
-      return { projectMetadata };
-    });
-  },
-  removeNativeTag: (tag) => {
-    set((state) => {
-      const current = selectedLineMetadata(state);
-      const projectMetadata = upsertSelectedLineMetadata(state, {
-        tags: current.tags.filter((currentTag) => currentTag !== tag)
-      });
-      queueProjectMetadataSave(state.config.outputDir, projectMetadata);
-      return { projectMetadata };
-    });
-  },
-  updateSelectedLineMetadata: (patch) => {
-    set((state) => {
-      const projectMetadata = upsertSelectedLineMetadata(state, patch);
-      queueProjectMetadataSave(state.config.outputDir, projectMetadata);
-      return { projectMetadata };
-    });
-  },
-  updateSelectedLineSettings: (patch) => {
-    set((state) => {
-      const current = selectedLineMetadata(state);
-      const projectMetadata = upsertSelectedLineMetadata(state, {
-        settings: normalizeNativeSynthesisSettings({ ...current.settings, ...patch })
-      });
-      queueProjectMetadataSave(state.config.outputDir, projectMetadata);
-      return { projectMetadata };
-    });
-  },
-  saveSelectedLineSettingsAsDefault: async () => {
-    const state = get();
-    const settings = normalizeNativeSynthesisSettings(selectedLineMetadata(state).settings);
-    const nextConfig = configWithActiveNativeSynthesis(state.config, settings);
-    try {
-      const saved = await tauriClient.saveConfig(nextConfig);
-      set({ config: saved });
-      get().appendLog("Ajustes de síntese salvos como padrão global.", "success");
-    } catch (unknownError: unknown) {
-      get().appendLog(errorMessage(unknownError), "error");
-    }
-  },
-  resetSelectedLineSettingsToDefault: async () => {
-    const defaultSettings = normalizeNativeSynthesisSettings(defaultOptions.nativeSynthesis);
-    const state = get();
-    const nextConfig = configWithActiveNativeSynthesis(state.config, defaultSettings);
-    set((current) => {
-      const projectMetadata = upsertSelectedLineMetadata(current, {
-        characterId: null,
-        settings: defaultSettings
-      });
-      queueProjectMetadataSave(current.config.outputDir, projectMetadata);
-      return {
-        config: nextConfig,
-        projectMetadata
-      };
-    });
-
-    try {
-      const saved = await tauriClient.saveConfig(nextConfig);
-      set({ config: saved });
-      get().appendLog("Padrões de síntese restaurados.", "success");
-    } catch (unknownError: unknown) {
-      get().appendLog(errorMessage(unknownError), "error");
-    }
-  },
-  previewSelectedLine: async () => {
-    const state = get();
-    if (!state.selectedPath) {
-      state.appendLog("Selecione uma linha antes da prévia.", "warning");
-      return;
-    }
-    const text = splitLines(state.targetText)[state.selectedLineIndex]?.trim() ?? "";
-    if (text.length === 0) {
-      state.appendLog("Linha selecionada sem texto para prévia.", "warning");
-      return;
-    }
-    const lineMetadata = selectedLineMetadata(state);
-    try {
-      const linePreviewPath = await tauriClient.previewSynthesisLine({
-        sourceAudio: state.selectedPath,
-        text,
-        tags: lineMetadata.tags,
-        settings: normalizeNativeSynthesisSettings(lineMetadata.settings)
-      });
-      set((current) => {
-        const lastOutputRevision = current.lastOutputRevision + 1;
-        return {
-          linePreviewPath,
-          lastOutputPath: linePreviewPath,
-          lastOutputRevision
-        };
-      });
-      state.appendLog("Prévia da linha gerada.", "success");
-    } catch (unknownError: unknown) {
-      state.appendLog(errorMessage(unknownError), "error");
-    }
-  },
-  revertTranscription: () => {
-    const { selectedPath, transcriptionBaselines } = get();
-    if (!selectedPath) {
-      return;
-    }
-
-    const baseline = transcriptionBaselines[selectedPath];
-    if (!baseline) {
-      return;
-    }
-
-    set((state) => {
-      const projectMetadata = upsertProjectFileDraft(state, baseline);
-      queueProjectMetadataSave(state.config.outputDir, projectMetadata);
-      return {
-        sourceText: baseline.sourceText,
-        targetText: baseline.targetText,
-        projectMetadata,
-        transcriptionDrafts: {
-          ...state.transcriptionDrafts,
-          [selectedPath]: baseline
-        }
-      };
-    });
-  },
-  startDubbing: async () => {
+export const useWorkspaceStore = create<WorkspaceState>((set, get) => {
+  async function startDubbingPaths(
+    inputPaths: readonly string[],
+    { includeSelectedDraft }: StartDubbingPathsOptions
+  ): Promise<void> {
     if (get().isBusy) {
       get().appendLog("Aguarde o processamento atual terminar antes de iniciar outro.", "warning");
       return;
     }
+
+    const requestedInputPaths = Array.from(
+      new Set(inputPaths.filter((path) => path.trim().length > 0))
+    );
     const { config, selectedPath, sourceText, targetText, files, projectMetadata } = get();
-    if (!selectedPath || !config.outputDir) {
+    if (requestedInputPaths.length === 0 || !config.outputDir) {
+      get().appendLog("Selecione arquivos visíveis e uma pasta de destino.", "warning");
+      return;
+    }
+    if (includeSelectedDraft && !selectedPath) {
       get().appendLog("Selecione um arquivo e uma pasta de destino.", "warning");
       return;
     }
 
-    const submittedDraft = submittedDraftFromEditor(sourceText, targetText);
+    const submittedDraft =
+      includeSelectedDraft && selectedPath
+        ? submittedDraftFromEditor(sourceText, targetText)
+        : null;
     set((state) => ({
       isBusy: true,
       isCancelling: false,
       progress: 0,
       currentStage: "queued",
-      currentStatus: "Enviando processamento para o serviço local.",
+      currentStatus:
+        requestedInputPaths.length === 1
+          ? "Enviando processamento para o serviço local."
+          : `Enviando ${String(requestedInputPaths.length)} arquivos para o serviço local.`,
       currentFileName: null,
       currentFileIndex: null,
-      totalFiles: null,
+      totalFiles: requestedInputPaths.length,
       lastOutputPath: null,
       lastOutputRevision: state.lastOutputRevision + 1,
-      submittedDubbingDrafts: submittedDraft
-        ? {
-            ...state.submittedDubbingDrafts,
-            [selectedPath]: submittedDraft
-          }
-        : removeSubmittedDraft(state.submittedDubbingDrafts, selectedPath)
+      submittedDubbingDrafts:
+        includeSelectedDraft && selectedPath
+          ? submittedDraft
+            ? {
+                ...state.submittedDubbingDrafts,
+                [selectedPath]: submittedDraft
+              }
+            : removeSubmittedDraft(state.submittedDubbingDrafts, selectedPath)
+          : state.submittedDubbingDrafts
     }));
+
     try {
       const nativeSynthesis = activeNativeSynthesisSettings(config);
       const jobId = await tauriClient.startDubbingJob({
-        inputPaths: [selectedPath],
+        inputPaths: requestedInputPaths,
         outputDir: config.outputDir,
         guideAudio: config.guideAudio,
         modelDir: config.modelDir,
@@ -415,15 +177,18 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
           ...config.options,
           nativeSynthesis
         },
-        customSourceText: sourceText.trim().length > 0 ? sourceText : null,
-        customTargetText: targetText.trim().length > 0 ? targetText : null,
-        lineOverrides: buildLineOverrides({
-          selectedPath,
-          files,
-          projectMetadata,
-          targetText,
-          baseSettings: nativeSynthesis
-        })
+        customSourceText: includeSelectedDraft && sourceText.trim().length > 0 ? sourceText : null,
+        customTargetText: includeSelectedDraft && targetText.trim().length > 0 ? targetText : null,
+        lineOverrides:
+          includeSelectedDraft && selectedPath
+            ? buildLineOverrides({
+                selectedPath,
+                files,
+                projectMetadata,
+                targetText,
+                baseSettings: nativeSynthesis
+              })
+            : []
       });
       if (get().isBusy) {
         set({ activeJobId: jobId });
@@ -436,36 +201,317 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
         isCancelling: false,
         progress: 0,
         currentStage: "failed",
-        submittedDubbingDrafts: removeSubmittedDraft(get().submittedDubbingDrafts, selectedPath)
+        submittedDubbingDrafts:
+          includeSelectedDraft && selectedPath
+            ? removeSubmittedDraft(get().submittedDubbingDrafts, selectedPath)
+            : get().submittedDubbingDrafts
       });
     }
-  },
-  cancelJob: async () => {
-    const { activeJobId } = get();
-    if (!activeJobId) {
-      return;
-    }
-    set({
-      isCancelling: true,
-      currentStage: "cancelling",
-      currentStatus: "Cancelamento solicitado. Aguardando o serviço local encerrar a etapa atual."
-    });
-    try {
-      await tauriClient.cancelJob(activeJobId);
-    } catch (unknownError: unknown) {
-      get().appendLog(errorMessage(unknownError), "error");
-      set({ isCancelling: false });
-    }
-  },
-  appendLog: (message, level = "info", timestamp = new Date().toISOString()) => {
-    set((state) => ({
-      logs: sortLogsByTimestamp([
-        { id: crypto.randomUUID(), level, timestamp, message },
-        ...state.logs
-      ]).slice(0, maximumLogEntries)
-    }));
   }
-}));
+
+  return {
+    config: initialConfig,
+    files: [],
+    projectMetadata: emptyProjectMetadata(),
+    selectedPath: null,
+    selectedLineIndex: 0,
+    sourceText: "",
+    targetText: "",
+    transcriptionDrafts: {},
+    transcriptionBaselines: {},
+    submittedDubbingDrafts: {},
+    logs: [],
+    activeJobId: null,
+    currentStage: null,
+    currentStatus: "Aguardando processamento.",
+    currentFileName: null,
+    currentFileIndex: null,
+    totalFiles: null,
+    isCancelling: false,
+    lastOutputPath: null,
+    lastOutputRevision: 0,
+    linePreviewPath: null,
+    progress: 0,
+    isBusy: false,
+    load: async () => {
+      const config = await tauriClient.loadConfig();
+      const projectMetadata = await loadProjectMetadataForConfig(config);
+      set({ config, projectMetadata });
+      if (isTauriRuntime()) {
+        await registerJobListeners();
+      }
+    },
+    saveConfig: async (config) => {
+      const saved = await tauriClient.saveConfig(config);
+      const projectMetadata = await loadProjectMetadataForConfig(saved);
+      set({ config: saved, projectMetadata });
+    },
+    scan: async () => {
+      const { config, selectedPath } = get();
+      if (!config.inputDir) {
+        get().appendLog("Selecione a pasta de origem antes de escanear.", "warning");
+        return;
+      }
+      const [files, loadedProjectMetadata] = await Promise.all([
+        tauriClient.scanAudioFolder(config.inputDir, config.outputDir),
+        loadProjectMetadataForConfig(config)
+      ]);
+      const nextSelectedPath = files.some((file) => file.path === selectedPath)
+        ? selectedPath
+        : (files[0]?.path ?? null);
+      const fileTranscriptions = transcriptionsFromFiles(files);
+      const projectMetadata = ensureProjectBaselineMetadata(
+        loadedProjectMetadata,
+        files,
+        fileTranscriptions
+      );
+      const metadataTranscriptions = transcriptionsFromProjectMetadata(projectMetadata, files);
+      const metadataBaselines = transcriptionBaselinesFromProjectMetadata(projectMetadata, files);
+      const transcriptionDrafts = {
+        ...fileTranscriptions,
+        ...metadataTranscriptions,
+        ...get().transcriptionDrafts
+      };
+      const transcriptionBaselines = {
+        ...fileTranscriptions,
+        ...metadataBaselines
+      };
+      if (projectMetadata !== loadedProjectMetadata) {
+        queueProjectMetadataSave(config.outputDir, projectMetadata);
+      }
+      set({
+        files,
+        projectMetadata,
+        selectedPath: nextSelectedPath,
+        selectedLineIndex: 0,
+        lastOutputPath: outputPathForSelection(nextSelectedPath, files, config),
+        lastOutputRevision: stateNextOutputRevision(get()),
+        transcriptionDrafts,
+        transcriptionBaselines,
+        ...draftStateForPath(nextSelectedPath, transcriptionDrafts, files)
+      });
+    },
+    selectFile: (path) => {
+      set((state) => {
+        const transcriptionBaselines = baselineStateForPath(
+          path,
+          state.transcriptionBaselines,
+          state.files
+        );
+        return {
+          selectedPath: path,
+          selectedLineIndex: 0,
+          linePreviewPath: null,
+          lastOutputPath: outputPathForSelection(path, state.files, state.config),
+          lastOutputRevision: state.lastOutputRevision + 1,
+          transcriptionBaselines,
+          ...draftStateForPath(path, state.transcriptionDrafts, state.files)
+        };
+      });
+    },
+    setSelectedLineIndex: (lineIndex) => {
+      set({ selectedLineIndex: Math.max(0, lineIndex) });
+    },
+    setSourceText: (sourceText) => {
+      set((state) => {
+        const transcriptionDrafts = upsertDraft(state.transcriptionDrafts, state.selectedPath, {
+          sourceText
+        });
+        const projectMetadata = upsertProjectFileDraft(state, { sourceText });
+        queueProjectMetadataSave(state.config.outputDir, projectMetadata);
+        return { sourceText, transcriptionDrafts, projectMetadata };
+      });
+    },
+    setTargetText: (targetText) => {
+      set((state) => {
+        const inlineTagsByLine = tagsByLine(targetText);
+        const sanitizedTargetText = removeNativeTagsFromText(targetText);
+        const transcriptionDrafts = upsertDraft(state.transcriptionDrafts, state.selectedPath, {
+          targetText: sanitizedTargetText
+        });
+        const projectMetadata = syncProjectTargetText(
+          upsertProjectFileDraft(state, { targetText: sanitizedTargetText }),
+          state,
+          sanitizedTargetText,
+          inlineTagsByLine
+        );
+        queueProjectMetadataSave(state.config.outputDir, projectMetadata);
+        return { targetText: sanitizedTargetText, transcriptionDrafts, projectMetadata };
+      });
+    },
+    insertNativeTag: (tag) => {
+      if (!nativeTagSet.has(tag)) {
+        get().appendLog(`Marcador OmniVoice não suportado: ${tag}`, "warning");
+        return;
+      }
+
+      set((state) => {
+        const current = selectedLineMetadata(state);
+        const projectMetadata = upsertSelectedLineMetadata(state, {
+          tags: mergeNativeTags(current.tags, [tag])
+        });
+        queueProjectMetadataSave(state.config.outputDir, projectMetadata);
+        return { projectMetadata };
+      });
+    },
+    removeNativeTag: (tag) => {
+      set((state) => {
+        const current = selectedLineMetadata(state);
+        const projectMetadata = upsertSelectedLineMetadata(state, {
+          tags: current.tags.filter((currentTag) => currentTag !== tag)
+        });
+        queueProjectMetadataSave(state.config.outputDir, projectMetadata);
+        return { projectMetadata };
+      });
+    },
+    updateSelectedLineMetadata: (patch) => {
+      set((state) => {
+        const projectMetadata = upsertSelectedLineMetadata(state, patch);
+        queueProjectMetadataSave(state.config.outputDir, projectMetadata);
+        return { projectMetadata };
+      });
+    },
+    updateSelectedLineSettings: (patch) => {
+      set((state) => {
+        const current = selectedLineMetadata(state);
+        const projectMetadata = upsertSelectedLineMetadata(state, {
+          settings: normalizeNativeSynthesisSettings({ ...current.settings, ...patch })
+        });
+        queueProjectMetadataSave(state.config.outputDir, projectMetadata);
+        return { projectMetadata };
+      });
+    },
+    saveSelectedLineSettingsAsDefault: async () => {
+      const state = get();
+      const settings = normalizeNativeSynthesisSettings(selectedLineMetadata(state).settings);
+      const nextConfig = configWithActiveNativeSynthesis(state.config, settings);
+      try {
+        const saved = await tauriClient.saveConfig(nextConfig);
+        set({ config: saved });
+        get().appendLog("Ajustes de síntese salvos como padrão global.", "success");
+      } catch (unknownError: unknown) {
+        get().appendLog(errorMessage(unknownError), "error");
+      }
+    },
+    resetSelectedLineSettingsToDefault: async () => {
+      const defaultSettings = normalizeNativeSynthesisSettings(defaultOptions.nativeSynthesis);
+      const state = get();
+      const nextConfig = configWithActiveNativeSynthesis(state.config, defaultSettings);
+      set((current) => {
+        const projectMetadata = upsertSelectedLineMetadata(current, {
+          characterId: null,
+          settings: defaultSettings
+        });
+        queueProjectMetadataSave(current.config.outputDir, projectMetadata);
+        return {
+          config: nextConfig,
+          projectMetadata
+        };
+      });
+
+      try {
+        const saved = await tauriClient.saveConfig(nextConfig);
+        set({ config: saved });
+        get().appendLog("Padrões de síntese restaurados.", "success");
+      } catch (unknownError: unknown) {
+        get().appendLog(errorMessage(unknownError), "error");
+      }
+    },
+    previewSelectedLine: async () => {
+      const state = get();
+      if (!state.selectedPath) {
+        state.appendLog("Selecione uma linha antes da prévia.", "warning");
+        return;
+      }
+      const text = splitLines(state.targetText)[state.selectedLineIndex]?.trim() ?? "";
+      if (text.length === 0) {
+        state.appendLog("Linha selecionada sem texto para prévia.", "warning");
+        return;
+      }
+      const lineMetadata = selectedLineMetadata(state);
+      try {
+        const linePreviewPath = await tauriClient.previewSynthesisLine({
+          sourceAudio: state.selectedPath,
+          text,
+          tags: lineMetadata.tags,
+          settings: normalizeNativeSynthesisSettings(lineMetadata.settings)
+        });
+        set((current) => {
+          const lastOutputRevision = current.lastOutputRevision + 1;
+          return {
+            linePreviewPath,
+            lastOutputPath: linePreviewPath,
+            lastOutputRevision
+          };
+        });
+        state.appendLog("Prévia da linha gerada.", "success");
+      } catch (unknownError: unknown) {
+        state.appendLog(errorMessage(unknownError), "error");
+      }
+    },
+    revertTranscription: () => {
+      const { selectedPath, transcriptionBaselines } = get();
+      if (!selectedPath) {
+        return;
+      }
+
+      const baseline = transcriptionBaselines[selectedPath];
+      if (!baseline) {
+        return;
+      }
+
+      set((state) => {
+        const projectMetadata = upsertProjectFileDraft(state, baseline);
+        queueProjectMetadataSave(state.config.outputDir, projectMetadata);
+        return {
+          sourceText: baseline.sourceText,
+          targetText: baseline.targetText,
+          projectMetadata,
+          transcriptionDrafts: {
+            ...state.transcriptionDrafts,
+            [selectedPath]: baseline
+          }
+        };
+      });
+    },
+    startDubbing: async () => {
+      const { config, selectedPath } = get();
+      if (!selectedPath || !config.outputDir) {
+        get().appendLog("Selecione um arquivo e uma pasta de destino.", "warning");
+        return;
+      }
+      await startDubbingPaths([selectedPath], { includeSelectedDraft: true });
+    },
+    startDubbingList: async (paths) => {
+      await startDubbingPaths(paths, { includeSelectedDraft: false });
+    },
+    cancelJob: async () => {
+      const { activeJobId } = get();
+      if (!activeJobId) {
+        return;
+      }
+      set({
+        isCancelling: true,
+        currentStage: "cancelling",
+        currentStatus: "Cancelamento solicitado. Aguardando o serviço local encerrar a etapa atual."
+      });
+      try {
+        await tauriClient.cancelJob(activeJobId);
+      } catch (unknownError: unknown) {
+        get().appendLog(errorMessage(unknownError), "error");
+        set({ isCancelling: false });
+      }
+    },
+    appendLog: (message, level = "info", timestamp = new Date().toISOString()) => {
+      set((state) => ({
+        logs: sortLogsByTimestamp([
+          { id: crypto.randomUUID(), level, timestamp, message },
+          ...state.logs
+        ]).slice(0, maximumLogEntries)
+      }));
+    }
+  };
+});
 
 let listenersRegistered = false;
 let metadataSaveTimer: ReturnType<typeof setTimeout> | null = null;
@@ -710,7 +756,14 @@ function outputPathForSelection(
     return null;
   }
 
-  return joinNativePath(config.outputDir, selectedFile.name);
+  return outputPathForAudioFile(config.outputDir, selectedFile);
+}
+
+function outputPathForAudioFile(
+  outputDir: string,
+  file: Pick<AudioFileEntry, "family" | "name">
+): string {
+  return joinNativePath(joinNativePath(outputDir, file.family), file.name);
 }
 
 function joinNativePath(directory: string, fileName: string): string {

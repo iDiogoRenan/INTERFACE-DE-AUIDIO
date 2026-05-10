@@ -1,5 +1,14 @@
 import * as Tooltip from "@radix-ui/react-tooltip";
-import { ChevronDown, ChevronRight, FileAudio, Filter, Plus, RefreshCw } from "lucide-react";
+import {
+  ChevronDown,
+  ChevronRight,
+  FileAudio,
+  Filter,
+  ListChecks,
+  Loader2,
+  Plus,
+  RefreshCw
+} from "lucide-react";
 import { useEffect, useMemo, useState, type Dispatch, type SetStateAction } from "react";
 import { nativeTagDescriptions, nativeTagGroups } from "../../shared/omnivoice/nativeControls";
 import { useWorkspaceStore } from "../../stores/workspaceStore";
@@ -12,7 +21,9 @@ export function ProjectExplorer() {
   const selectedPath = useWorkspaceStore((state) => state.selectedPath);
   const selectFile = useWorkspaceStore((state) => state.selectFile);
   const scan = useWorkspaceStore((state) => state.scan);
+  const startDubbingList = useWorkspaceStore((state) => state.startDubbingList);
   const insertNativeTag = useWorkspaceStore((state) => state.insertNativeTag);
+  const isBusy = useWorkspaceStore((state) => state.isBusy);
   const [familyFilter, setFamilyFilter] = useState<string>("all");
   const [isTagPaletteOpen, setIsTagPaletteOpen] = usePersistentTagPaletteOpenState();
 
@@ -22,9 +33,10 @@ export function ProjectExplorer() {
   );
   const visibleFiles =
     familyFilter === "all" ? files : files.filter((file) => file.family === familyFilter);
+  const visibleFilePaths = visibleFiles.map((file) => file.path);
 
   return (
-    <aside className={styles.panel}>
+    <aside className={styles.panel} aria-label="Explorador do projeto">
       <div className={styles.header}>
         <div>
           <span className={styles.kicker}>Projeto</span>
@@ -75,6 +87,20 @@ export function ProjectExplorer() {
             </span>
           </button>
         ))}
+      </section>
+
+      <section className={styles.listActions} aria-label="Ações da lista filtrada">
+        <button
+          type="button"
+          className={styles.listDubbingButton}
+          disabled={isBusy || visibleFilePaths.length === 0}
+          onClick={() => {
+            void startDubbingList(visibleFilePaths);
+          }}
+        >
+          {isBusy ? <Loader2 size={15} className={styles.spin} /> : <ListChecks size={15} />}
+          {isBusy ? "Processando" : "Dublar lista"}
+        </button>
       </section>
 
       <section className={styles.tagPalette} aria-label="Paleta de marcadores OmniVoice">

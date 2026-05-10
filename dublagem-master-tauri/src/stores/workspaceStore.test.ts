@@ -21,7 +21,8 @@ const clientMocks = vi.hoisted(() => ({
   previewSynthesisLine: vi.fn<(request: SynthesisLinePreviewRequest) => Promise<string>>(() =>
     Promise.resolve("E:\\audio\\preview.wav")
   ),
-  scanAudioFolder: vi.fn<(inputDir: string, outputDir: string) => Promise<AudioFileEntry[]>>(),
+  scanAudioFolder:
+    vi.fn<(inputDir: string, outputDir: string | null) => Promise<AudioFileEntry[]>>(),
   saveConfig: vi.fn<(config: AppConfig) => Promise<AppConfig>>((nextConfig) =>
     Promise.resolve(nextConfig)
   ),
@@ -142,7 +143,7 @@ describe("workspaceStore transcription hydration", () => {
 
     useWorkspaceStore.getState().selectFile(dubbedFile.path);
 
-    expect(useWorkspaceStore.getState().lastOutputPath).toBe("E:\\audio\\saida\\line_c.wav");
+    expect(useWorkspaceStore.getState().lastOutputPath).toBe("E:\\audio\\saida\\line\\line_c.wav");
 
     useWorkspaceStore.getState().selectFile(fileB.path);
 
@@ -213,6 +214,23 @@ describe("workspaceStore transcription hydration", () => {
     );
   });
 
+  it("dubs the visible list without reusing the selected file editor draft", async () => {
+    useWorkspaceStore.getState().setSourceText("manual source for selected only");
+    useWorkspaceStore.getState().setTargetText("manual target for selected only");
+
+    await useWorkspaceStore.getState().startDubbingList([fileA.path, fileB.path, fileA.path]);
+
+    expect(clientMocks.startDubbingJob).toHaveBeenCalledWith(
+      expect.objectContaining({
+        inputPaths: [fileA.path, fileB.path],
+        customSourceText: null,
+        customTargetText: null,
+        lineOverrides: []
+      })
+    );
+    expect(useWorkspaceStore.getState().totalFiles).toBe(2);
+  });
+
   it("keeps submitted manual text when redubbing events replay cached transcription", async () => {
     useWorkspaceStore.setState({ files: [cachedDubbedFile], selectedPath: null });
     useWorkspaceStore.getState().selectFile(cachedDubbedFile.path);
@@ -237,7 +255,7 @@ describe("workspaceStore transcription hydration", () => {
         kind: "file_complete",
         stage: "file_complete",
         filePath: cachedDubbedFile.path,
-        outputPath: "E:\\audio\\saida\\line_d.wav",
+        outputPath: "E:\\audio\\saida\\line\\line_d.wav",
         sourceText: "Hello from cache.",
         targetText: "Ola do cache."
       })
@@ -460,7 +478,7 @@ describe("workspaceStore transcription hydration", () => {
         kind: "file_complete",
         stage: "file_complete",
         filePath: cachedDubbedFile.path,
-        outputPath: "E:\\audio\\saida\\line_d.wav",
+        outputPath: "E:\\audio\\saida\\line\\line_d.wav",
         sourceText: "Hello from cache.",
         targetText: "Texto editado para redublagem."
       })
