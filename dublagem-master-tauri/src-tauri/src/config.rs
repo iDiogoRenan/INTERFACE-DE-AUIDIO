@@ -57,5 +57,6 @@ mod tests {
         assert_eq!(options.native_synthesis.num_step, 48);
         assert_eq!(options.native_synthesis.position_temperature, 1.0);
         assert!(options.native_synthesis.denoise);
+        assert!(!options.native_synthesis.match_source_loudness);
     }
 }

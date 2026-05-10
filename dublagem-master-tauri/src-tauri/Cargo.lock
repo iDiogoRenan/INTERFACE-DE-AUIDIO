@@ -1260,6 +1260,7 @@ dependencies = [
  "chrono",
  "directories",
  "dublagem-domain",
+ "hound",
  "omnivoice-infer",
  "reqwest 0.12.28",
  "serde",

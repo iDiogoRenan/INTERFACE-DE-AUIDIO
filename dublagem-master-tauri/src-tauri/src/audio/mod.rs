@@ -19,6 +19,14 @@ const TRANSCRIPTION_CACHE_FILE: &str = "transcricoes_cache.json";
 const FAMILY_MARKER_TOKENS: &[&str] = &["questdialog", "narration", "player"];
 #[cfg(feature = "ml")]
 const WHISPER_SAMPLE_RATE: u32 = 16_000;
+#[cfg(feature = "ml")]
+pub const TTS_SAMPLE_RATE: u32 = 24_000;
+#[cfg(feature = "ml")]
+pub const SHORT_REFERENCE_TARGET_SECONDS: f32 = 8.0;
+#[cfg(feature = "ml")]
+pub const SHORT_REFERENCE_MIN_SECONDS: f32 = 3.0;
+#[cfg(feature = "ml")]
+pub const SHORT_REFERENCE_MAX_SECONDS: f32 = 10.0;
 
 #[cfg(feature = "ml")]
 pub struct DecodedAudio {
@@ -42,6 +50,16 @@ impl AudioTimingProfile {
     pub fn target_voice_duration_seconds(self) -> Option<f32> {
         (self.voice_ms > 0).then_some(self.voice_ms as f32 / 1000.0)
     }
+}
+
+#[cfg(feature = "ml")]
+#[derive(Debug, Clone)]
+pub struct ShortReferenceWaveform {
+    pub samples: Vec<f32>,
+    pub sample_rate: u32,
+    pub duration_seconds: f32,
+    pub source_duration_seconds: f32,
+    pub start_seconds: f32,
 }
 
 pub fn is_audio_file(path: &Path) -> bool {
@@ -203,7 +221,8 @@ pub fn read_wav_mono_f32(path: &Path) -> AppResult<Vec<f32>> {
             metadata.format
         )));
     }
-    read_wav_samples_fallback(path)
+    let decoded = read_wav_interleaved_f32(path)?;
+    Ok(mix_interleaved_to_mono(&decoded.samples, decoded.channels))
 }
 
 #[cfg(feature = "ml")]
@@ -217,6 +236,72 @@ pub fn read_audio_mono_16khz_f32(path: &Path) -> AppResult<Vec<f32>> {
         decoded.sample_rate,
         WHISPER_SAMPLE_RATE,
     ))
+}
+
+#[cfg(feature = "ml")]
+pub fn short_reference_waveform(path: &Path) -> AppResult<ShortReferenceWaveform> {
+    let decoded = decode_audio_mono_f32(path)?;
+    let samples = if decoded.sample_rate == TTS_SAMPLE_RATE {
+        decoded.samples
+    } else {
+        resample_linear_mono(&decoded.samples, decoded.sample_rate, TTS_SAMPLE_RATE)
+    }
+    .into_iter()
+    .map(sanitize_wav_sample)
+    .collect::<Vec<_>>();
+
+    if samples.is_empty() {
+        return Err(AppError::UnsupportedCodec(
+            "audio de referencia vazio".to_string(),
+        ));
+    }
+
+    let target_samples = seconds_to_sample_count(SHORT_REFERENCE_TARGET_SECONDS, TTS_SAMPLE_RATE);
+    let min_samples = seconds_to_sample_count(SHORT_REFERENCE_MIN_SECONDS, TTS_SAMPLE_RATE);
+    let max_samples = seconds_to_sample_count(SHORT_REFERENCE_MAX_SECONDS, TTS_SAMPLE_RATE);
+    let blocks = active_sample_blocks(&samples, TTS_SAMPLE_RATE, 40.0);
+    let start = blocks.first().map(|range| range.start).unwrap_or(0);
+    let end = start.saturating_add(target_samples).min(samples.len());
+    let mut reference = samples[start..end].to_vec();
+
+    if reference.len() < min_samples && !blocks.is_empty() {
+        reference = concatenate_active_blocks(&samples, &blocks, target_samples);
+    }
+    if reference.is_empty() {
+        reference = samples.iter().copied().take(target_samples).collect();
+    }
+    if reference.len() > max_samples {
+        reference.truncate(max_samples);
+    }
+    if reference.is_empty() {
+        return Err(AppError::UnsupportedCodec(
+            "nao foi possivel extrair referencia curta valida".to_string(),
+        ));
+    }
+
+    Ok(ShortReferenceWaveform {
+        duration_seconds: reference.len() as f32 / TTS_SAMPLE_RATE as f32,
+        source_duration_seconds: samples.len() as f32 / TTS_SAMPLE_RATE as f32,
+        start_seconds: start as f32 / TTS_SAMPLE_RATE as f32,
+        samples: reference,
+        sample_rate: TTS_SAMPLE_RATE,
+    })
+}
+
+#[cfg(feature = "ml")]
+pub fn write_short_reference_wav(
+    source_path: &Path,
+    output_path: &Path,
+) -> AppResult<ShortReferenceWaveform> {
+    let reference = short_reference_waveform(source_path)?;
+    if let Some(parent) = output_path
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+    {
+        std::fs::create_dir_all(parent)?;
+    }
+    write_pcm16_wav_mono(output_path, reference.sample_rate, &reference.samples)?;
+    Ok(reference)
 }
 
 #[cfg(feature = "ml")]
@@ -449,19 +534,206 @@ fn is_sequence_token(token: &str) -> bool {
     token.chars().all(|char| char.is_ascii_digit()) && (token.len() > 1 || token.starts_with('0'))
 }
 
-fn read_wav_samples_fallback(path: &Path) -> AppResult<Vec<f32>> {
-    let bytes = std::fs::read(path)?;
-    if bytes.len() <= 44 {
+#[derive(Debug, Clone)]
+struct WavInterleavedSamples {
+    samples: Vec<f32>,
+    channels: usize,
+}
+
+fn read_wav_interleaved_f32(path: &Path) -> AppResult<WavInterleavedSamples> {
+    let mut reader = hound::WavReader::open(path).map_err(map_wav_error)?;
+    let spec = reader.spec();
+    let channels = usize::from(spec.channels);
+    if channels == 0 || spec.sample_rate == 0 {
         return Err(AppError::UnsupportedCodec(
-            "wav sem dados PCM suficientes".to_string(),
+            "wav sem canais ou sample rate validos".to_string(),
         ));
     }
 
-    let data = bytes[44..]
-        .chunks_exact(2)
-        .map(|chunk| i16::from_le_bytes([chunk[0], chunk[1]]) as f32 / i16::MAX as f32)
-        .collect::<Vec<_>>();
-    Ok(data)
+    let samples = match spec.sample_format {
+        hound::SampleFormat::Float => read_float_wav_samples(&mut reader, spec.bits_per_sample)?,
+        hound::SampleFormat::Int => read_integer_wav_samples(&mut reader, spec.bits_per_sample)?,
+    };
+    if samples.is_empty() {
+        return Err(AppError::UnsupportedCodec(
+            "wav sem amostras decodificaveis".to_string(),
+        ));
+    }
+
+    Ok(WavInterleavedSamples { samples, channels })
+}
+
+fn read_float_wav_samples<R: std::io::Read>(
+    reader: &mut hound::WavReader<R>,
+    bits_per_sample: u16,
+) -> AppResult<Vec<f32>> {
+    if bits_per_sample != 32 {
+        return Err(AppError::UnsupportedCodec(format!(
+            "wav float de {bits_per_sample} bits nao suportado"
+        )));
+    }
+
+    reader
+        .samples::<f32>()
+        .map(|sample| sample.map(sanitize_wav_sample).map_err(map_wav_error))
+        .collect()
+}
+
+fn read_integer_wav_samples<R: std::io::Read>(
+    reader: &mut hound::WavReader<R>,
+    bits_per_sample: u16,
+) -> AppResult<Vec<f32>> {
+    if !(2..=32).contains(&bits_per_sample) {
+        return Err(AppError::UnsupportedCodec(format!(
+            "wav PCM de {bits_per_sample} bits nao suportado"
+        )));
+    }
+
+    let scale = integer_wav_scale(bits_per_sample);
+    if bits_per_sample <= 16 {
+        reader
+            .samples::<i16>()
+            .map(|sample| {
+                sample
+                    .map(|value| sanitize_wav_sample(value as f32 / scale))
+                    .map_err(map_wav_error)
+            })
+            .collect()
+    } else {
+        reader
+            .samples::<i32>()
+            .map(|sample| {
+                sample
+                    .map(|value| sanitize_wav_sample(value as f32 / scale))
+                    .map_err(map_wav_error)
+            })
+            .collect()
+    }
+}
+
+fn integer_wav_scale(bits_per_sample: u16) -> f32 {
+    if bits_per_sample >= 32 {
+        i32::MAX as f32
+    } else {
+        ((1_i64 << (bits_per_sample - 1)) - 1) as f32
+    }
+}
+
+fn mix_interleaved_to_mono(samples: &[f32], channels: usize) -> Vec<f32> {
+    if channels <= 1 {
+        return samples.to_vec();
+    }
+
+    samples
+        .chunks_exact(channels)
+        .map(|frame| frame.iter().copied().sum::<f32>() / channels as f32)
+        .map(sanitize_wav_sample)
+        .collect()
+}
+
+fn sanitize_wav_sample(sample: f32) -> f32 {
+    if sample.is_finite() {
+        sample.clamp(-1.0, 1.0)
+    } else {
+        0.0
+    }
+}
+
+fn map_wav_error(error: hound::Error) -> AppError {
+    match error {
+        hound::Error::IoError(error) => AppError::Io(error.to_string()),
+        error => AppError::UnsupportedCodec(error.to_string()),
+    }
+}
+
+#[cfg(feature = "ml")]
+fn seconds_to_sample_count(seconds: f32, sample_rate: u32) -> usize {
+    (seconds.max(0.0) * sample_rate as f32).round().max(1.0) as usize
+}
+
+#[cfg(feature = "ml")]
+fn active_sample_blocks(
+    samples: &[f32],
+    sample_rate: u32,
+    top_db: f32,
+) -> Vec<std::ops::Range<usize>> {
+    if samples.is_empty() {
+        return Vec::new();
+    }
+    let peak = samples
+        .iter()
+        .fold(0.0_f32, |current, sample| current.max(sample.abs()));
+    if peak <= f32::EPSILON {
+        return Vec::new();
+    }
+
+    let threshold = (peak * 10_f32.powf(-top_db / 20.0)).max(0.0001);
+    let mut raw_ranges = Vec::new();
+    let mut start = None;
+    for (index, sample) in samples.iter().enumerate() {
+        if sample.abs() > threshold {
+            start.get_or_insert(index);
+        } else if let Some(range_start) = start.take() {
+            raw_ranges.push(range_start..index);
+        }
+    }
+    if let Some(range_start) = start {
+        raw_ranges.push(range_start..samples.len());
+    }
+
+    merge_short_reference_ranges(raw_ranges, ms_to_samples(100, sample_rate))
+}
+
+#[cfg(feature = "ml")]
+fn merge_short_reference_ranges(
+    ranges: Vec<std::ops::Range<usize>>,
+    maximum_gap: usize,
+) -> Vec<std::ops::Range<usize>> {
+    let mut merged: Vec<std::ops::Range<usize>> = Vec::new();
+    for range in ranges.into_iter().filter(|range| range.start < range.end) {
+        if let Some(last) = merged.last_mut() {
+            if range.start <= last.end.saturating_add(maximum_gap) {
+                last.end = last.end.max(range.end);
+                continue;
+            }
+        }
+        merged.push(range);
+    }
+    merged
+}
+
+#[cfg(feature = "ml")]
+fn concatenate_active_blocks(
+    samples: &[f32],
+    blocks: &[std::ops::Range<usize>],
+    limit_samples: usize,
+) -> Vec<f32> {
+    let mut output = Vec::with_capacity(limit_samples.min(samples.len()));
+    for block in blocks {
+        if output.len() >= limit_samples {
+            break;
+        }
+        let available = limit_samples - output.len();
+        let end = block.start.saturating_add(available).min(block.end);
+        output.extend_from_slice(&samples[block.start..end]);
+    }
+    output
+}
+
+#[cfg(feature = "ml")]
+fn write_pcm16_wav_mono(path: &Path, sample_rate: u32, samples: &[f32]) -> AppResult<()> {
+    let spec = hound::WavSpec {
+        channels: 1,
+        sample_rate,
+        bits_per_sample: 16,
+        sample_format: hound::SampleFormat::Int,
+    };
+    let mut writer = hound::WavWriter::create(path, spec).map_err(map_wav_error)?;
+    for sample in samples {
+        let value = (sanitize_wav_sample(*sample).clamp(-0.999, 0.999) * i16::MAX as f32) as i16;
+        writer.write_sample(value).map_err(map_wav_error)?;
+    }
+    writer.finalize().map_err(map_wav_error)
 }
 
 #[cfg(feature = "ml")]
@@ -584,6 +856,34 @@ pub fn ms_to_samples(duration_ms: u32, sample_rate: u32) -> usize {
 mod tests {
     use super::*;
 
+    fn write_test_wav_mono_f32(path: &Path, sample_rate: u32, samples: &[f32]) {
+        let spec = hound::WavSpec {
+            channels: 1,
+            sample_rate,
+            bits_per_sample: 32,
+            sample_format: hound::SampleFormat::Float,
+        };
+        let mut writer = hound::WavWriter::create(path, spec).expect("create wav");
+        for sample in samples {
+            writer.write_sample(*sample).expect("write sample");
+        }
+        writer.finalize().expect("finalize wav");
+    }
+
+    fn write_test_wav_mono_i16(path: &Path, sample_rate: u32, samples: &[i16]) {
+        let spec = hound::WavSpec {
+            channels: 1,
+            sample_rate,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        };
+        let mut writer = hound::WavWriter::create(path, spec).expect("create wav");
+        for sample in samples {
+            writer.write_sample(*sample).expect("write sample");
+        }
+        writer.finalize().expect("finalize wav");
+    }
+
     #[test]
     fn loads_legacy_transcription_cache_for_scanned_files() {
         let input_dir = tempfile::tempdir().expect("input tempdir");
@@ -663,6 +963,51 @@ mod tests {
         let report = quality_report(&[0.0; 2048]);
         assert!(!report.is_acceptable);
         assert!(report.issues.iter().any(|issue| issue.contains("mudo")));
+    }
+
+    #[test]
+    fn reads_float_wav_samples_without_pcm16_byte_misinterpretation() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let path = temp_dir.path().join("float.wav");
+        write_test_wav_mono_f32(&path, 24_000, &[0.25, -0.5, 0.75]);
+
+        let samples = read_wav_mono_f32(&path).expect("read wav");
+
+        assert_eq!(samples.len(), 3);
+        assert!((samples[0] - 0.25).abs() <= f32::EPSILON);
+        assert!((samples[1] + 0.5).abs() <= f32::EPSILON);
+        assert!((samples[2] - 0.75).abs() <= f32::EPSILON);
+    }
+
+    #[test]
+    fn reads_pcm16_wav_samples_through_hound() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let path = temp_dir.path().join("pcm16.wav");
+        write_test_wav_mono_i16(&path, 24_000, &[16_384, -16_384, 0]);
+
+        let samples = read_wav_mono_f32(&path).expect("read wav");
+
+        assert_eq!(samples.len(), 3);
+        assert!((samples[0] - 0.5).abs() < 0.001);
+        assert!((samples[1] + 0.5).abs() < 0.001);
+        assert_eq!(samples[2], 0.0);
+    }
+
+    #[cfg(feature = "ml")]
+    #[test]
+    fn extracts_short_reference_from_first_active_window_at_tts_rate() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let path = temp_dir.path().join("source.wav");
+        let mut samples = vec![0.0; TTS_SAMPLE_RATE as usize];
+        samples.extend(vec![0.25; (TTS_SAMPLE_RATE as f32 * 9.0) as usize]);
+        write_pcm16_wav_mono(&path, TTS_SAMPLE_RATE, &samples).expect("write source wav");
+
+        let reference = short_reference_waveform(&path).expect("short reference");
+
+        assert_eq!(reference.sample_rate, TTS_SAMPLE_RATE);
+        assert!((reference.start_seconds - 1.0).abs() < 0.01);
+        assert!((reference.duration_seconds - SHORT_REFERENCE_TARGET_SECONDS).abs() < 0.01);
+        assert!((reference.source_duration_seconds - 10.0).abs() < 0.01);
     }
 
     #[cfg(feature = "ml")]

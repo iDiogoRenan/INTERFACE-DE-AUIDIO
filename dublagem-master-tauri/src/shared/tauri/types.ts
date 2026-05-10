@@ -194,7 +194,7 @@ export const defaultOptions: DubbingOptions = {
     denoise: true,
     preprocessPrompt: true,
     postprocessOutput: true,
-    matchSourceLoudness: true,
+    matchSourceLoudness: false,
     loudnessMatchStrength: 0.85,
     outputGainDb: 0,
     sibilanceReduction: 0,

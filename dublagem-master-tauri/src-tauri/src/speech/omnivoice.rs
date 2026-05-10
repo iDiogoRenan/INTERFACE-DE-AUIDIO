@@ -3,7 +3,7 @@ use super::SynthesisHooks;
 use super::{ptbr_voice_profiles, SynthesisRequest, VoiceSynthesizer};
 #[cfg(feature = "ml")]
 use crate::audio::{
-    active_sample_range, audio_timing_profile, decode_audio_mono_f32, ms_to_samples,
+    active_sample_range, audio_timing_profile, ms_to_samples, short_reference_waveform,
     AudioTimingProfile,
 };
 use crate::error::{AppError, AppResult};
@@ -18,26 +18,18 @@ use omnivoice_infer::{
         DecodedAudio, GenerationRequest, ReferenceAudioInput, VoiceClonePrompt, WaveformInput,
     },
     pipeline::Phase3Pipeline,
-    DTypeSpec, DeviceSpec, OmniVoiceError, RuntimeOptions,
+    OmniVoiceError,
 };
+#[cfg(feature = "cuda")]
+use omnivoice_infer::{DTypeSpec, DeviceSpec, RuntimeOptions};
 use std::path::{Path, PathBuf};
 #[cfg(feature = "ml")]
 use std::sync::{Arc, Mutex};
 
 #[cfg(feature = "ml")]
-const SYNTHESIS_SEGMENT_TARGET_SECONDS: f32 = 8.0;
-#[cfg(feature = "ml")]
-const SYNTHESIS_SEGMENT_MIN_CHARS: usize = 24;
-#[cfg(feature = "ml")]
-const SYNTHESIS_SEGMENT_MAX_CHARS: usize = 180;
-#[cfg(feature = "ml")]
 const INTERNAL_CHUNK_SECONDS: f32 = 15.0;
 #[cfg(feature = "ml")]
-const REFERENCE_TARGET_SECONDS: f32 = 8.0;
-#[cfg(feature = "ml")]
-const REFERENCE_MIN_SECONDS: f32 = 3.0;
-#[cfg(feature = "ml")]
-const REFERENCE_MAX_SECONDS: f32 = 10.0;
+const INTERNAL_CHUNK_THRESHOLD_SECONDS: f32 = 30.0;
 
 #[cfg(feature = "ml")]
 struct ShortReferencePrompt {
@@ -277,7 +269,7 @@ fn synthesize_blocking_with_pipeline(
         .any(|segment| matches!(segment.settings.voice_mode, VoiceMode::Clone))
     {
         let short_reference =
-            prepare_short_reference(&request.reference_audio, &request.reference_text, timing)?;
+            prepare_short_reference(&request.reference_audio, &request.reference_text)?;
         Some(
             pipeline
                 .create_voice_clone_prompt_from_audio(
@@ -393,73 +385,46 @@ fn synthesis_segments_for_request(
     request: &OwnedSynthesisRequest,
     target_duration: Option<f32>,
 ) -> AppResult<Vec<SynthesisSegmentPlan>> {
-    if request.line_overrides.is_empty() {
-        let text = request.text.trim();
-        return Ok((!text.is_empty())
-            .then(|| SynthesisSegmentPlan {
-                text: text.to_string(),
-                duration_seconds: effective_duration(
-                    &request.options.native_synthesis,
-                    target_duration,
-                ),
-                settings: request.options.native_synthesis.clone(),
-            })
-            .into_iter()
-            .collect());
-    }
-
-    let mut segments = Vec::new();
-    for line in synthesis_line_plans(&request.line_overrides, target_duration) {
-        let text_segments = synthesis_segments(&line.text, line.duration_seconds);
-        let durations = segment_durations(&text_segments, line.duration_seconds);
-        segments.extend(text_segments.into_iter().zip(durations).map(
-            |(text, duration_seconds)| SynthesisSegmentPlan {
-                text,
-                duration_seconds,
-                settings: line.settings.clone(),
-            },
-        ));
-    }
-
-    Ok(segments)
+    Ok(whole_file_synthesis_plan(request, target_duration)
+        .into_iter()
+        .collect())
 }
 
 #[cfg(feature = "ml")]
-#[derive(Debug, Clone)]
-struct SynthesisLinePlan {
-    text: String,
-    duration_seconds: Option<f32>,
-    settings: NativeSynthesisSettings,
-}
-
-#[cfg(feature = "ml")]
-fn synthesis_line_plans(
-    overrides: &[LineSynthesisOverride],
+fn whole_file_synthesis_plan(
+    request: &OwnedSynthesisRequest,
     target_duration: Option<f32>,
-) -> Vec<SynthesisLinePlan> {
-    let mut sorted = overrides
+) -> Option<SynthesisSegmentPlan> {
+    let text = whole_file_synthesis_text(request);
+    let text = text.trim();
+    (!text.is_empty()).then(|| SynthesisSegmentPlan {
+        text: text.to_string(),
+        duration_seconds: effective_duration(&request.options.native_synthesis, target_duration),
+        settings: request.options.native_synthesis.clone(),
+    })
+}
+
+#[cfg(feature = "ml")]
+fn whole_file_synthesis_text(request: &OwnedSynthesisRequest) -> String {
+    if request.line_overrides.is_empty() {
+        return request
+            .text
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+    }
+
+    let mut sorted = request
+        .line_overrides
         .iter()
         .filter(|line| !line.target_text.trim().is_empty())
         .collect::<Vec<_>>();
     sorted.sort_by_key(|line| line.line_index);
-    let line_texts = sorted
-        .iter()
-        .map(|line| line.target_text.trim().to_string())
-        .collect::<Vec<_>>();
-    let inferred_durations = segment_durations(&line_texts, target_duration);
-
     sorted
         .into_iter()
-        .zip(inferred_durations)
-        .map(|(line, inferred_duration)| {
-            let settings = line.settings.clone();
-            SynthesisLinePlan {
-                text: tagged_synthesis_text(&line.tags, line.target_text.trim()),
-                duration_seconds: effective_duration(&settings, inferred_duration),
-                settings,
-            }
-        })
-        .collect()
+        .map(|line| tagged_synthesis_text(&line.tags, line.target_text.trim()))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 #[cfg(feature = "ml")]
@@ -528,7 +493,7 @@ fn synthesize_segment(
         settings,
     );
     request.generation_config.audio_chunk_duration = INTERNAL_CHUNK_SECONDS;
-    request.generation_config.audio_chunk_threshold = INTERNAL_CHUNK_SECONDS;
+    request.generation_config.audio_chunk_threshold = INTERNAL_CHUNK_THRESHOLD_SECONDS;
 
     let audio = pipeline
         .generate(&request)
@@ -539,10 +504,7 @@ fn synthesize_segment(
             AppError::SpeechEngineUnavailable("OmniVoice nao gerou audio.".to_string())
         })?;
 
-    Ok(DecodedAudio::new(
-        trim_segment_silence(audio.samples),
-        audio.sample_rate,
-    ))
+    Ok(DecodedAudio::new(audio.samples, audio.sample_rate))
 }
 
 #[cfg(feature = "ml")]
@@ -626,195 +588,25 @@ fn design_instruct(settings: &NativeSynthesisSettings) -> Option<String> {
 #[cfg(feature = "ml")]
 fn prepare_short_reference(
     reference_audio: &Path,
-    source_text: &str,
-    timing: AudioTimingProfile,
+    reference_text: &str,
 ) -> AppResult<ShortReferencePrompt> {
-    let decoded = decode_audio_mono_f32(reference_audio)?;
-    let peak = decoded
-        .samples
-        .iter()
-        .fold(0.0_f32, |current, sample| current.max(sample.abs()));
-    let active_start = active_sample_range(&decoded.samples, peak)
-        .map(|(start, _)| start)
-        .unwrap_or(0);
-    let target_samples = seconds_to_samples(REFERENCE_TARGET_SECONDS, decoded.sample_rate);
-    let max_samples = seconds_to_samples(REFERENCE_MAX_SECONDS, decoded.sample_rate);
-    let min_samples = seconds_to_samples(REFERENCE_MIN_SECONDS, decoded.sample_rate);
-
-    let mut end = active_start
-        .saturating_add(target_samples)
-        .min(decoded.samples.len());
-    if end.saturating_sub(active_start) < min_samples {
-        end = active_start
-            .saturating_add(min_samples)
-            .min(decoded.samples.len());
-    }
-    end = active_start
-        .saturating_add(max_samples)
-        .min(end)
-        .min(decoded.samples.len());
-
-    let samples = if active_start < end {
-        decoded.samples[active_start..end].to_vec()
-    } else {
-        decoded
-            .samples
-            .iter()
-            .copied()
-            .take(target_samples.min(decoded.samples.len()))
-            .collect()
-    };
-    if samples.is_empty() {
-        return Err(AppError::SpeechEngineUnavailable(
-            "nao foi possivel extrair referencia curta para OmniVoice".to_string(),
-        ));
-    }
-
-    let duration_seconds = samples.len() as f32 / decoded.sample_rate as f32;
-    let text = reference_text_excerpt(
-        source_text,
-        duration_seconds,
-        timing
-            .target_voice_duration_seconds()
-            .unwrap_or(duration_seconds),
-    );
+    let reference = short_reference_waveform(reference_audio).map_err(|error| {
+        AppError::SpeechEngineUnavailable(format!(
+            "falha ao preparar referencia curta para OmniVoice: {error}"
+        ))
+    })?;
+    let text = reference_text
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
 
     Ok(ShortReferencePrompt {
-        audio: ReferenceAudioInput::Waveform(WaveformInput::mono(samples, decoded.sample_rate)),
+        audio: ReferenceAudioInput::Waveform(WaveformInput::mono(
+            reference.samples,
+            reference.sample_rate,
+        )),
         text,
     })
-}
-
-#[cfg(feature = "ml")]
-fn reference_text_excerpt(
-    source_text: &str,
-    reference_seconds: f32,
-    source_voice_seconds: f32,
-) -> String {
-    let words = source_text.split_whitespace().collect::<Vec<_>>();
-    if words.is_empty() {
-        return String::new();
-    }
-
-    let ratio = if source_voice_seconds > f32::EPSILON {
-        (reference_seconds / source_voice_seconds).clamp(0.03, 1.0)
-    } else {
-        1.0
-    };
-    let word_count =
-        ((words.len() as f32 * ratio).ceil() as usize).clamp(4.min(words.len()), words.len());
-    words[..word_count].join(" ")
-}
-
-#[cfg(feature = "ml")]
-fn seconds_to_samples(seconds: f32, sample_rate: u32) -> usize {
-    (seconds.max(0.0) * sample_rate as f32).round().max(1.0) as usize
-}
-
-#[cfg(feature = "ml")]
-fn synthesis_segments(text: &str, target_duration_seconds: Option<f32>) -> Vec<String> {
-    let normalized = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    if normalized.is_empty() {
-        return Vec::new();
-    }
-
-    let total_chars = normalized.chars().count();
-    let duration_segments = target_duration_seconds
-        .map(|duration| (duration / SYNTHESIS_SEGMENT_TARGET_SECONDS).ceil() as usize)
-        .unwrap_or(1);
-    let target_segments = duration_segments.max(total_chars.div_ceil(SYNTHESIS_SEGMENT_MAX_CHARS));
-    let target_chars = total_chars
-        .div_ceil(target_segments.max(1))
-        .clamp(SYNTHESIS_SEGMENT_MIN_CHARS, SYNTHESIS_SEGMENT_MAX_CHARS);
-
-    let mut segments = Vec::new();
-    let mut current = String::new();
-    for unit in sentence_units(&normalized) {
-        for piece in split_long_unit(&unit, target_chars) {
-            let current_chars = current.chars().count();
-            let piece_chars = piece.chars().count();
-            if !current.is_empty() && current_chars + 1 + piece_chars > target_chars {
-                segments.push(std::mem::take(&mut current));
-            }
-            if !current.is_empty() {
-                current.push(' ');
-            }
-            current.push_str(&piece);
-        }
-    }
-
-    if !current.is_empty() {
-        segments.push(current);
-    }
-    segments
-}
-
-#[cfg(feature = "ml")]
-fn sentence_units(text: &str) -> Vec<String> {
-    let mut units = Vec::new();
-    let mut current = String::new();
-    for character in text.chars() {
-        current.push(character);
-        if matches!(character, '.' | '!' | '?' | ';' | ':') {
-            let unit = current.trim();
-            if !unit.is_empty() {
-                units.push(unit.to_string());
-            }
-            current.clear();
-        }
-    }
-
-    let tail = current.trim();
-    if !tail.is_empty() {
-        units.push(tail.to_string());
-    }
-    units
-}
-
-#[cfg(feature = "ml")]
-fn split_long_unit(unit: &str, target_chars: usize) -> Vec<String> {
-    if unit.chars().count() <= target_chars {
-        return vec![unit.to_string()];
-    }
-
-    let mut pieces = Vec::new();
-    let mut current = String::new();
-    for word in unit.split_whitespace() {
-        let current_chars = current.chars().count();
-        let word_chars = word.chars().count();
-        if !current.is_empty() && current_chars + 1 + word_chars > target_chars {
-            pieces.push(std::mem::take(&mut current));
-        }
-        if !current.is_empty() {
-            current.push(' ');
-        }
-        current.push_str(word);
-    }
-
-    if !current.is_empty() {
-        pieces.push(current);
-    }
-    pieces
-}
-
-#[cfg(feature = "ml")]
-fn segment_durations(segments: &[String], total_duration: Option<f32>) -> Vec<Option<f32>> {
-    let Some(total_duration) = total_duration else {
-        return vec![None; segments.len()];
-    };
-    let total_chars = segments
-        .iter()
-        .map(|segment| segment.chars().count())
-        .sum::<usize>()
-        .max(1);
-
-    segments
-        .iter()
-        .map(|segment| {
-            let ratio = segment.chars().count() as f32 / total_chars as f32;
-            Some((total_duration * ratio).max(0.75))
-        })
-        .collect()
 }
 
 #[cfg(feature = "ml")]
@@ -866,7 +658,9 @@ fn apply_original_timing(
     level_settings: AudioLevelSettings,
 ) -> DecodedAudio {
     let sample_rate = audio.sample_rate;
-    let mut voice_samples = trim_leading_silence(audio.samples);
+    let mut voice_samples = audio.samples;
+    remove_dc_offset(&mut voice_samples);
+    let mut voice_samples = trim_leading_silence(voice_samples);
     if level_settings.match_source_loudness {
         match_source_loudness(
             &mut voice_samples,
@@ -1089,13 +883,19 @@ fn trim_leading_silence(samples: Vec<f32>) -> Vec<f32> {
 }
 
 #[cfg(feature = "ml")]
-fn trim_segment_silence(samples: Vec<f32>) -> Vec<f32> {
-    let peak = samples
-        .iter()
-        .fold(0.0_f32, |current, sample| current.max(sample.abs()));
-    active_sample_range(&samples, peak)
-        .map(|(start, end)| samples[start..=end].to_vec())
-        .unwrap_or(samples)
+fn remove_dc_offset(samples: &mut [f32]) {
+    if samples.is_empty() {
+        return;
+    }
+
+    let mean = samples.iter().sum::<f32>() / samples.len() as f32;
+    if !mean.is_finite() || mean.abs() <= f32::EPSILON {
+        return;
+    }
+
+    for sample in samples {
+        *sample = sanitize_sample(*sample - mean);
+    }
 }
 
 #[cfg(feature = "ml")]
@@ -1137,22 +937,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn synthesis_segments_follow_duration_budget() {
-        let text = "A luz brilha nas trevas. O verbo se fez carne e habitou entre nos. Um anjo apareceu aos pastores e anunciou boas noticias para todo o povo.";
-
-        let segments = synthesis_segments(text, Some(32.0));
-
-        assert!(segments.len() >= 4);
-        assert!(segments.iter().all(|segment| !segment.trim().is_empty()));
-        assert!(segments
-            .iter()
-            .all(|segment| segment.chars().count() <= 180));
-    }
-
-    #[test]
     fn whole_file_synthesis_keeps_text_in_one_omnivoice_request() {
         let request = OwnedSynthesisRequest {
-            text: "Primeira frase. Segunda frase longa para simular um arquivo maior.".to_string(),
+            text: "Primeira frase. Segunda frase longa para simular um arquivo maior. Terceira frase para garantir que o texto continue inteiro sem segmentacao propria."
+                .to_string(),
             source_audio: PathBuf::from("source.wav"),
             reference_audio: PathBuf::from("source.wav"),
             reference_text: "Original first sentence. Original second sentence.".to_string(),
@@ -1168,27 +956,51 @@ mod tests {
         assert_eq!(segments[0].duration_seconds, Some(32.0));
         assert_eq!(
             segments[0].text,
-            "Primeira frase. Segunda frase longa para simular um arquivo maior."
+            "Primeira frase. Segunda frase longa para simular um arquivo maior. Terceira frase para garantir que o texto continue inteiro sem segmentacao propria."
         );
     }
 
     #[test]
-    fn segment_durations_preserve_total_shape() {
-        let segments = vec!["curto".to_string(), "um trecho um pouco maior".to_string()];
+    fn line_overrides_keep_whole_file_generation() {
+        let base_settings = NativeSynthesisSettings::default();
+        let line_settings = NativeSynthesisSettings {
+            speed: Some(1.2),
+            output_gain_db: -6.0,
+            ..base_settings.clone()
+        };
+        let request = OwnedSynthesisRequest {
+            text: "Primeira frase. Segunda frase.".to_string(),
+            source_audio: PathBuf::from("source.wav"),
+            reference_audio: PathBuf::from("source.wav"),
+            reference_text: "Original first sentence. Original second sentence.".to_string(),
+            output_path: PathBuf::from("out.wav"),
+            options: DubbingOptions {
+                native_synthesis: base_settings.clone(),
+                ..DubbingOptions::default()
+            },
+            line_overrides: vec![
+                LineSynthesisOverride {
+                    line_index: 0,
+                    target_text: "Primeira frase.".to_string(),
+                    tags: vec!["[sigh]".to_string()],
+                    settings: line_settings,
+                },
+                LineSynthesisOverride {
+                    line_index: 1,
+                    target_text: "Segunda frase.".to_string(),
+                    tags: Vec::new(),
+                    settings: base_settings,
+                },
+            ],
+            hooks: SynthesisHooks::default(),
+        };
 
-        let durations = segment_durations(&segments, Some(12.0));
+        let segments = synthesis_segments_for_request(&request, Some(12.0)).unwrap();
 
-        assert_eq!(durations.len(), 2);
-        assert!(durations[1].expect("long duration") > durations[0].expect("short duration"));
-    }
-
-    #[test]
-    fn reference_text_excerpt_matches_short_reference_window() {
-        let text = "one two three four five six seven eight nine ten";
-
-        let excerpt = reference_text_excerpt(text, 8.0, 40.0);
-
-        assert_eq!(excerpt, "one two three four");
+        assert_eq!(segments.len(), 1);
+        assert_eq!(segments[0].duration_seconds, Some(12.0));
+        assert_eq!(segments[0].text, "[sigh] Primeira frase. Segunda frase.");
+        assert_eq!(segments[0].settings, request.options.native_synthesis);
     }
 
     #[test]
@@ -1244,6 +1056,26 @@ mod tests {
     }
 
     #[test]
+    fn generation_uses_v14_internal_chunking_contract() {
+        let options = DubbingOptions::default();
+        let settings = NativeSynthesisSettings::default();
+        let prompt = VoiceClonePrompt::new_empty("referencia");
+
+        let mut request = generation_request(
+            "Texto longo suficiente para exercitar a configuracao interna.".to_string(),
+            Some(&prompt),
+            Some(32.0),
+            &options,
+            &settings,
+        );
+        request.generation_config.audio_chunk_duration = INTERNAL_CHUNK_SECONDS;
+        request.generation_config.audio_chunk_threshold = INTERNAL_CHUNK_THRESHOLD_SECONDS;
+
+        assert_eq!(request.generation_config.audio_chunk_duration, 15.0);
+        assert_eq!(request.generation_config.audio_chunk_threshold, 30.0);
+    }
+
+    #[test]
     fn generation_request_preserves_native_tags_for_omnivoice_frontend() {
         let options = DubbingOptions::default();
         let settings = NativeSynthesisSettings::default();
@@ -1257,6 +1089,25 @@ mod tests {
         );
 
         assert_eq!(request.texts[0], "[sigh] Ola [question-ah]?");
+    }
+
+    #[test]
+    fn generated_segment_cleanup_preserves_trailing_tail() {
+        let samples = vec![0.0, 0.0, 0.5, 0.25, 0.001, 0.0];
+
+        let cleaned = trim_leading_silence(samples);
+
+        assert_eq!(cleaned, vec![0.5, 0.25, 0.001, 0.0]);
+    }
+
+    #[test]
+    fn sync_cleanup_removes_dc_offset_before_trimming() {
+        let mut samples = vec![0.2, 0.4, 0.6, 0.8];
+
+        remove_dc_offset(&mut samples);
+        let mean = samples.iter().sum::<f32>() / samples.len() as f32;
+
+        assert!(mean.abs() <= f32::EPSILON);
     }
 
     #[test]
@@ -1284,7 +1135,12 @@ mod tests {
             peak_amplitude: 0.4,
             rms_amplitude: 0.18,
         };
-        let audio = DecodedAudio::new(vec![0.04; 100], 1_000);
+        let audio = DecodedAudio::new(
+            (0..100)
+                .map(|index| if index % 2 == 0 { 0.04 } else { -0.04 })
+                .collect(),
+            1_000,
+        );
 
         let polished = apply_original_timing(
             audio,

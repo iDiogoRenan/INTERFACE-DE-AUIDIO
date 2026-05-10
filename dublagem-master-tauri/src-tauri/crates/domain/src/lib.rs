@@ -148,7 +148,7 @@ impl NativeSynthesisSettings {
 }
 
 fn default_match_source_loudness() -> bool {
-    true
+    false
 }
 
 fn default_loudness_match_strength() -> f32 {

@@ -14,6 +14,10 @@ import {
 import { defaultOptions, type NativeSynthesisSettings } from "../tauri/types";
 
 describe("native OmniVoice synthesis settings", () => {
+  it("keeps v14 peak normalization as the default volume behavior", () => {
+    expect(defaultOptions.nativeSynthesis.matchSourceLoudness).toBe(false);
+  });
+
   it("normalizes UI values to the backend accepted ranges", () => {
     const settings: NativeSynthesisSettings = {
       ...defaultOptions.nativeSynthesis,
