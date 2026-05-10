@@ -143,7 +143,7 @@ export function DubbingPanel() {
             onSelectLine={setSelectedLineIndex}
             onTextChange={setSourceText}
             onInvalidTag={(tag) => {
-              appendLog(`Tag OmniVoice nao suportada: ${tag}`, "warning");
+              appendLog(unsupportedNativeTagMessage(tag), "warning");
             }}
           />
           <TaggedLineEditor
@@ -156,7 +156,7 @@ export function DubbingPanel() {
             onTextChange={setTargetText}
             onRemoveTag={removeNativeTag}
             onInvalidTag={(tag) => {
-              appendLog(`Tag OmniVoice nao suportada: ${tag}`, "warning");
+              appendLog(unsupportedNativeTagMessage(tag), "warning");
             }}
           />
         </section>
@@ -1094,4 +1094,12 @@ function stageState(stage: JobStage, currentStage: JobStage | null): "pending" |
   const current = stageOrder.get(currentStage) ?? 0;
   const target = stageOrder.get(stage) ?? 0;
   return target < current ? "done" : "pending";
+}
+
+function unsupportedNativeTagMessage(tag: string): string {
+  if (tag === "[pause]") {
+    return "OmniVoice nao suporta [pause] como tag nativa. Use pontuacao ou duracao alvo para controlar pausas.";
+  }
+
+  return `Tag OmniVoice nao suportada: ${tag}`;
 }

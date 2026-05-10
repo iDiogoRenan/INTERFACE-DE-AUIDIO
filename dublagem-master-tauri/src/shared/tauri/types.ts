@@ -174,7 +174,7 @@ export interface DubbingJobEvent {
 }
 
 export const defaultOptions: DubbingOptions = {
-  sourceLanguage: "auto",
+  sourceLanguage: "en",
   targetLanguage: "pt",
   mode: "classico",
   palatalize: false,

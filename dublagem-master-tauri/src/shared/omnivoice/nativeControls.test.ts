@@ -82,6 +82,7 @@ describe("native OmniVoice controls", () => {
 
   it("rejects unknown lowercase bracket tags while allowing pronunciation hints", () => {
     expect(unknownNativeTags("Texto [angry] invalido [B EY1 S].")).toEqual(["[angry]"]);
+    expect(unknownNativeTags("Texto com [pause] solicitado.")).toEqual(["[pause]"]);
   });
 
   it("updates line-oriented editor content without touching adjacent lines", () => {

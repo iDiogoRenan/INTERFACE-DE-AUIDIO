@@ -84,6 +84,7 @@ describe("workspaceStore transcription hydration", () => {
       targetText: "",
       transcriptionDrafts: {},
       transcriptionBaselines: {},
+      submittedDubbingDrafts: {},
       activeJobId: null,
       currentStage: null,
       currentStatus: "Aguardando job.",
@@ -207,6 +208,39 @@ describe("workspaceStore transcription hydration", () => {
         customTargetText: "Texto revisado para nova sintese."
       })
     );
+  });
+
+  it("keeps submitted manual text when redubbing events replay cached transcription", async () => {
+    useWorkspaceStore.setState({ files: [cachedDubbedFile], selectedPath: null });
+    useWorkspaceStore.getState().selectFile(cachedDubbedFile.path);
+    useWorkspaceStore.getState().setTargetText("Texto revisado para nova sintese.");
+
+    await useWorkspaceStore.getState().startDubbing();
+    applyJobEvent(
+      jobEvent({
+        filePath: cachedDubbedFile.path,
+        sourceText: "Hello from cache.",
+        targetText: "Ola do cache."
+      })
+    );
+
+    expect(useWorkspaceStore.getState().targetText).toBe("Texto revisado para nova sintese.");
+    expect(
+      useWorkspaceStore.getState().projectMetadata.files[cachedDubbedFile.name]?.targetText
+    ).toBe("Texto revisado para nova sintese.");
+
+    applyJobEvent(
+      jobEvent({
+        kind: "file_complete",
+        stage: "file_complete",
+        filePath: cachedDubbedFile.path,
+        outputPath: "E:\\audio\\saida\\line_d.wav",
+        sourceText: "Hello from cache.",
+        targetText: "Ola do cache."
+      })
+    );
+
+    expect(useWorkspaceStore.getState().targetText).toBe("Texto revisado para nova sintese.");
   });
 
   it("sends line synthesis overrides when selected lines have native metadata", async () => {

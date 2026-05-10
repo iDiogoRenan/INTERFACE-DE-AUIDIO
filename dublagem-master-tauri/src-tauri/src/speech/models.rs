@@ -7,9 +7,12 @@ use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 
 const MODEL_MANIFEST_FILE_NAME: &str = "MODEL_MANIFEST.json";
-const WHISPER_MODEL_ID: &str = "whisper-medium-ggml";
+const WHISPER_MODEL_ID: &str = "whisper-large-v3-ggml";
 const WHISPER_ENGINE: &str = "whisper-rs";
-const WHISPER_FALLBACK_PATH: &str = "whisper/ggml-medium.bin";
+const WHISPER_FALLBACK_PATH: &str = "whisper/ggml-large-v3.bin";
+const WHISPER_VAD_MODEL_ID: &str = "whisper-vad-silero-v6.2.0-ggml";
+const WHISPER_VAD_ENGINE: &str = "whisper-rs-vad";
+const WHISPER_VAD_FALLBACK_PATH: &str = "whisper/ggml-silero-v6.2.0.bin";
 const OMNIVOICE_MODEL_ID: &str = "omnivoice-candle";
 const OMNIVOICE_ENGINE: &str = "omnivoice-candle";
 const OMNIVOICE_FALLBACK_PATH: &str = "omnivoice";
@@ -21,6 +24,7 @@ const OMNIVOICE_RUNTIME_MANIFEST_JSON: &str = include_str!(
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SpeechModelPaths {
     pub whisper_model_path: PathBuf,
+    pub whisper_vad_model_path: PathBuf,
     pub omnivoice_model_dir: PathBuf,
 }
 
@@ -65,11 +69,16 @@ pub fn resolve_speech_model_paths(model_dir: Option<&Path>) -> AppResult<SpeechM
     } else {
         SpeechModelPaths {
             whisper_model_path: model_dir.join(WHISPER_FALLBACK_PATH),
+            whisper_vad_model_path: model_dir.join(WHISPER_VAD_FALLBACK_PATH),
             omnivoice_model_dir: model_dir.join(OMNIVOICE_FALLBACK_PATH),
         }
     };
 
-    ensure_file(&paths.whisper_model_path, "whisper-rs ggml medium")?;
+    ensure_file(&paths.whisper_model_path, "whisper-rs ggml large-v3")?;
+    ensure_file(
+        &paths.whisper_vad_model_path,
+        "whisper-rs Silero VAD v6.2.0",
+    )?;
     ensure_dir(&paths.omnivoice_model_dir, "OmniVoice Candle")?;
     ensure_omnivoice_runtime_manifest(&paths.omnivoice_model_dir)?;
     Ok(paths)
@@ -104,6 +113,12 @@ fn resolve_from_manifest(manifest_path: &Path) -> AppResult<SpeechModelPaths> {
         AppError::InvalidConfig("manifesto de modelos sem diretorio base".to_string())
     })?;
     let whisper = resolve_entry(&manifest.models, base_dir, WHISPER_MODEL_ID, WHISPER_ENGINE)?;
+    let whisper_vad = resolve_entry(
+        &manifest.models,
+        base_dir,
+        WHISPER_VAD_MODEL_ID,
+        WHISPER_VAD_ENGINE,
+    )?;
     let omnivoice = resolve_entry(
         &manifest.models,
         base_dir,
@@ -113,6 +128,7 @@ fn resolve_from_manifest(manifest_path: &Path) -> AppResult<SpeechModelPaths> {
 
     Ok(SpeechModelPaths {
         whisper_model_path: whisper,
+        whisper_vad_model_path: whisper_vad,
         omnivoice_model_dir: omnivoice,
     })
 }
@@ -235,14 +251,19 @@ mod tests {
         let omnivoice_dir = temp_dir.path().join("omnivoice");
         std::fs::create_dir_all(&whisper_dir).expect("whisper dir");
         std::fs::create_dir_all(&omnivoice_dir).expect("omnivoice dir");
-        std::fs::write(whisper_dir.join("ggml-medium.bin"), b"model").expect("whisper model");
+        std::fs::write(whisper_dir.join("ggml-large-v3.bin"), b"model").expect("whisper model");
+        std::fs::write(whisper_dir.join("ggml-silero-v6.2.0.bin"), b"vad").expect("vad model");
         std::fs::write(omnivoice_dir.join("model.safetensors"), b"model").expect("omni model");
 
         let paths = resolve_speech_model_paths(Some(temp_dir.path())).expect("model paths");
 
         assert_eq!(
             paths.whisper_model_path,
-            temp_dir.path().join("whisper/ggml-medium.bin")
+            temp_dir.path().join("whisper/ggml-large-v3.bin")
+        );
+        assert_eq!(
+            paths.whisper_vad_model_path,
+            temp_dir.path().join("whisper/ggml-silero-v6.2.0.bin")
         );
         assert_eq!(paths.omnivoice_model_dir, omnivoice_dir);
     }
@@ -250,12 +271,15 @@ mod tests {
     #[test]
     fn validates_manifest_file_hashes() {
         let temp_dir = tempfile::tempdir().expect("tempdir");
-        let whisper_path = temp_dir.path().join("ggml-medium.bin");
+        let whisper_path = temp_dir.path().join("ggml-large-v3.bin");
+        let vad_path = temp_dir.path().join("ggml-silero-v6.2.0.bin");
         let omnivoice_dir = temp_dir.path().join("omnivoice");
         std::fs::create_dir_all(&omnivoice_dir).expect("omnivoice dir");
         std::fs::write(&whisper_path, b"model").expect("whisper model");
+        std::fs::write(&vad_path, b"vad").expect("vad model");
         std::fs::write(omnivoice_dir.join("model.safetensors"), b"model").expect("omni model");
         let sha256 = format!("{:x}", Sha256::digest(b"model"));
+        let vad_sha256 = format!("{:x}", Sha256::digest(b"vad"));
         std::fs::write(
             temp_dir.path().join(MODEL_MANIFEST_FILE_NAME),
             format!(
@@ -263,10 +287,16 @@ mod tests {
   "schemaVersion": 1,
   "models": [
     {{
-      "id": "whisper-medium-ggml",
+      "id": "whisper-large-v3-ggml",
       "engine": "whisper-rs",
-      "path": "ggml-medium.bin",
+      "path": "ggml-large-v3.bin",
       "sha256": "{sha256}"
+    }},
+    {{
+      "id": "whisper-vad-silero-v6.2.0-ggml",
+      "engine": "whisper-rs-vad",
+      "path": "ggml-silero-v6.2.0.bin",
+      "sha256": "{vad_sha256}"
     }},
     {{
       "id": "omnivoice-candle",
@@ -282,6 +312,7 @@ mod tests {
         let paths = resolve_speech_model_paths(Some(temp_dir.path())).expect("model paths");
 
         assert_eq!(paths.whisper_model_path, whisper_path);
+        assert_eq!(paths.whisper_vad_model_path, vad_path);
         assert_eq!(paths.omnivoice_model_dir, omnivoice_dir);
     }
 
@@ -291,7 +322,7 @@ mod tests {
         let error =
             resolve_speech_model_paths(Some(missing_dir.path())).expect_err("missing config");
 
-        assert!(error.to_string().contains("whisper-rs ggml medium"));
+        assert!(error.to_string().contains("whisper-rs ggml large-v3"));
     }
 
     #[test]
@@ -301,7 +332,8 @@ mod tests {
         let omnivoice_dir = temp_dir.path().join("omnivoice");
         std::fs::create_dir_all(&whisper_dir).expect("whisper dir");
         std::fs::create_dir_all(&omnivoice_dir).expect("omnivoice dir");
-        std::fs::write(whisper_dir.join("ggml-medium.bin"), b"model").expect("whisper model");
+        std::fs::write(whisper_dir.join("ggml-large-v3.bin"), b"model").expect("whisper model");
+        std::fs::write(whisper_dir.join("ggml-silero-v6.2.0.bin"), b"vad").expect("vad model");
 
         resolve_speech_model_paths(Some(temp_dir.path())).expect("model paths");
 

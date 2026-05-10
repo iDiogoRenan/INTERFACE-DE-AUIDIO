@@ -41,6 +41,41 @@
   font-size: 13px;
 }
 
+.modelBadges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 10px 0 0;
+}
+
+.modelBadge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 22px;
+  border: 1px solid var(--border);
+  background: var(--surface-0);
+  padding: 0 8px;
+  font-size: 11px;
+  line-height: 1;
+}
+
+.modelBadge dt,
+.modelBadge dd {
+  margin: 0;
+}
+
+.modelBadge dt {
+  color: var(--text-muted);
+  font-weight: 750;
+}
+
+.modelBadge dd {
+  color: var(--text);
+  font-family: ui-monospace, "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-weight: 800;
+}
+
 .tabs {
   display: inline-flex;
   border: 1px solid var(--border);

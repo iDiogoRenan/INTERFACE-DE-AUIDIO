@@ -2196,7 +2196,7 @@ dependencies = [
 
 [[package]]
 name = "omnivoice-cli"
-version = "0.1.0"
+version = "0.1.5"
 dependencies = [
  "candle-core",
  "hf-hub",
@@ -2206,7 +2206,7 @@ dependencies = [
 
 [[package]]
 name = "omnivoice-infer"
-version = "0.1.0"
+version = "0.1.5"
 dependencies = [
  "candle-core",
  "candle-nn",
@@ -2231,7 +2231,7 @@ dependencies = [
 
 [[package]]
 name = "omnivoice-server"
-version = "0.1.0"
+version = "0.1.5"
 dependencies = [
  "axum",
  "base64 0.22.1",

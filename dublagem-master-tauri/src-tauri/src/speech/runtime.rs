@@ -28,6 +28,7 @@ struct CachedModelPaths {
 
 struct CachedTranscriber {
     model_path: PathBuf,
+    vad_model_path: PathBuf,
     engine: Arc<dyn Transcriber>,
 }
 
@@ -50,7 +51,10 @@ impl SpeechRuntime {
     pub async fn engines(&self, model_dir: Option<PathBuf>) -> AppResult<SpeechEngines> {
         let model_paths = self.model_paths(model_dir).await?;
         let transcriber = self
-            .transcriber_handle(model_paths.paths.whisper_model_path)
+            .transcriber_handle(
+                model_paths.paths.whisper_model_path,
+                model_paths.paths.whisper_vad_model_path,
+            )
             .await?;
         let synthesizer = self
             .synthesizer_handle(model_paths.paths.omnivoice_model_dir)
@@ -71,7 +75,10 @@ impl SpeechRuntime {
     ) -> AppResult<Arc<dyn Transcriber>> {
         let model_paths = self.model_paths(model_dir).await?;
         Ok(self
-            .transcriber_handle(model_paths.paths.whisper_model_path)
+            .transcriber_handle(
+                model_paths.paths.whisper_model_path,
+                model_paths.paths.whisper_vad_model_path,
+            )
             .await?
             .engine)
     }
@@ -123,23 +130,26 @@ impl SpeechRuntime {
     async fn transcriber_handle(
         &self,
         model_path: PathBuf,
+        vad_model_path: PathBuf,
     ) -> AppResult<RuntimeHandle<dyn Transcriber>> {
         let model_path = normalize_existing_path(model_path)?;
+        let vad_model_path = normalize_existing_path(vad_model_path)?;
         let mut cache = self.transcriber.lock().await;
-        if let Some(cached) = cache
-            .as_ref()
-            .filter(|cached| cached.model_path == model_path)
-        {
+        if let Some(cached) = cache.as_ref().filter(|cached| {
+            cached.model_path == model_path && cached.vad_model_path == vad_model_path
+        }) {
             return Ok(RuntimeHandle {
                 engine: Arc::clone(&cached.engine),
                 was_cached: true,
             });
         }
 
-        let engine: Arc<dyn Transcriber> =
-            Arc::new(WhisperRsTranscriber::preload(model_path.clone()).await?);
+        let engine: Arc<dyn Transcriber> = Arc::new(
+            WhisperRsTranscriber::preload(model_path.clone(), vad_model_path.clone()).await?,
+        );
         *cache = Some(CachedTranscriber {
             model_path,
+            vad_model_path,
             engine: Arc::clone(&engine),
         });
 
@@ -182,6 +192,7 @@ impl SpeechRuntime {
 fn normalize_model_paths(paths: SpeechModelPaths) -> AppResult<SpeechModelPaths> {
     Ok(SpeechModelPaths {
         whisper_model_path: normalize_existing_path(paths.whisper_model_path)?,
+        whisper_vad_model_path: normalize_existing_path(paths.whisper_vad_model_path)?,
         omnivoice_model_dir: normalize_existing_path(paths.omnivoice_model_dir)?,
     })
 }
@@ -207,8 +218,9 @@ mod tests {
         let omnivoice_dir = model_dir.join("omnivoice");
         std::fs::create_dir_all(&whisper_dir).expect("whisper dir");
         std::fs::create_dir_all(&omnivoice_dir).expect("omnivoice dir");
-        let whisper_model = whisper_dir.join("ggml-medium.bin");
+        let whisper_model = whisper_dir.join("ggml-large-v3.bin");
         std::fs::write(&whisper_model, b"model").expect("whisper model");
+        std::fs::write(whisper_dir.join("ggml-silero-v6.2.0.bin"), b"vad").expect("vad model");
         std::fs::write(omnivoice_dir.join("model.safetensors"), b"model").expect("omnivoice model");
 
         let runtime = SpeechRuntime::default();

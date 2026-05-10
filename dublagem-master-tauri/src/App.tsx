@@ -5,7 +5,7 @@ import { DubbingPanel } from "./features/dubbing/DubbingPanel";
 import { ProjectExplorer } from "./features/project-explorer/ProjectExplorer";
 import { SettingsPanel } from "./features/settings/SettingsPanel";
 import { ValidationPanel } from "./features/validation/ValidationPanel";
-import { APP_DISPLAY_NAME } from "./shared/app/metadata";
+import { ACTIVE_SPEECH_MODELS, APP_DISPLAY_NAME } from "./shared/app/metadata";
 import { isTauriRuntime } from "./shared/tauri/client";
 import { useWorkspaceStore } from "./stores/workspaceStore";
 import styles from "./App.module.css";
@@ -48,6 +48,14 @@ function App() {
           <div>
             <h1>{APP_DISPLAY_NAME}</h1>
             <p>Pipeline local em Rust para transcrição, tradução, síntese e validação.</p>
+            <dl className={styles.modelBadges} aria-label="Modelos ativos">
+              {ACTIVE_SPEECH_MODELS.map((model) => (
+                <div className={styles.modelBadge} key={model.label}>
+                  <dt>{model.label}</dt>
+                  <dd>{model.value}</dd>
+                </div>
+              ))}
+            </dl>
           </div>
           <Tabs.List className={styles.tabs}>
             <Tabs.Trigger value="dubbing">

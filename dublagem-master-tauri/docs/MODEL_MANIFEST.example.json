@@ -2,9 +2,15 @@
   "schemaVersion": 1,
   "models": [
     {
-      "id": "whisper-medium-ggml",
+      "id": "whisper-large-v3-ggml",
       "engine": "whisper-rs",
-      "path": "whisper/ggml-medium.bin",
+      "path": "whisper/ggml-large-v3.bin",
+      "sha256": "replace-with-real-sha256"
+    },
+    {
+      "id": "whisper-vad-silero-v6.2.0-ggml",
+      "engine": "whisper-rs-vad",
+      "path": "whisper/ggml-silero-v6.2.0.bin",
       "sha256": "replace-with-real-sha256"
     },
     {

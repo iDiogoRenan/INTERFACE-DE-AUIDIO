@@ -38,6 +38,13 @@ interface TranscriptionDraft {
 
 type TranscriptionMap = Record<string, TranscriptionDraft | undefined>;
 
+interface SubmittedTranscriptionDraft {
+  sourceText?: string;
+  targetText?: string;
+}
+
+type SubmittedTranscriptionMap = Record<string, SubmittedTranscriptionDraft | undefined>;
+
 interface WorkspaceState {
   config: AppConfig;
   files: AudioFileEntry[];
@@ -48,6 +55,7 @@ interface WorkspaceState {
   targetText: string;
   transcriptionDrafts: TranscriptionMap;
   transcriptionBaselines: TranscriptionMap;
+  submittedDubbingDrafts: SubmittedTranscriptionMap;
   logs: LogEntry[];
   activeJobId: string | null;
   currentStage: JobStage | null;
@@ -101,6 +109,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   targetText: "",
   transcriptionDrafts: {},
   transcriptionBaselines: {},
+  submittedDubbingDrafts: {},
   logs: [],
   activeJobId: null,
   currentStage: null,
@@ -366,6 +375,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       return;
     }
 
+    const submittedDraft = submittedDraftFromEditor(sourceText, targetText);
     set((state) => ({
       isBusy: true,
       isCancelling: false,
@@ -376,7 +386,13 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       currentFileIndex: null,
       totalFiles: null,
       lastOutputPath: null,
-      lastOutputRevision: state.lastOutputRevision + 1
+      lastOutputRevision: state.lastOutputRevision + 1,
+      submittedDubbingDrafts: submittedDraft
+        ? {
+            ...state.submittedDubbingDrafts,
+            [selectedPath]: submittedDraft
+          }
+        : removeSubmittedDraft(state.submittedDubbingDrafts, selectedPath)
     }));
     try {
       const nativeSynthesis = normalizeNativeSynthesisSettings(config.options.nativeSynthesis);
@@ -409,7 +425,8 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
         isBusy: false,
         isCancelling: false,
         progress: 0,
-        currentStage: "failed"
+        currentStage: "failed",
+        submittedDubbingDrafts: removeSubmittedDraft(get().submittedDubbingDrafts, selectedPath)
       });
     }
   },
@@ -501,6 +518,10 @@ async function registerJobListeners(): Promise<void> {
 export function applyJobEvent(payload: DubbingJobEvent): void {
   const state = useWorkspaceStore.getState();
   const eventPath = payload.filePath ?? state.selectedPath;
+  const submittedDraft = eventPath ? state.submittedDubbingDrafts[eventPath] : undefined;
+  const resolvedSourceText = resolvedEventText(payload.sourceText, submittedDraft?.sourceText);
+  const resolvedTargetText = resolvedEventText(payload.targetText, submittedDraft?.targetText);
+  const terminalEvent = isTerminalJobEvent(payload);
   const update: Partial<WorkspaceState> = {
     currentStatus: payload.message
   };
@@ -522,11 +543,11 @@ export function applyJobEvent(payload: DubbingJobEvent): void {
   }
 
   const transcriptionPatch: Partial<TranscriptionDraft> = {};
-  if (payload.sourceText !== null) {
-    transcriptionPatch.sourceText = payload.sourceText;
+  if (resolvedSourceText !== null) {
+    transcriptionPatch.sourceText = resolvedSourceText;
   }
-  if (payload.targetText !== null) {
-    transcriptionPatch.targetText = payload.targetText;
+  if (resolvedTargetText !== null) {
+    transcriptionPatch.targetText = resolvedTargetText;
   }
   if (Object.keys(transcriptionPatch).length > 0) {
     update.transcriptionDrafts = upsertDraft(
@@ -550,11 +571,11 @@ export function applyJobEvent(payload: DubbingJobEvent): void {
   }
 
   const shouldHydrateSelectedEditor = eventPath === state.selectedPath;
-  if (shouldHydrateSelectedEditor && payload.sourceText !== null) {
-    update.sourceText = payload.sourceText;
+  if (shouldHydrateSelectedEditor && resolvedSourceText !== null) {
+    update.sourceText = resolvedSourceText;
   }
-  if (shouldHydrateSelectedEditor && payload.targetText !== null) {
-    update.targetText = payload.targetText;
+  if (shouldHydrateSelectedEditor && resolvedTargetText !== null) {
+    update.targetText = resolvedTargetText;
   }
   if (shouldHydrateSelectedEditor && payload.outputPath !== null) {
     update.lastOutputPath = payload.outputPath;
@@ -570,13 +591,58 @@ export function applyJobEvent(payload: DubbingJobEvent): void {
     );
   }
 
-  if (isTerminalJobEvent(payload)) {
+  if (terminalEvent) {
     update.activeJobId = null;
     update.isBusy = false;
     update.isCancelling = false;
   }
+  if ((eventPath && payload.outputPath !== null) || terminalEvent) {
+    update.submittedDubbingDrafts = removeSubmittedDraft(state.submittedDubbingDrafts, eventPath);
+  }
 
   useWorkspaceStore.setState(update);
+}
+
+function submittedDraftFromEditor(
+  sourceText: string,
+  targetText: string
+): SubmittedTranscriptionDraft | null {
+  const draft: SubmittedTranscriptionDraft = {};
+  if (sourceText.trim().length > 0) {
+    draft.sourceText = sourceText;
+  }
+  if (targetText.trim().length > 0) {
+    draft.targetText = targetText;
+  }
+  return Object.keys(draft).length > 0 ? draft : null;
+}
+
+function resolvedEventText(incomingText: string | null, submittedText?: string): string | null {
+  if (incomingText === null) {
+    return null;
+  }
+  return submittedText !== undefined && submittedText.trim().length > 0
+    ? submittedText
+    : incomingText;
+}
+
+function removeSubmittedDraft(
+  drafts: SubmittedTranscriptionMap,
+  path: string | null
+): SubmittedTranscriptionMap {
+  if (!path || drafts[path] === undefined) {
+    return drafts;
+  }
+
+  return Object.entries(drafts).reduce<SubmittedTranscriptionMap>(
+    (nextDrafts, [draftPath, draft]) => {
+      if (draftPath !== path) {
+        nextDrafts[draftPath] = draft;
+      }
+      return nextDrafts;
+    },
+    {}
+  );
 }
 
 function isTerminalJobEvent(payload: DubbingJobEvent): boolean {

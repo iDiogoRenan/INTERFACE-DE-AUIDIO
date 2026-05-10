@@ -558,6 +558,8 @@ mod tests {
 
         let error = find_remote_whisper_assets(DEFAULT_HF_ASR_MODEL, &siblings).unwrap_err();
 
-        assert!(error.to_string().contains("whisper-large-v3-turbo-q4_0.gguf"));
+        assert!(error
+            .to_string()
+            .contains("whisper-large-v3-turbo-q4_0.gguf"));
     }
 }

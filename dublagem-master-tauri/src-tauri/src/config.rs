@@ -49,7 +49,7 @@ mod tests {
     #[test]
     fn defaults_match_legacy_application() {
         let options = DubbingOptions::default();
-        assert_eq!(options.source_language, LanguageCode::Auto);
+        assert_eq!(options.source_language, LanguageCode::En);
         assert_eq!(options.target_language, LanguageCode::Pt);
         assert_eq!(options.mode, DubbingMode::Classico);
         assert_eq!(options.pad_ms, 200);

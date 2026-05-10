@@ -206,7 +206,7 @@ pub struct DubbingOptions {
 impl Default for DubbingOptions {
     fn default() -> Self {
         Self {
-            source_language: LanguageCode::Auto,
+            source_language: LanguageCode::En,
             target_language: LanguageCode::Pt,
             mode: DubbingMode::Classico,
             palatalize: false,
