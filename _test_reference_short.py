@@ -72,9 +72,12 @@ try:
     assert 7.9 <= referencia.duration_seconds <= 8.1
     print("1. [OK] referencia extraida de arquivo longo fica <= 10s")
 
+    origem_worker = os.path.join(tmpdir, "audio_referencia_worker.wav")
+    escrever_wav_longo(origem_worker, duracao_s=18.0)
+
     fake_omni = FakeOmni()
     worker = paf.SingleDubbingWorkerV14(
-        paths_en=[origem],
+        paths_en=[origem_worker],
         pasta_guia="",
         models_ref={"whisper": FakeWhisper(), "omni": fake_omni},
         custom_texts={"en": "Original text.", "pt": "Texto dublado."},

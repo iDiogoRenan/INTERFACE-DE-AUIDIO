@@ -11,7 +11,21 @@ import tkinter as tk
 from tkinter import ttk, filedialog, scrolledtext, messagebox
 from pathlib import Path
 import warnings
-import re
+
+from _audio_quality_gate import (
+    OUTROS_RUIDOS,
+    PADROES_EXPRESSOES,
+    eh_ruido,
+    realizar_tri_checagem,
+)
+
+__all__ = [
+    "AppScanner",
+    "OUTROS_RUIDOS",
+    "PADROES_EXPRESSOES",
+    "eh_ruido",
+    "realizar_tri_checagem",
+]
 
 warnings.filterwarnings("ignore")
 
@@ -26,95 +40,6 @@ def get_device_info():
 
 device, device_msg = get_device_info()
 models = {"whisper": None, "current_type": None}
-
-# MOTOR DE DETECÇÃO DE EXPRESSÕES (Regex)
-# Bloqueia variações infinitas: aff, affff, ufa, ufffa, aaiii, mmmm, eca, etc.
-PADROES_EXPRESSOES = [
-    r'^a+h+$', r'^o+h+$', r'^u+h+$', r'^h+m+$', r'^u+m+$', # ah, oh, uh, hm, um
-    r'^a+w+$', r'^e+r+$', r'^s+h+$', r'^m+$', r'^g+r+$',    # aw, er, sh, m, grr
-    r'^a+f+$', r'^u+f+a+$', r'^v+i+x+e+$', r'^x+i+$',        # aff, ufa, vixe, xi
-    r'^p+s+i+u+$', r'^t+s+c+$', r'^e+p+a+$', r'^o+p+s+$',    # psiu, tsc, epa, ops
-    r'^(h+a+)+$', r'^(h+e+)+$', r'^(h+i+)+$', r'^(h+o+)+$',  # haha, hehe, hihi, hoho
-    r'^w+o+w+$', r'^y+a+y+$', r'^o+u+c+h+$', r'^o+w+$',      # wow, yay, ouch, ow
-    r'^p+h+e+w+$', r'^d+u+h+$', r'^g+e+e+$', r'^b+a+$',      # phew, duh, gee, baa
-    r'^b+o+$', r'^e+h+$', r'^p+f+$', r'^p+u+f+$',            # boo, eh, pf, puf
-    r'^a+i+$', r'^u+i+$', r'^e+i+$', r'^e+c+a+$'             # ai, ui, ei, eca
-]
-
-OUTROS_RUIDOS = {
-    "gasp", "sigh", "argh", "yikes", "ahem", "mhm", "uhhuh", "ugh", "eca"
-}
-
-def eh_ruido(palavra):
-    """Verifica se a palavra é apenas um ruído ou expressão sem conteúdo de fala real."""
-    palavra = palavra.lower().strip()
-    
-    # Ignora pontuação colada na palavra
-    palavra = re.sub(r'[^\w]', '', palavra)
-    
-    if not palavra: return True
-
-    # Permite vogais isoladas que podem ser palavras em PT (a, o, é)
-    # Mas bloqueia consoantes isoladas (b, c, d...) que são erros de transcrição
-    if len(palavra) == 1:
-        if palavra in ['a', 'e', 'o', 'é', 'ó', 'á', 'í', 'ú', 'à', 'i']:
-            return False
-        return True
-    
-    # Se a palavra for apenas a mesma letra repetida (ex: "zzzz", "ssss")
-    if len(set(palavra)) == 1:
-        return True
-        
-    if palavra in OUTROS_RUIDOS:
-        return True
-
-    # Testa contra todos os padrões de expressões (aff, ufa, etc)
-    for padrao in PADROES_EXPRESSOES:
-        if re.fullmatch(padrao, palavra):
-            return True
-
-    return False
-
-def realizar_tri_checagem(texto):
-    if not texto:
-        return False, "Nível 1: Vazio/Silêncio"
-    
-    texto_lower = texto.lower()
-    
-    # 1. Filtro de Alucinações (PT-BR e EN)
-    hallucinations = [
-        "thank you for watching", "subscribing", "thanks for watching", "watching",
-        "obrigado por assistir", "obrigada por assistir", "inscreva-se", "legendado por"
-    ]
-    if any(h in texto_lower for h in hallucinations):
-        return False, "Nível 1: Alucinação detectada"
-
-    # 2. Limpeza de Tags [music], (grunts), *sigh*
-    texto_limpo = re.sub(r'\[.*?\]|\(.*?\)|\*.*?\*|<.*?>|♪|♫', ' ', texto_lower)
-    texto_limpo = re.sub(r'[^\w\s]', ' ', texto_limpo).strip()
-    
-    if not texto_limpo:
-        return False, "Nível 2: Apenas ruídos/tags"
-
-    # 3. Análise de Palavras e Glitches
-    palavras = texto_limpo.split()
-    
-    if not palavras:
-        return False, "Nível 2: Sem palavras após limpeza"
-        
-    # FILTRO ANTI-LOOP (Glitches de Repetição)
-    # Se existem 3 ou mais palavras, e o set reduz a 1 única palavra
-    # Significa que é a MESMA palavra repetida várias vezes (ex: "eca eca eca")
-    if len(palavras) >= 3 and len(set(palavras)) == 1:
-        return False, f"Nível 3: Loop/Glitch de repetição ('{palavras[0]}')"
-
-    # 4. Avaliação das Palavras Reais
-    palavras_reais = [p for p in palavras if not eh_ruido(p)]
-    
-    if len(palavras_reais) == 0:
-        return False, f"Nível 3: Apenas expressões ({' '.join(palavras)})"
-
-    return True, f"✅ FALA REAL DETECTADA"
 
 class AppScanner:
     def __init__(self, root):

@@ -342,9 +342,36 @@ async fn run_job(
             hooks: synthesis_hooks,
         })
         .await?;
-        if synthesis_result.is_none() {
-            emit_cancelled(&app, job_id, Some(&context))?;
-            return Ok(());
+        match synthesis_result {
+            V14SynthesisOutcome::Accepted => {}
+            V14SynthesisOutcome::Cancelled => {
+                emit_cancelled(&app, job_id, Some(&context))?;
+                return Ok(());
+            }
+            V14SynthesisOutcome::Rejected(reason) => {
+                output_layout::remove_approved_outputs(
+                    &request.output_dir,
+                    &context.file_name,
+                    source_metadata.as_ref(),
+                )?;
+                output_layout::remove_ignored_and_rejected(
+                    &request.output_dir,
+                    &context.file_name,
+                )?;
+                let rejected_path =
+                    output_layout::copy_to_rejected(input_path, &request.output_dir)?;
+                emit_rejected_file(
+                    &app,
+                    job_id,
+                    &context,
+                    reason,
+                    rejected_path,
+                    &source_text,
+                    Some(&target_text),
+                )?;
+                emit_progress(&app, job_id, context.progress(100), Some(&context))?;
+                continue;
+            }
         }
         output_layout::remove_ignored_and_rejected(&request.output_dir, &context.file_name)?;
 
@@ -595,6 +622,13 @@ struct V14OutputValidation {
     message: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum V14SynthesisOutcome {
+    Accepted,
+    Rejected(String),
+    Cancelled,
+}
+
 #[derive(Debug, Clone)]
 struct V14TextMetrics {
     similarity: f32,
@@ -604,13 +638,13 @@ struct V14TextMetrics {
     heard_tokens: Vec<String>,
 }
 
-async fn synthesize_with_v14_guard(job: V14SynthesisJob<'_>) -> AppResult<Option<()>> {
+async fn synthesize_with_v14_guard(job: V14SynthesisJob<'_>) -> AppResult<V14SynthesisOutcome> {
     let Some(reference_text) = resolve_v14_reference_text(&job).await? else {
-        return Ok(None);
+        return Ok(V14SynthesisOutcome::Cancelled);
     };
 
     if job.cancellation.is_cancelled() {
-        return Ok(None);
+        return Ok(V14SynthesisOutcome::Cancelled);
     }
 
     remove_file_if_exists(job.output_path)?;
@@ -645,8 +679,8 @@ async fn synthesize_with_v14_guard(job: V14SynthesisJob<'_>) -> AppResult<Option
 
     match synth_result {
         Ok(Some(())) => {}
-        Ok(None) => return Ok(None),
-        Err(_) if job.cancellation.is_cancelled() => return Ok(None),
+        Ok(None) => return Ok(V14SynthesisOutcome::Cancelled),
+        Err(_) if job.cancellation.is_cancelled() => return Ok(V14SynthesisOutcome::Cancelled),
         Err(error) => return Err(error),
     }
 
@@ -671,11 +705,11 @@ async fn synthesize_with_v14_guard(job: V14SynthesisJob<'_>) -> AppResult<Option
             Some(job.context.progress(90)),
             Some(job.context),
         )?;
-        return Ok(Some(()));
+        return Ok(V14SynthesisOutcome::Accepted);
     }
 
     remove_file_if_exists(job.output_path)?;
-    Err(AppError::Internal(format!(
+    Ok(V14SynthesisOutcome::Rejected(format!(
         "Síntese v14 reprovada: {}",
         validation.message
     )))
@@ -1347,6 +1381,35 @@ fn emit_ignored_file(
         )
         .with_output_path(output_path)
         .with_output_status(AudioFileStatus::Ignored),
+    )
+}
+
+fn emit_rejected_file(
+    app: &AppHandle,
+    job_id: JobId,
+    context: &FileContext,
+    reason: String,
+    output_path: PathBuf,
+    source_text: &str,
+    target_text: Option<&str>,
+) -> AppResult<()> {
+    emit(
+        app,
+        EVENT_FILE_COMPLETE,
+        event(
+            job_id,
+            JobEventKind::FileComplete,
+            Some(JobStage::FileComplete),
+            reason,
+            Some(context.progress(100)),
+            Some(context),
+        )
+        .with_text(
+            Some(source_text.to_string()),
+            target_text.map(str::to_string),
+        )
+        .with_output_path(output_path)
+        .with_output_status(AudioFileStatus::Rejected),
     )
 }
 

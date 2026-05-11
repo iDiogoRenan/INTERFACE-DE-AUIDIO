@@ -22,6 +22,7 @@ from _patch_accent_fix import (
     GeradorPoolWorker,
     VOICE_PROFILES_PTBR,
     get_duracao_exata,
+    validar_audio_final_completo,
 )
 from ui_language import (
     SOURCE_LANGUAGE_CODES,
@@ -718,7 +719,7 @@ class MainWindow(QMainWindow):
         self.pool_worker = None
         self._qt_workers = set()
         self._pending_dub_paths = None
-        self._cfg_file = "config_pratico.json"
+        self._cfg_file = os.environ.get("DUBLAGEM_MASTER_CONFIG", "config_pratico.json")
         self._load_cfg()
         
         self.setWindowTitle(f"🎙️ Dublador Master Pro v{APP_VERSION} (Focado e Ágil)")
@@ -825,6 +826,7 @@ class MainWindow(QMainWindow):
 
         # Tab 2: Validação
         self.tab_val = ValidacaoWidget()
+        self.tab_val.set_quality_checker(self._validar_aprovacao_manual)
         self.tab_val.redub_request.connect(self._redublar_de_validacao)
         self.tab_val.transcribe_request.connect(self._transcrever_de_validacao)
         self.tab_val.batch_transcribe_request.connect(self._transcrever_lote_validacao)
@@ -1144,6 +1146,22 @@ class MainWindow(QMainWindow):
                 pasta_en=self.lne_in.text().strip(),
                 pasta_dublados=self.lne_out.text().strip()
             )
+
+    def _validar_aprovacao_manual(self, audio_path: str, texto_esperado: str, target_lang: str) -> tuple[bool, str]:
+        import torch
+        import whisper
+
+        dev = "cuda" if torch.cuda.is_available() else "cpu"
+        if self.models["whisper"] is None:
+            self._log("[VAL] Carregando Whisper MEDIUM para controle de qualidade...", "info")
+            self.models["whisper"] = whisper.load_model("medium", device=dev)
+
+        return validar_audio_final_completo(
+            audio_path,
+            texto_esperado,
+            self.models["whisper"],
+            target_lang,
+        )
 
     def _transcrever_de_validacao(self, src: str, target_lang: str, source_lang: str):
         if self._is_worker_running(self._val_trans_worker):

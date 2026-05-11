@@ -5,6 +5,10 @@ os.environ["QT_QPA_PLATFORM"] = "offscreen"
 sys.path.insert(0, os.path.dirname(__file__))
 ffmpeg_dir = os.path.join(os.path.dirname(__file__), ".venv", "ffmpeg")
 os.environ["PATH"] = ffmpeg_dir + os.pathsep + os.environ.get("PATH", "")
+cfg_fd, cfg_path = tempfile.mkstemp(suffix=".json")
+os.close(cfg_fd)
+os.unlink(cfg_path)
+os.environ["DUBLAGEM_MASTER_CONFIG"] = cfg_path
 sys.stdout = open(sys.stdout.fileno(), mode='w', encoding='utf-8', buffering=1)
 
 from PyQt6.QtWidgets import QApplication
@@ -13,6 +17,8 @@ import unittest.mock as mock
 app = QApplication(sys.argv)
 
 ok = True
+tmpfinal = ""
+blocked_final = ""
 
 
 def write_silent_wav(path: str) -> None:
@@ -60,6 +66,7 @@ except AssertionError as e:
 
 # ─── Testes do ValidacaoWidget ────────────────────────────────────────────────
 val = win.tab_val
+val.set_quality_checker(lambda _path, _text, _lang: (True, "QC fake OK"))
 for injected_player in (getattr(val, "_player_en", None), getattr(val, "_player_pt", None)):
     if injected_player:
         injected_player.load = lambda _path: None
@@ -128,6 +135,21 @@ try:
 except Exception as e:
     print(f"9. [ERRO] {e}"); ok = False
 
+try:
+    blocked_final = tempfile.mkdtemp()
+    val.set_quality_checker(lambda _path, _text, _lang: (False, "Tri-checagem SEPRAR_AUDIOS reprovou: teste"))
+    val.lne_final.setText(blocked_final)
+    val.lista.setCurrentRow(2)
+    val._arquivo_pt = os.path.join(tmpdir, "audio_003.wav")
+    with mock.patch('PyQt6.QtWidgets.QMessageBox.warning', return_value=None):
+        val._aprovar()
+    assert not os.path.exists(os.path.join(blocked_final, "audio_003.wav"))
+    assert val.lista.item(2).data(Qt.ItemDataRole.UserRole + 1) == "rejeitado"
+    val.set_quality_checker(lambda _path, _text, _lang: (True, "QC fake OK"))
+    print("10. [OK] _aprovar bloqueia quando o controle de qualidade reprova")
+except Exception as e:
+    print(f"10. [ERRO] {e}"); ok = False
+
 # ─── Teste: rejeitar arquivo ─────────────────────────────────────────────────
 try:
     val.lista.setCurrentRow(1)
@@ -135,36 +157,36 @@ try:
     val._rejeitar()
     item = val.lista.item(1)
     assert item.data(Qt.ItemDataRole.UserRole + 1) == "rejeitado"
-    print("10. [OK] _rejeitar marca como rejeitado")
+    print("11. [OK] _rejeitar marca como rejeitado")
 except Exception as e:
-    print(f"10. [ERRO] {e}"); ok = False
+    print(f"11. [ERRO] {e}"); ok = False
 
 # ─── Teste: estatísticas ──────────────────────────────────────────────────────
 try:
     val._atualizar_stats()
     stats = val.lbl_stats.text()
     assert "1" in stats  # 1 aprovado
-    print(f"11. [OK] Estatísticas atualizadas: {stats}")
+    print(f"12. [OK] Estatísticas atualizadas: {stats}")
 except Exception as e:
-    print(f"11. [ERRO] {e}"); ok = False
+    print(f"12. [ERRO] {e}"); ok = False
 
 # ─── Teste: próximo navega corretamente ──────────────────────────────────────
 try:
     val.lista.setCurrentRow(0)
     val._proximo()
     assert val.lista.currentRow() == 1
-    print("12. [OK] _proximo navega para próximo item")
+    print("13. [OK] _proximo navega para próximo item")
 except Exception as e:
-    print(f"12. [ERRO] {e}"); ok = False
+    print(f"13. [ERRO] {e}"); ok = False
 
 # ─── Teste: _on_tab_mudou preenche pasta ─────────────────────────────────────
 try:
     win.lne_out.setText(tmpdir)
     win._on_tab_mudou(1)
     assert val.lne_dublados.text() == tmpdir
-    print("13. [OK] _on_tab_mudou preenche pasta de dublados automaticamente")
+    print("14. [OK] _on_tab_mudou preenche pasta de dublados automaticamente")
 except Exception as e:
-    print(f"13. [ERRO] {e}"); ok = False
+    print(f"14. [ERRO] {e}"); ok = False
 
 # ─── Teste: _redublar_de_validacao muda para aba 0 ───────────────────────────
 try:
@@ -186,10 +208,10 @@ try:
         )
     # O worker foi criado e iniciado sem crash — nao muda de aba (fica na validacao)
     assert hasattr(win, '_val_worker')
-    print("14. [OK] _redublar_de_validacao: worker criado sem crash")
+    print("15. [OK] _redublar_de_validacao: worker criado sem crash")
 except Exception as e:
     import traceback
-    print(f"14. [ERRO] {e}")
+    print(f"15. [ERRO] {e}")
     traceback.print_exc()
     ok = False
 
@@ -199,17 +221,22 @@ try:
     assert current_language_code(win.cmb_target_lang, "pt") == "pt"
     assert current_language_code(val.cmb_source_lang, "auto") == "auto"
     assert current_language_code(val.cmb_target_lang, "pt") == "pt"
-    print("15. [OK] Combos de idioma usam currentData com fallback seguro")
+    print("16. [OK] Combos de idioma usam currentData com fallback seguro")
 except Exception as e:
-    print(f"15. [ERRO] {e}"); ok = False
+    print(f"16. [ERRO] {e}"); ok = False
 
 # ─── Cleanup ──────────────────────────────────────────────────────────────────
 shutil.rmtree(tmpdir, ignore_errors=True)
 shutil.rmtree(tmpfinal, ignore_errors=True)
+shutil.rmtree(blocked_final, ignore_errors=True)
+try:
+    os.remove(cfg_path)
+except FileNotFoundError:
+    pass
 
 print()
 if ok:
-    print("=== TODOS OS 15 TESTES PASSARAM ===")
+    print("=== TODOS OS 16 TESTES PASSARAM ===")
 else:
     print("=== FALHOU ===")
     sys.exit(1)

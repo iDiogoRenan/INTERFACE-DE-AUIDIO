@@ -472,6 +472,33 @@ describe("workspaceStore transcription hydration", () => {
     expect(useWorkspaceStore.getState().lastOutputPath).toBeNull();
   });
 
+  it("marks rejected files as reviewable outputs without finishing the whole job", () => {
+    useWorkspaceStore.setState({
+      activeJobId: "job-1",
+      isBusy: true,
+      files: [fileA, fileB],
+      selectedPath: fileA.path
+    });
+
+    applyJobEvent(
+      jobEvent({
+        kind: "file_complete",
+        stage: "file_complete",
+        filePath: fileA.path,
+        outputPath: "E:\\audio\\saida\\Reprovados\\line_a.wav",
+        outputStatus: "rejected",
+        message: "Síntese v14 reprovada: Texto divergente (sim=0.38). Ouvido: 'Batola!'"
+      })
+    );
+
+    expect(useWorkspaceStore.getState().files[0]).toMatchObject({
+      status: "rejected",
+      outputPath: "E:\\audio\\saida\\Reprovados\\line_a.wav"
+    });
+    expect(useWorkspaceStore.getState().activeJobId).toBe("job-1");
+    expect(useWorkspaceStore.getState().isBusy).toBe(true);
+  });
+
   it("keeps execution logs timestamped and sorted newest first", () => {
     const store = useWorkspaceStore.getState();
 

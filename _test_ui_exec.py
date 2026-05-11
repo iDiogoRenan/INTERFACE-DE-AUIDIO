@@ -14,6 +14,10 @@ os.environ["QT_QPA_PLATFORM"] = "offscreen"  # headless
 sys.path.insert(0, os.path.dirname(__file__))
 ffmpeg_dir = os.path.join(os.path.dirname(__file__), ".venv", "ffmpeg")
 os.environ["PATH"] = ffmpeg_dir + os.pathsep + os.environ.get("PATH", "")
+cfg_fd, cfg_path = tempfile.mkstemp(suffix=".json")
+os.close(cfg_fd)
+os.unlink(cfg_path)
+os.environ["DUBLAGEM_MASTER_CONFIG"] = cfg_path
 sys.stdout = open(sys.stdout.fileno(), mode='w', encoding='utf-8', buffering=1)
 
 from PyQt6.QtWidgets import QApplication
@@ -189,4 +193,9 @@ if ok:
     print("=== TODOS OS TESTES PASSARAM — PRONTO PARA RODAR ===")
 else:
     print("=== FALHOU — corrigir antes de usar ===")
+try:
+    os.remove(cfg_path)
+except FileNotFoundError:
+    pass
+if not ok:
     sys.exit(1)

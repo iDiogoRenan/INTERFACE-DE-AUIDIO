@@ -540,7 +540,7 @@ async function registerJobListeners(): Promise<void> {
   });
   await listen<DubbingJobEvent>("job:file-complete", (event) => {
     applyJobEvent(event.payload);
-    appendJobLog(event.payload, "success");
+    appendJobLog(event.payload, event.payload.outputStatus === "rejected" ? "warning" : "success");
   });
   await listen<DubbingJobEvent>("job:cancelled", (event) => {
     applyJobEvent(event.payload);

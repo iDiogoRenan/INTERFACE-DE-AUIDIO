@@ -1,4 +1,4 @@
-import sys, os, wave
+import sys, os, tempfile, wave
 from PyQt6.QtWidgets import QApplication
 from PyQt6.QtCore import Qt
 
@@ -6,6 +6,10 @@ from PyQt6.QtCore import Qt
 os.environ["QT_QPA_PLATFORM"] = "offscreen"
 ffmpeg_dir = os.path.join(os.path.dirname(__file__), ".venv", "ffmpeg")
 os.environ["PATH"] = ffmpeg_dir + os.pathsep + os.environ.get("PATH", "")
+cfg_fd, cfg_path = tempfile.mkstemp(suffix=".json")
+os.close(cfg_fd)
+os.unlink(cfg_path)
+os.environ["DUBLAGEM_MASTER_CONFIG"] = cfg_path
 sys.stdout = open(sys.stdout.fileno(), mode='w', encoding='utf-8', buffering=1)
 app = QApplication(sys.argv)
 
@@ -18,7 +22,7 @@ for player in (getattr(val, "_player_en", None), getattr(val, "_player_pt", None
         player.clear = lambda _msg="", player=player: setattr(player, "_path", "")
         player.stop = lambda: None
 
-import tempfile, shutil
+import shutil
 tmp_en = tempfile.mkdtemp()
 tmp_pt = tempfile.mkdtemp()
 tmp_out = tempfile.mkdtemp()
@@ -71,4 +75,8 @@ app.processEvents()
 shutil.rmtree(tmp_en, ignore_errors=True)
 shutil.rmtree(tmp_pt, ignore_errors=True)
 shutil.rmtree(tmp_out, ignore_errors=True)
+try:
+    os.remove(cfg_path)
+except FileNotFoundError:
+    pass
 print("TESTE PASSOU: Faltando EN esvazia o player corretamente e avisa o usuario!")

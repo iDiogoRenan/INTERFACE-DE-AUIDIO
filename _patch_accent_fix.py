@@ -10,6 +10,8 @@ import librosa
 from pydub import AudioSegment
 from PyQt6.QtCore import QThread, pyqtSignal
 
+from _audio_quality_gate import realizar_tri_checagem
+
 # ─── FUNÇÕES AUXILIARES ──────────────────────────────────────────────────────
 
 VOICE_PROFILES_PTBR = {
@@ -153,7 +155,7 @@ def transcrever_referencia_curta(
     fallback_text: str,
     log: Optional[Callable[[str, str], None]] = None,
 ) -> str:
-    kwargs = {"temperature": 0.0}
+    kwargs: dict[str, object] = {"temperature": 0.0}
     if source_lang in {"en", "pt", "fr", "sv"}:
         kwargs["language"] = source_lang
     texto_ref = ""
@@ -356,9 +358,11 @@ def calcular_similaridade_texto(texto1, texto2):
     return difflib.SequenceMatcher(None, t1, t2).ratio()
 
 def verificar_qualidade_fala_original(resultado_whisper):
-    texto = resultado_whisper.get("text", "").lower().strip('.!?,;:"\' ')
-    if not texto:
-        return False, "ORIGINAL_RUIM: audio vazio ou sem fala detectavel."
+    texto_bruto = resultado_whisper.get("text", "").strip()
+    tri_ok, tri_motivo = realizar_tri_checagem(texto_bruto)
+    if not tri_ok:
+        return False, f"ORIGINAL_RUIM: tri-checagem SEPRAR_AUDIOS reprovou: {tri_motivo}."
+    texto = texto_bruto.lower().strip('.!?,;:"\' ')
     segments = resultado_whisper.get("segments", [])
     if not segments:
         return False, "ORIGINAL_RUIM: Whisper nao encontrou segmentos de voz."
@@ -459,7 +463,7 @@ def validar_audio_final_completo(caminho_saida, texto_esperado, whisper_model=No
     except Exception as e:
         return False, f"Falha ao inspecionar cauda do audio final: {e}"
 
-    if whisper_model is None or not texto_esperado:
+    if whisper_model is None:
         return True, "Cauda de audio OK."
 
     try:
@@ -468,6 +472,14 @@ def validar_audio_final_completo(caminho_saida, texto_esperado, whisper_model=No
         texto_ouvido = res.get("text", "").strip()
     except Exception as e:
         return False, f"Falha na transcricao final de conferencia: {e}"
+
+    tri_ok, tri_motivo = realizar_tri_checagem(texto_ouvido)
+    if not tri_ok:
+        preview = texto_ouvido if texto_ouvido else "[Vazio]"
+        return False, f"Tri-checagem SEPRAR_AUDIOS reprovou: {tri_motivo}. Ouvido: '{preview}'"
+
+    if not texto_esperado:
+        return True, f"Tri-checagem SEPRAR_AUDIOS OK. Ouvido: '{texto_ouvido}'"
 
     similaridade = calcular_similaridade_texto(texto_esperado, texto_ouvido)
     cobertura, cauda_ok, esperado_tokens, ouvido_tokens = calcular_cobertura_palavras(texto_esperado, texto_ouvido)

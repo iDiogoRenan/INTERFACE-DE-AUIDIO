@@ -1,5 +1,6 @@
 # _patch_validacao.py — Aba de Validação Manual
 import os, shutil
+from typing import Callable
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QListWidget, QListWidgetItem, QGroupBox, QLineEdit,
@@ -32,6 +33,7 @@ class ValidacaoWidget(QWidget):
         self._arquivo_en     = ""
         self._player_en      = None
         self._player_pt      = None
+        self._quality_checker: Callable[[str, str, str], tuple[bool, str]] | None = None
         self._build_ui()
 
     def inject_players(self, player_en, player_pt):
@@ -39,6 +41,9 @@ class ValidacaoWidget(QWidget):
         self._player_pt = player_pt
         self._players_box_en.addWidget(player_en)
         self._players_box_pt.addWidget(player_pt)
+
+    def set_quality_checker(self, checker: Callable[[str, str, str], tuple[bool, str]]) -> None:
+        self._quality_checker = checker
 
     def _build_ui(self):
         root = QHBoxLayout(self)
@@ -314,6 +319,23 @@ class ValidacaoWidget(QWidget):
         if not item or not self._arquivo_pt: return
         pasta_final = self.lne_final.text().strip()
         if not pasta_final: return QMessageBox.warning(self, "Aviso", "Defina a pasta Aprovados primeiro.")
+        if self._quality_checker is None:
+            return QMessageBox.warning(self, "Aviso", "Controle de qualidade automático indisponível.")
+        self.lbl_status.setText("⏳ Controle de qualidade automático...")
+        self.lbl_status.setStyleSheet("color:#f0883e;")
+        qc_ok, qc_motivo = self._quality_checker(
+            self._arquivo_pt,
+            self.txt_pt.toPlainText().strip(),
+            current_language_code(self.cmb_target_lang, "pt"),
+        )
+        if not qc_ok:
+            item.setText(f"❌  {os.path.basename(self._arquivo_pt)}")
+            item.setForeground(QColor("#f85149"))
+            item.setData(Qt.ItemDataRole.UserRole + 1, "rejeitado")
+            self.lbl_status.setText(f"❌ QC reprovou: {qc_motivo}")
+            self.lbl_status.setStyleSheet("color:#f85149;")
+            self._atualizar_stats()
+            return QMessageBox.warning(self, "Controle de Qualidade", qc_motivo)
         os.makedirs(pasta_final, exist_ok=True)
         dest = os.path.join(pasta_final, os.path.basename(self._arquivo_pt))
         try:
