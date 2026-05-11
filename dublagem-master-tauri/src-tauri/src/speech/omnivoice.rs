@@ -11,7 +11,6 @@ use async_trait::async_trait;
 #[cfg(feature = "ml")]
 use dublagem_domain::{
     DubbingOptions, LanguageCode, LineSynthesisOverride, NativeSynthesisSettings, VoiceMode,
-    OMNIVOICE_MAX_SYNTHESIS_SECONDS,
 };
 #[cfg(feature = "ml")]
 use omnivoice_infer::{
@@ -528,13 +527,12 @@ fn validate_omnivoice_duration(duration_seconds: Option<f32>) -> AppResult<()> {
     let Some(duration_seconds) = duration_seconds else {
         return Ok(());
     };
-    if duration_seconds <= OMNIVOICE_MAX_SYNTHESIS_SECONDS {
+    if duration_seconds.is_finite() && duration_seconds > 0.0 {
         return Ok(());
     }
 
     Err(AppError::InvalidConfig(format!(
-        "OmniVoice limitado a {:.2}s por síntese; recebido {duration_seconds:.2}s.",
-        OMNIVOICE_MAX_SYNTHESIS_SECONDS
+        "duração de síntese OmniVoice inválida: {duration_seconds:.2}s."
     )))
 }
 
@@ -643,6 +641,7 @@ fn generation_request(
     request.generation_config.preprocess_prompt = settings.preprocess_prompt;
     request.generation_config.postprocess_output = settings.postprocess_output;
     request.generation_config.denoise = settings.denoise;
+    request.generation_config.preserve_sentence_boundaries = options.preserve_sentence_boundaries;
     request
 }
 
@@ -1035,6 +1034,7 @@ fn map_omnivoice_error(error: OmniVoiceError) -> AppError {
 #[cfg(all(test, feature = "ml"))]
 mod tests {
     use super::*;
+    use dublagem_domain::OMNIVOICE_MAX_SYNTHESIS_SECONDS;
 
     #[test]
     fn whole_file_synthesis_uses_single_omnivoice_segment() {
@@ -1079,7 +1079,7 @@ mod tests {
     }
 
     #[test]
-    fn synthesis_rejects_durations_above_omnivoice_limit() {
+    fn whole_file_synthesis_accepts_long_form_duration_for_chunked_inference() {
         let request = OwnedSynthesisRequest {
             text: "Texto acima do limite.".to_string(),
             source_audio: PathBuf::from("source.wav"),
@@ -1095,7 +1095,12 @@ mod tests {
         let result =
             synthesis_segments_for_request(&request, Some(OMNIVOICE_MAX_SYNTHESIS_SECONDS + 0.01));
 
-        assert!(result.is_err());
+        let segments = result.expect("long form segment");
+        assert_eq!(segments.len(), 1);
+        assert_eq!(
+            segments[0].duration_seconds,
+            Some(OMNIVOICE_MAX_SYNTHESIS_SECONDS + 0.01)
+        );
     }
 
     #[test]
@@ -1145,7 +1150,10 @@ mod tests {
 
     #[test]
     fn generation_request_maps_design_settings_without_clone_prompt() {
-        let options = DubbingOptions::default();
+        let options = DubbingOptions {
+            preserve_sentence_boundaries: true,
+            ..DubbingOptions::default()
+        };
         let settings = NativeSynthesisSettings {
             voice_mode: VoiceMode::Design,
             instruct: Some("female, young adult, high pitch".to_string()),
@@ -1171,6 +1179,7 @@ mod tests {
         assert_eq!(request.speeds[0], Some(1.25));
         assert_eq!(request.generation_config.num_step, 32);
         assert!(!request.generation_config.denoise);
+        assert!(request.generation_config.preserve_sentence_boundaries);
     }
 
     #[test]

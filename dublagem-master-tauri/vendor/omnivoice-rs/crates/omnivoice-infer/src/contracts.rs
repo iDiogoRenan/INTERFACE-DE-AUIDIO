@@ -504,6 +504,7 @@ pub struct GenerationConfig {
     pub postprocess_output: bool,
     pub audio_chunk_duration: f32,
     pub audio_chunk_threshold: f32,
+    pub preserve_sentence_boundaries: bool,
 }
 
 impl Default for GenerationConfig {
@@ -520,6 +521,7 @@ impl Default for GenerationConfig {
             postprocess_output: true,
             audio_chunk_duration: 15.0,
             audio_chunk_threshold: 30.0,
+            preserve_sentence_boundaries: false,
         }
     }
 }

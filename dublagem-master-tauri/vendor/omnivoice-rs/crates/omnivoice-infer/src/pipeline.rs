@@ -708,6 +708,7 @@ impl Phase3Pipeline {
                     &task.texts[index],
                     task.target_lens[index],
                     task.generation_config.audio_chunk_duration,
+                    task.generation_config.preserve_sentence_boundaries,
                 ))
             })
             .collect::<Result<Vec<_>>>()
@@ -891,6 +892,7 @@ impl Phase3Pipeline {
                     &task.texts[index],
                     task.target_lens[index],
                     task.generation_config.audio_chunk_duration,
+                    task.generation_config.preserve_sentence_boundaries,
                 ))
             })
             .collect::<Result<Vec<_>>>()

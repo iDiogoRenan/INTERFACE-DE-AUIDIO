@@ -2,12 +2,16 @@ import * as Checkbox from "@radix-ui/react-checkbox";
 import { Check, Save } from "lucide-react";
 import { PathField } from "../../shared/ui/PathField";
 import { useWorkspaceStore } from "../../stores/workspaceStore";
-import type { AppConfig, DubbingMode, LanguageCode } from "../../shared/tauri/types";
+import type { AppConfig, LanguageCode } from "../../shared/tauri/types";
 import styles from "./SettingsPanel.module.css";
 
 const sourceLanguages: LanguageCode[] = ["auto", "en", "fr", "sv", "pt"];
 const targetLanguages: LanguageCode[] = ["pt", "fr", "sv", "en"];
-const modes: DubbingMode[] = ["classico", "antisotaque"];
+const synthesisChunkLimits = {
+  min: 1,
+  max: 20,
+  seconds: 30
+} as const;
 
 export function SettingsPanel() {
   const config = useWorkspaceStore((state) => state.config);
@@ -115,23 +119,6 @@ export function SettingsPanel() {
           </select>
         </label>
         <label>
-          Modo
-          <select
-            value={config.options.mode}
-            onChange={(event) => {
-              void patchConfig({
-                options: { ...config.options, mode: event.currentTarget.value as DubbingMode }
-              });
-            }}
-          >
-            {modes.map((mode) => (
-              <option key={mode} value={mode}>
-                {modeLabel(mode)}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label>
           Margem final
           <input
             type="number"
@@ -142,6 +129,24 @@ export function SettingsPanel() {
             onChange={(event) => {
               void patchConfig({
                 options: { ...config.options, padMs: Number(event.currentTarget.value) }
+              });
+            }}
+          />
+        </label>
+        <label>
+          Chunks máximos ({synthesisChunkLimits.seconds}s)
+          <input
+            type="number"
+            min={synthesisChunkLimits.min}
+            max={synthesisChunkLimits.max}
+            step={1}
+            value={config.options.maxSynthesisChunks}
+            onChange={(event) => {
+              void patchConfig({
+                options: {
+                  ...config.options,
+                  maxSynthesisChunks: normalizeMaxSynthesisChunks(event.currentTarget.value)
+                }
               });
             }}
           />
@@ -168,6 +173,13 @@ export function SettingsPanel() {
           checked={config.options.trailingPeriod}
           onCheckedChange={(trailingPeriod) => {
             void patchConfig({ options: { ...config.options, trailingPeriod } });
+          }}
+        />
+        <Toggle
+          label="Preservar fim de frase"
+          checked={config.options.preserveSentenceBoundaries}
+          onCheckedChange={(preserveSentenceBoundaries) => {
+            void patchConfig({ options: { ...config.options, preserveSentenceBoundaries } });
           }}
         />
       </div>
@@ -197,12 +209,12 @@ function languageLabel(language: LanguageCode): string {
   return labels[language];
 }
 
-function modeLabel(mode: DubbingMode): string {
-  const labels: Record<DubbingMode, string> = {
-    classico: "Clássico",
-    antisotaque: "Antissotaque"
-  };
-  return labels[mode];
+function normalizeMaxSynthesisChunks(value: string): number {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) {
+    return synthesisChunkLimits.min;
+  }
+  return Math.min(synthesisChunkLimits.max, Math.max(synthesisChunkLimits.min, Math.round(parsed)));
 }
 
 interface ToggleProps {

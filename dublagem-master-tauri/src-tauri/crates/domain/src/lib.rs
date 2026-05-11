@@ -22,6 +22,9 @@ pub const OMNIVOICE_NATIVE_TAGS: &[&str] = &[
 ];
 
 pub const OMNIVOICE_MAX_SYNTHESIS_SECONDS: f32 = 30.0;
+pub const MIN_SYNTHESIS_CHUNKS: u32 = 1;
+pub const DEFAULT_MAX_SYNTHESIS_CHUNKS: u32 = MIN_SYNTHESIS_CHUNKS;
+pub const MAX_SYNTHESIS_CHUNKS: u32 = 20;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -232,6 +235,10 @@ pub struct DubbingOptions {
     pub trailing_period: bool,
     pub pad_ms: u32,
     pub omni_temperature: f32,
+    #[serde(default = "default_max_synthesis_chunks")]
+    pub max_synthesis_chunks: u32,
+    #[serde(default)]
+    pub preserve_sentence_boundaries: bool,
     #[serde(default)]
     pub native_synthesis: NativeSynthesisSettings,
 }
@@ -247,9 +254,49 @@ impl Default for DubbingOptions {
             trailing_period: false,
             pad_ms: 200,
             omni_temperature: 0.0,
+            max_synthesis_chunks: default_max_synthesis_chunks(),
+            preserve_sentence_boundaries: false,
             native_synthesis: NativeSynthesisSettings::default(),
         }
     }
+}
+
+impl DubbingOptions {
+    pub fn validate(&self) -> Result<(), String> {
+        self.native_synthesis.validate()?;
+        validate_integer_range(
+            "maxSynthesisChunks",
+            self.max_synthesis_chunks,
+            MIN_SYNTHESIS_CHUNKS,
+            MAX_SYNTHESIS_CHUNKS,
+        )?;
+        Ok(())
+    }
+
+    pub fn max_synthesis_duration_seconds(&self) -> f64 {
+        max_synthesis_duration_seconds(self.max_synthesis_chunks)
+    }
+}
+
+pub fn default_max_synthesis_chunks() -> u32 {
+    DEFAULT_MAX_SYNTHESIS_CHUNKS
+}
+
+pub fn max_synthesis_duration_seconds(max_synthesis_chunks: u32) -> f64 {
+    f64::from(OMNIVOICE_MAX_SYNTHESIS_SECONDS)
+        * f64::from(max_synthesis_chunks.clamp(MIN_SYNTHESIS_CHUNKS, MAX_SYNTHESIS_CHUNKS))
+}
+
+fn validate_integer_range(
+    name: &str,
+    value: u32,
+    minimum: u32,
+    maximum: u32,
+) -> Result<(), String> {
+    if value < minimum || value > maximum {
+        return Err(format!("{name} deve ficar entre {minimum} e {maximum}"));
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -288,6 +335,10 @@ impl AppConfig {
     pub fn normalize_model_presets(mut self) -> Self {
         let active_model = self.active_speech_model;
         let legacy_active_settings = self.options.native_synthesis.clone();
+        self.options.max_synthesis_chunks = self
+            .options
+            .max_synthesis_chunks
+            .clamp(MIN_SYNTHESIS_CHUNKS, MAX_SYNTHESIS_CHUNKS);
 
         for model_id in SpeechModelId::ALL {
             self.speech_model_presets

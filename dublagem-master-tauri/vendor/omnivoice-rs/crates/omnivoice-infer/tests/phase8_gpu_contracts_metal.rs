@@ -83,6 +83,7 @@ fn phase8_metal_long_form_auto_reuses_first_chunk_reference_for_followup_chunks(
         &task.texts[0],
         task.target_lens[0],
         request.generation_config.audio_chunk_duration,
+        request.generation_config.preserve_sentence_boundaries,
     );
 
     assert_eq!(chunk_texts.len(), chunks.len());
@@ -141,6 +142,7 @@ fn phase8_metal_long_form_clone_preserves_original_reference_for_each_chunk() {
         &task.texts[0],
         task.target_lens[0],
         request.generation_config.audio_chunk_duration,
+        request.generation_config.preserve_sentence_boundaries,
     );
 
     assert_eq!(chunk_texts.len(), chunks.len());

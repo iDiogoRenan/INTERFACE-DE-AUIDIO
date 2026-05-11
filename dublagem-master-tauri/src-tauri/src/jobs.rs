@@ -13,7 +13,6 @@ use chrono::{SecondsFormat, Utc};
 use dublagem_domain::{
     AudioFileStatus, DubbingJobEvent, DubbingOptions, DubbingRequest, JobEventKind, JobId,
     JobStage, LanguageCode, LineSynthesisOverride, TranslationRequest,
-    OMNIVOICE_MAX_SYNTHESIS_SECONDS,
 };
 use std::{
     collections::HashMap,
@@ -150,7 +149,10 @@ async fn run_job(
             "o salvamento manual exige exatamente um áudio selecionado".to_string(),
         ));
     }
-    project_metadata::validate_settings(&request.options.native_synthesis)?;
+    request
+        .options
+        .validate()
+        .map_err(AppError::InvalidConfig)?;
     project_metadata::validate_native_tags(&request.pinned_tags)?;
     for line in &request.line_overrides {
         project_metadata::validate_text_native_tags(&line.target_text)?;
@@ -160,7 +162,8 @@ async fn run_job(
 
     output_layout::ensure_output_layout(&request.output_dir)?;
     let total = request.input_paths.len();
-    let ignored_inputs = ignored_source_audio_reasons(&request.input_paths)?;
+    let ignored_inputs =
+        ignored_source_audio_reasons(&request.input_paths, request.options.max_synthesis_chunks)?;
     let needs_speech_engines = ignored_inputs.len() < total;
 
     let (transcriber, synthesizer) = if needs_speech_engines {
@@ -212,7 +215,10 @@ async fn run_job(
             &app,
             job_id,
             JobStage::Queued,
-            "Todos os arquivos excedem 30s; modelos de fala não foram carregados.",
+            format!(
+                "Todos os arquivos excedem o limite configurado de {} chunk(s); modelos de fala não foram carregados.",
+                request.options.max_synthesis_chunks
+            ),
             Some(2),
             None,
         )?;
@@ -356,17 +362,20 @@ async fn run_job(
                 return Ok(());
             }
             V14SynthesisOutcome::Rejected(reason) => {
+                output_layout::remove_ignored_and_rejected(
+                    &request.output_dir,
+                    &context.file_name,
+                )?;
+                let rejected_path = output_layout::move_generated_to_rejected(
+                    &output_path,
+                    &request.output_dir,
+                    &context.file_name,
+                )?;
                 output_layout::remove_approved_outputs(
                     &request.output_dir,
                     &context.file_name,
                     source_metadata.as_ref(),
                 )?;
-                output_layout::remove_ignored_and_rejected(
-                    &request.output_dir,
-                    &context.file_name,
-                )?;
-                let rejected_path =
-                    output_layout::copy_to_rejected(input_path, &request.output_dir)?;
                 emit_rejected_file(
                     &app,
                     job_id,
@@ -698,6 +707,12 @@ async fn synthesize_with_v14_guard(job: V14SynthesisJob<'_>) -> AppResult<V14Syn
         Err(_) if job.cancellation.is_cancelled() => return Ok(V14SynthesisOutcome::Cancelled),
         Err(error) => return Err(error),
     }
+    if !job.output_path.is_file() {
+        return Err(AppError::Internal(format!(
+            "síntese OmniVoice finalizou sem escrever o arquivo de saída em {}",
+            job.output_path.display()
+        )));
+    }
 
     let validation = validate_v14_output(V14ValidationJob {
         app: job.app,
@@ -723,7 +738,6 @@ async fn synthesize_with_v14_guard(job: V14SynthesisJob<'_>) -> AppResult<V14Syn
         return Ok(V14SynthesisOutcome::Accepted);
     }
 
-    remove_file_if_exists(job.output_path)?;
     Ok(V14SynthesisOutcome::Rejected(format!(
         "Síntese v14 reprovada: {}",
         validation.message
@@ -1367,26 +1381,45 @@ fn apply_text_options(
     Ok(target_text)
 }
 
-fn ignored_source_audio_reason(path: &Path) -> AppResult<Option<String>> {
+fn ignored_source_audio_reason(
+    path: &Path,
+    max_synthesis_chunks: u32,
+) -> AppResult<Option<String>> {
     let metadata = audio::get_audio_metadata(path)?;
-    let Some(duration_seconds) = metadata.duration_seconds else {
-        return Ok(None);
-    };
-
-    if duration_seconds > f64::from(OMNIVOICE_MAX_SYNTHESIS_SECONDS) {
-        return Ok(Some(format!(
-            "Ignorado: áudio com {duration_seconds:.2}s excede o limite OmniVoice de {:.2}s.",
-            OMNIVOICE_MAX_SYNTHESIS_SECONDS
-        )));
-    }
-
-    Ok(None)
+    Ok(ignored_source_audio_reason_for_duration(
+        metadata.duration_seconds,
+        max_synthesis_chunks,
+    ))
 }
 
-fn ignored_source_audio_reasons(paths: &[PathBuf]) -> AppResult<HashMap<PathBuf, String>> {
+fn ignored_source_audio_reason_for_duration(
+    duration_seconds: Option<f64>,
+    max_synthesis_chunks: u32,
+) -> Option<String> {
+    let duration_seconds =
+        duration_seconds.filter(|seconds| seconds.is_finite() && *seconds > 0.0)?;
+    let max_duration_seconds =
+        dublagem_domain::max_synthesis_duration_seconds(max_synthesis_chunks);
+
+    if duration_seconds <= max_duration_seconds {
+        return None;
+    }
+
+    let required_chunks = output_layout::chunk_count_for_duration_seconds(Some(duration_seconds));
+    Some(format!(
+        "Ignorado: áudio com {duration_seconds:.2}s exige {required_chunks} chunk(s) de {:.2}s, acima do máximo configurado de {}.",
+        dublagem_domain::OMNIVOICE_MAX_SYNTHESIS_SECONDS,
+        max_synthesis_chunks
+    ))
+}
+
+fn ignored_source_audio_reasons(
+    paths: &[PathBuf],
+    max_synthesis_chunks: u32,
+) -> AppResult<HashMap<PathBuf, String>> {
     let mut ignored = HashMap::new();
     for path in paths {
-        if let Some(reason) = ignored_source_audio_reason(path)? {
+        if let Some(reason) = ignored_source_audio_reason(path, max_synthesis_chunks)? {
             ignored.insert(path.clone(), reason);
         }
     }
@@ -1635,6 +1668,18 @@ mod tests {
 
         assert!(!v14_synthesis_uses_clone(&options, &[]));
         assert!(v14_synthesis_uses_clone(&options, &[clone_line]));
+    }
+
+    #[test]
+    fn chunk_budget_ignores_only_audio_above_configured_duration() {
+        assert!(ignored_source_audio_reason_for_duration(Some(30.0), 1).is_none());
+        assert!(ignored_source_audio_reason_for_duration(Some(60.0), 2).is_none());
+
+        let reason =
+            ignored_source_audio_reason_for_duration(Some(60.01), 2).expect("ignored reason");
+
+        assert!(reason.contains("exige 3 chunk(s)"));
+        assert!(reason.contains("máximo configurado de 2"));
     }
 
     #[test]

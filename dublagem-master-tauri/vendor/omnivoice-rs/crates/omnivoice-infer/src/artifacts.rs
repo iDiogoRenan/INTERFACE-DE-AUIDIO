@@ -551,6 +551,8 @@ struct ReferenceCaseGenerationJson {
     audio_chunk_duration: f32,
     #[serde(default = "default_audio_chunk_threshold")]
     audio_chunk_threshold: f32,
+    #[serde(default)]
+    preserve_sentence_boundaries: bool,
 }
 
 fn default_audio_chunk_duration() -> f32 {
@@ -831,6 +833,7 @@ impl ReferenceCaseHandle {
             postprocess_output: case.generation.postprocess_output,
             audio_chunk_duration: case.generation.audio_chunk_duration,
             audio_chunk_threshold: case.generation.audio_chunk_threshold,
+            preserve_sentence_boundaries: case.generation.preserve_sentence_boundaries,
         };
 
         if case.ref_audio.is_some() {

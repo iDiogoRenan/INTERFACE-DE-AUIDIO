@@ -21,7 +21,9 @@ mod voice_design;
 
 pub use duration::RuleDurationEstimator;
 pub use language::resolve_language;
-pub use text::{add_punctuation, chunk_text_punctuation, combine_text};
+pub use text::{
+    add_punctuation, chunk_text_punctuation, chunk_text_sentence_boundaries, combine_text,
+};
 pub use voice_design::{contains_cjk, resolve_instruct};
 
 #[derive(Debug, Clone)]
@@ -493,11 +495,16 @@ impl Frontend {
         text: &str,
         target_len: usize,
         audio_chunk_duration: f32,
+        preserve_sentence_boundaries: bool,
     ) -> Vec<String> {
         let avg_tokens_per_char = target_len as f32 / text.chars().count().max(1) as f32;
         let text_chunk_len = ((audio_chunk_duration * self.frame_rate as f32) / avg_tokens_per_char)
             .max(1.0) as usize;
-        chunk_text_punctuation(text, text_chunk_len, Some(3))
+        if preserve_sentence_boundaries {
+            chunk_text_sentence_boundaries(text, text_chunk_len, Some(3))
+        } else {
+            chunk_text_punctuation(text, text_chunk_len, Some(3))
+        }
     }
 
     pub fn estimate_target_tokens(

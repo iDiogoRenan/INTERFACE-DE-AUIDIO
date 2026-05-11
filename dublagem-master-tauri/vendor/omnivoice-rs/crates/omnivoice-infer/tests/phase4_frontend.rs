@@ -5,8 +5,8 @@ use omnivoice_infer::{
     audio_input::ReferenceAudioProcessor,
     contracts::{GenerationRequest, PreparedPromptSequence},
     frontend::{
-        add_punctuation, chunk_text_punctuation, combine_text, resolve_instruct, resolve_language,
-        Frontend, RuleDurationEstimator,
+        add_punctuation, chunk_text_punctuation, chunk_text_sentence_boundaries, combine_text,
+        resolve_instruct, resolve_language, Frontend, RuleDurationEstimator,
     },
     pipeline::Phase3Pipeline,
     runtime::{DTypeSpec, DeviceSpec, RuntimeOptions},
@@ -70,6 +70,25 @@ fn text_preprocessing_matches_omnivoice_helpers() {
         vec![
             "Mr. Smith arrived.".to_string(),
             "Dr. Brown stayed.".to_string()
+        ]
+    );
+    assert_eq!(
+        chunk_text_punctuation("Hold on, this is one sentence. Next sentence.", 16, Some(3)),
+        vec![
+            "Hold on,".to_string(),
+            "this is one sentence.".to_string(),
+            "Next sentence.".to_string()
+        ]
+    );
+    assert_eq!(
+        chunk_text_sentence_boundaries(
+            "Hold on, this is one sentence. Next sentence.",
+            16,
+            Some(3)
+        ),
+        vec![
+            "Hold on, this is one sentence.".to_string(),
+            "Next sentence.".to_string()
         ]
     );
 }
@@ -165,6 +184,7 @@ fn frontend_chunk_plan_matches_reference_auto_long_case() {
         &task.texts[0],
         task.target_lens[0],
         definition.audio_chunk_duration,
+        false,
     );
 
     assert_eq!(frontend.frame_rate(), 25);

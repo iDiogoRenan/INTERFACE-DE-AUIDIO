@@ -58,6 +58,28 @@ pub fn chunk_text_punctuation(
     chunk_len: usize,
     min_chunk_len: Option<usize>,
 ) -> Vec<String> {
+    chunk_text_with_boundaries(text, chunk_len, min_chunk_len, &general_chunk_punctuation())
+}
+
+pub fn chunk_text_sentence_boundaries(
+    text: &str,
+    chunk_len: usize,
+    min_chunk_len: Option<usize>,
+) -> Vec<String> {
+    chunk_text_with_boundaries(
+        text,
+        chunk_len,
+        min_chunk_len,
+        &sentence_terminal_punctuation(),
+    )
+}
+
+fn chunk_text_with_boundaries(
+    text: &str,
+    chunk_len: usize,
+    min_chunk_len: Option<usize>,
+    split_punctuation: &HashSet<char>,
+) -> Vec<String> {
     let abbreviations: HashSet<&'static str> = HashSet::from([
         "Mr.", "Mrs.", "Ms.", "Dr.", "Prof.", "Sr.", "Jr.", "Rev.", "Fr.", "Hon.", "Pres.", "Gov.",
         "Capt.", "Gen.", "Sen.", "Rep.", "Col.", "Maj.", "Lt.", "Cmdr.", "Sgt.", "Cpl.", "Co.",
@@ -65,7 +87,6 @@ pub fn chunk_text_punctuation(
         "No.", "Jan.", "Feb.", "Mar.", "Apr.", "Aug.", "Sep.", "Sept.", "Oct.", "Nov.", "Dec.",
         "i.e.", "e.g.", "vs.", "Vs.", "Etc.", "approx.", "fig.", "def.",
     ]);
-    let split_punctuation: HashSet<char> = ".,;:!?。，；：！？".chars().collect();
     let closing_marks: HashSet<char> = "\"'）]》》>」】".chars().collect();
 
     let mut sentences: Vec<Vec<char>> = Vec::new();
@@ -100,16 +121,32 @@ pub fn chunk_text_punctuation(
         sentences.push(current);
     }
 
+    merge_text_units(sentences, chunk_len, min_chunk_len)
+}
+
+fn sentence_terminal_punctuation() -> HashSet<char> {
+    ".!?。！？…".chars().collect()
+}
+
+fn general_chunk_punctuation() -> HashSet<char> {
+    ".,;:!?。，；：！？".chars().collect()
+}
+
+fn merge_text_units(
+    units: Vec<Vec<char>>,
+    chunk_len: usize,
+    min_chunk_len: Option<usize>,
+) -> Vec<String> {
     let mut merged: Vec<Vec<char>> = Vec::new();
     let mut chunk = Vec::new();
-    for sentence in sentences {
-        if chunk.len() + sentence.len() <= chunk_len {
-            chunk.extend(sentence);
+    for unit in units {
+        if chunk.len() + unit.len() <= chunk_len {
+            chunk.extend(unit);
         } else {
             if !chunk.is_empty() {
                 merged.push(std::mem::take(&mut chunk));
             }
-            chunk = sentence;
+            chunk = unit;
         }
     }
     if !chunk.is_empty() {
@@ -195,4 +232,40 @@ fn starts_with_emotion_tag(chars: &[char]) -> bool {
         let tag_chars: Vec<char> = tag.chars().collect();
         chars.starts_with(&tag_chars)
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn punctuation_chunking_can_split_on_commas() {
+        assert_eq!(
+            chunk_text_punctuation(
+                "Hold on, this remains one sentence. Next sentence.",
+                16,
+                Some(3)
+            ),
+            vec![
+                "Hold on,".to_string(),
+                "this remains one sentence.".to_string(),
+                "Next sentence.".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn sentence_boundary_chunking_keeps_commas_inside_sentence() {
+        assert_eq!(
+            chunk_text_sentence_boundaries(
+                "Hold on, this remains one sentence. Next sentence.",
+                16,
+                Some(3)
+            ),
+            vec![
+                "Hold on, this remains one sentence.".to_string(),
+                "Next sentence.".to_string()
+            ]
+        );
+    }
 }

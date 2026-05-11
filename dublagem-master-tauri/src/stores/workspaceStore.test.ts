@@ -231,6 +231,26 @@ describe("workspaceStore transcription hydration", () => {
     );
   });
 
+  it("sends long-form chunk controls to the dubbing job", async () => {
+    useWorkspaceStore.setState({
+      config: {
+        ...config,
+        options: {
+          ...config.options,
+          maxSynthesisChunks: 6,
+          preserveSentenceBoundaries: true
+        }
+      }
+    });
+
+    await useWorkspaceStore.getState().startDubbing();
+
+    const [[request]] = clientMocks.startDubbingJob.mock.calls;
+
+    expect(request.options.maxSynthesisChunks).toBe(6);
+    expect(request.options.preserveSentenceBoundaries).toBe(true);
+  });
+
   it("dubs the visible list without reusing the selected file editor draft", async () => {
     useWorkspaceStore.getState().setSourceText("manual source for selected only");
     useWorkspaceStore.getState().setTargetText("manual target for selected only");

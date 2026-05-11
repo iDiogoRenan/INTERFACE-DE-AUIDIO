@@ -107,6 +107,15 @@ pub fn copy_to_rejected(source: &Path, output_dir: &Path) -> AppResult<PathBuf> 
     copy_output_artifact(source, target)
 }
 
+pub fn move_generated_to_rejected(
+    generated_output: &Path,
+    output_dir: &Path,
+    file_name: &str,
+) -> AppResult<PathBuf> {
+    let target = rejected_output_path(output_dir, file_name);
+    move_output_artifact(generated_output, target)
+}
+
 pub fn remove_ignored_and_rejected(output_dir: &Path, file_name: &str) -> AppResult<()> {
     remove_file_if_exists(&ignored_output_path(output_dir, file_name))?;
     remove_file_if_exists(&rejected_output_path(output_dir, file_name))?;
@@ -182,6 +191,28 @@ fn copy_output_artifact(source: &Path, target: PathBuf) -> AppResult<PathBuf> {
     }
     std::fs::copy(source, &target)?;
     Ok(target)
+}
+
+fn move_output_artifact(source: &Path, target: PathBuf) -> AppResult<PathBuf> {
+    if let Some(parent) = target.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    remove_file_if_exists(&target)?;
+
+    match std::fs::rename(source, &target) {
+        Ok(()) => Ok(target),
+        Err(rename_error) => {
+            std::fs::copy(source, &target).map_err(|copy_error| {
+                crate::error::AppError::Io(format!(
+                    "falha ao mover artefato de saída de {} para {}: {rename_error}; fallback de cópia falhou: {copy_error}",
+                    source.display(),
+                    target.display()
+                ))
+            })?;
+            std::fs::remove_file(source)?;
+            Ok(target)
+        }
+    }
 }
 
 fn ignored_dir(output_dir: &Path) -> PathBuf {
@@ -292,5 +323,29 @@ mod tests {
 
         assert_eq!(artifact.status, AudioFileStatus::Dubbed);
         assert_eq!(artifact.path.as_deref(), Some(path.as_path()));
+    }
+
+    #[test]
+    fn moves_generated_rejection_artifact_without_copying_source_audio() {
+        let output_dir = tempfile::tempdir().expect("output tempdir");
+        let file_name = "line.wav";
+        let generated_path = approved_output_path(output_dir.path(), file_name, 6);
+        let stale_rejected_path = rejected_output_path(output_dir.path(), file_name);
+
+        ensure_output_parent(&generated_path).expect("approved parent");
+        ensure_output_parent(&stale_rejected_path).expect("rejected parent");
+        std::fs::write(&generated_path, b"generated portuguese audio").expect("generated output");
+        std::fs::write(&stale_rejected_path, b"stale source audio").expect("stale rejected");
+
+        let rejected_path =
+            move_generated_to_rejected(&generated_path, output_dir.path(), file_name)
+                .expect("move generated rejection");
+
+        assert_eq!(rejected_path, stale_rejected_path);
+        assert!(!generated_path.exists());
+        assert_eq!(
+            std::fs::read(rejected_path).expect("rejected artifact"),
+            b"generated portuguese audio"
+        );
     }
 }

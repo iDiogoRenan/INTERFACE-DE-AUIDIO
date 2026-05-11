@@ -44,6 +44,8 @@ export interface DubbingOptions {
   trailingPeriod: boolean;
   padMs: number;
   omniTemperature: number;
+  maxSynthesisChunks: number;
+  preserveSentenceBoundaries: boolean;
   nativeSynthesis: NativeSynthesisSettings;
 }
 
@@ -196,6 +198,8 @@ export const defaultOptions: DubbingOptions = {
   trailingPeriod: false,
   padMs: 200,
   omniTemperature: 0,
+  maxSynthesisChunks: 1,
+  preserveSentenceBoundaries: false,
   nativeSynthesis: {
     voiceMode: "clone",
     instruct: null,
