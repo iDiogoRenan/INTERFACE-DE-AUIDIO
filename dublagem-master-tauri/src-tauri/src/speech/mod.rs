@@ -38,6 +38,7 @@ pub struct SynthesisRequest<'a> {
     pub reference_text: &'a str,
     pub output_path: &'a Path,
     pub options: DubbingOptions,
+    pub pinned_tags: &'a [String],
     pub line_overrides: &'a [LineSynthesisOverride],
     pub hooks: SynthesisHooks,
 }

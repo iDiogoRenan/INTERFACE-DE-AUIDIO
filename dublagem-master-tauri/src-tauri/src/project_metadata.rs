@@ -40,6 +40,8 @@ pub fn save_project_metadata(
 }
 
 pub fn validate_project_metadata(metadata: &ProjectMetadata) -> AppResult<()> {
+    validate_native_tags(&metadata.pinned_native_tags)?;
+
     for (file_key, file) in &metadata.files {
         if file_key.trim().is_empty() {
             return Err(AppError::InvalidConfig(

@@ -13,11 +13,11 @@ import { defaultSpeechModelPresets } from "../shared/speechModels";
 
 const clientMocks = vi.hoisted(() => ({
   loadProjectMetadata: vi.fn<() => Promise<ProjectMetadata>>(() =>
-    Promise.resolve({ version: 1, files: {} })
+    Promise.resolve({ version: 1, pinnedNativeTags: [], files: {} })
   ),
   saveProjectMetadata: vi.fn<
     (outputDir: string, metadata: ProjectMetadata) => Promise<ProjectMetadata>
-  >(() => Promise.resolve({ version: 1, files: {} })),
+  >(() => Promise.resolve({ version: 1, pinnedNativeTags: [], files: {} })),
   previewSynthesisLine: vi.fn<(request: SynthesisLinePreviewRequest) => Promise<string>>(() =>
     Promise.resolve("E:\\audio\\preview.wav")
   ),
@@ -36,7 +36,7 @@ vi.mock("@tauri-apps/api/event", () => ({
 }));
 
 vi.mock("../shared/tauri/client", () => ({
-  emptyProjectMetadata: () => ({ version: 1, files: {} }),
+  emptyProjectMetadata: () => ({ version: 1, pinnedNativeTags: [], files: {} }),
   isTauriRuntime: () => false,
   tauriClient: {
     loadConfig: vi.fn(),
@@ -81,7 +81,8 @@ describe("workspaceStore transcription hydration", () => {
     useWorkspaceStore.setState({
       config,
       files: [fileA, fileB],
-      projectMetadata: { version: 1, files: {} },
+      projectMetadata: { version: 1, pinnedNativeTags: [], files: {} },
+      pinnedNativeTags: [],
       selectedPath: fileA.path,
       selectedLineIndex: 0,
       sourceText: "",
@@ -180,6 +181,7 @@ describe("workspaceStore transcription hydration", () => {
     clientMocks.scanAudioFolder.mockResolvedValue([redubbedFile]);
     clientMocks.loadProjectMetadata.mockResolvedValue({
       version: 1,
+      pinnedNativeTags: [],
       files: {
         [redubbedFile.name]: {
           sourceText: "Hello from cache.",
@@ -212,6 +214,19 @@ describe("workspaceStore transcription hydration", () => {
         inputPaths: [cachedDubbedFile.path],
         customSourceText: "Hello from cache.",
         customTargetText: "Texto revisado para nova sintese."
+      })
+    );
+  });
+
+  it("passes the selected save destination only for explicit save jobs", async () => {
+    const saveOutputAs = "E:\\exports\\line_a_dublado.wav";
+
+    await useWorkspaceStore.getState().startDubbing(saveOutputAs);
+
+    expect(clientMocks.startDubbingJob).toHaveBeenCalledWith(
+      expect.objectContaining({
+        inputPaths: [fileA.path],
+        saveOutputAs
       })
     );
   });
@@ -303,6 +318,54 @@ describe("workspaceStore transcription hydration", () => {
     expect(
       useWorkspaceStore.getState().projectMetadata.files[fileA.name]?.lines["0"]?.tags
     ).toEqual([]);
+  });
+
+  it("tracks pinned native tags as project-level generation metadata", () => {
+    useWorkspaceStore.getState().togglePinnedNativeTag("[sigh]");
+    useWorkspaceStore.getState().togglePinnedNativeTag("[surprise-oh]");
+
+    expect(useWorkspaceStore.getState().pinnedNativeTags).toEqual(["[sigh]", "[surprise-oh]"]);
+    expect(useWorkspaceStore.getState().projectMetadata.pinnedNativeTags).toEqual([
+      "[sigh]",
+      "[surprise-oh]"
+    ]);
+
+    useWorkspaceStore.getState().togglePinnedNativeTag("[sigh]");
+
+    expect(useWorkspaceStore.getState().pinnedNativeTags).toEqual(["[surprise-oh]"]);
+    expect(useWorkspaceStore.getState().projectMetadata.pinnedNativeTags).toEqual([
+      "[surprise-oh]"
+    ]);
+  });
+
+  it("applies pinned native tags to previews without duplicating line tags", async () => {
+    useWorkspaceStore.getState().setTargetText("Linha para previa.");
+    useWorkspaceStore.getState().insertNativeTag("[sigh]");
+    useWorkspaceStore.getState().togglePinnedNativeTag("[sigh]");
+    useWorkspaceStore.getState().togglePinnedNativeTag("[surprise-oh]");
+
+    await useWorkspaceStore.getState().previewSelectedLine();
+
+    const [[request]] = clientMocks.previewSynthesisLine.mock.calls;
+    expect(request.tags).toEqual(["[sigh]", "[surprise-oh]"]);
+  });
+
+  it("sends pinned native tags to full jobs and filtered list jobs", async () => {
+    useWorkspaceStore.getState().togglePinnedNativeTag("[sigh]");
+    useWorkspaceStore.getState().togglePinnedNativeTag("[surprise-oh]");
+
+    await useWorkspaceStore.getState().startDubbing();
+    useWorkspaceStore.setState({ isBusy: false });
+    await useWorkspaceStore.getState().startDubbingList([fileA.path, fileB.path]);
+
+    expect(clientMocks.startDubbingJob.mock.calls[0]?.[0].pinnedTags).toEqual([
+      "[sigh]",
+      "[surprise-oh]"
+    ]);
+    expect(clientMocks.startDubbingJob.mock.calls[1]?.[0].pinnedTags).toEqual([
+      "[sigh]",
+      "[surprise-oh]"
+    ]);
   });
 
   it("generates a preview for the selected line using its native settings", async () => {

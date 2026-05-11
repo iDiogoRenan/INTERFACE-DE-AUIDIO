@@ -1,13 +1,16 @@
 import * as Checkbox from "@radix-ui/react-checkbox";
 import * as Select from "@radix-ui/react-select";
 import * as Tooltip from "@radix-ui/react-tooltip";
+import { save } from "@tauri-apps/plugin-dialog";
 import {
   Check,
   CheckCircle2,
   ChevronDown,
   ChevronRight,
   Circle,
+  Download,
   Loader2,
+  Pin,
   Play,
   RotateCcw,
   Square,
@@ -17,6 +20,7 @@ import {
 import { useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { AudioPlayer } from "../audio-player/AudioPlayer";
 import {
+  effectiveNativeTags,
   isNativeTag,
   nativeTagDescriptions,
   nativeSynthesisNumberControls,
@@ -28,6 +32,7 @@ import {
 } from "../../shared/omnivoice/nativeControls";
 import { useWorkspaceStore, selectedLineMetadata } from "../../stores/workspaceStore";
 import type {
+  AudioFileEntry,
   JobStage,
   NativeSynthesisSettings,
   ProjectLineMetadata,
@@ -92,6 +97,8 @@ export function DubbingPanel() {
     (state) => state.resetSelectedLineSettingsToDefault
   );
   const removeNativeTag = useWorkspaceStore((state) => state.removeNativeTag);
+  const pinnedNativeTags = useWorkspaceStore((state) => state.pinnedNativeTags);
+  const togglePinnedNativeTag = useWorkspaceStore((state) => state.togglePinnedNativeTag);
   const previewSelectedLine = useWorkspaceStore((state) => state.previewSelectedLine);
   const revertTranscription = useWorkspaceStore((state) => state.revertTranscription);
   const startDubbing = useWorkspaceStore((state) => state.startDubbing);
@@ -125,6 +132,17 @@ export function DubbingPanel() {
     transcriptionBaseline !== undefined &&
     (sourceText !== transcriptionBaseline.sourceText ||
       targetText !== transcriptionBaseline.targetText);
+  const handleStartDubbing = () => {
+    void startDubbing();
+  };
+  const handleStartDubbingAndSave = () => {
+    void startSelectedDubbingWithSaveDialog({
+      selectedFile,
+      outputDir: config.outputDir,
+      startDubbing,
+      appendLog
+    });
+  };
 
   return (
     <div className={styles.layout}>
@@ -152,9 +170,11 @@ export function DubbingPanel() {
             text={targetText}
             selectedLineIndex={selectedLineIndex}
             lineTags={lineMetadata.tags.filter(isNativeTag)}
+            pinnedTags={pinnedNativeTags}
             onSelectLine={setSelectedLineIndex}
             onTextChange={setTargetText}
             onRemoveTag={removeNativeTag}
+            onTogglePinnedTag={togglePinnedNativeTag}
             onInvalidTag={(tag) => {
               appendLog(unsupportedNativeTagMessage(tag), "warning");
             }}
@@ -177,9 +197,7 @@ export function DubbingPanel() {
               type="button"
               className={styles.primary}
               disabled={isBusy}
-              onClick={() => {
-                void startDubbing();
-              }}
+              onClick={handleStartDubbing}
             >
               {isBusy ? (
                 <Loader2 size={16} className={styles.spin} />
@@ -187,6 +205,10 @@ export function DubbingPanel() {
                 <PrimaryActionIcon size={16} />
               )}
               {isBusy ? primaryAction.busyLabel : primaryAction.idleLabel}
+            </button>
+            <button type="button" disabled={isBusy} onClick={handleStartDubbingAndSave}>
+              <Download size={16} />
+              {primaryAction.intent === "redub" ? "Redublar e salvar" : "Dublar e salvar"}
             </button>
             <button
               type="button"
@@ -207,6 +229,7 @@ export function DubbingPanel() {
         selectedLineIndex={selectedLineIndex}
         targetText={targetText}
         metadata={lineMetadata}
+        pinnedTags={pinnedNativeTags}
         isBusy={isBusy}
         onMetadataChange={updateSelectedLineMetadata}
         onSettingsChange={updateSelectedLineSettings}
@@ -219,9 +242,7 @@ export function DubbingPanel() {
         onPreview={() => {
           void previewSelectedLine();
         }}
-        onRegenerate={() => {
-          void startDubbing();
-        }}
+        onRegenerate={handleStartDubbing}
       />
 
       <section className={styles.jobStatus}>
@@ -291,9 +312,11 @@ interface TaggedLineEditorProps {
   text: string;
   selectedLineIndex: number;
   lineTags?: readonly NativeTag[];
+  pinnedTags?: readonly NativeTag[];
   onSelectLine: (lineIndex: number) => void;
   onTextChange: (value: string) => void;
   onRemoveTag?: (tag: NativeTag) => void;
+  onTogglePinnedTag?: (tag: NativeTag) => void;
   onInvalidTag: (tag: string) => void;
 }
 
@@ -303,9 +326,11 @@ function TaggedLineEditor({
   text,
   selectedLineIndex,
   lineTags,
+  pinnedTags = [],
   onSelectLine,
   onTextChange,
   onRemoveTag,
+  onTogglePinnedTag,
   onInvalidTag
 }: TaggedLineEditorProps) {
   const lines = splitLines(text);
@@ -317,7 +342,14 @@ function TaggedLineEditor({
           <span>{title}</span>
           <output>{language}</output>
         </div>
-        {lineTags ? <SelectedNativeTags tags={lineTags} onRemoveTag={onRemoveTag} /> : null}
+        {lineTags ? (
+          <SelectedNativeTags
+            lineTags={lineTags}
+            pinnedTags={pinnedTags}
+            onRemoveTag={onRemoveTag}
+            onTogglePinnedTag={onTogglePinnedTag}
+          />
+        ) : null}
       </header>
       <div className={styles.lineList}>
         {lines.map((line, index) => (
@@ -399,39 +431,64 @@ function resizeLineTextarea(textarea: HTMLTextAreaElement | null): void {
 }
 
 interface SelectedNativeTagsProps {
-  tags: readonly NativeTag[];
+  lineTags: readonly NativeTag[];
+  pinnedTags: readonly NativeTag[];
   onRemoveTag?: (tag: NativeTag) => void;
+  onTogglePinnedTag?: (tag: NativeTag) => void;
 }
 
-function SelectedNativeTags({ tags, onRemoveTag }: SelectedNativeTagsProps) {
+function SelectedNativeTags({
+  lineTags,
+  pinnedTags,
+  onRemoveTag,
+  onTogglePinnedTag
+}: SelectedNativeTagsProps) {
+  const tags = effectiveNativeTags(lineTags, pinnedTags);
+
   if (tags.length === 0) {
     return <span className={styles.emptyTagHeader}>Sem marcadores</span>;
   }
 
+  const lineTagSet = new Set<NativeTag>(lineTags);
+  const pinnedTagSet = new Set<NativeTag>(pinnedTags);
+
   return (
     <Tooltip.Provider delayDuration={120}>
       <div className={styles.selectedTags} aria-label="Marcadores nativos da linha selecionada">
-        {tags.map((tag) => (
-          <Tooltip.Root key={tag}>
-            <Tooltip.Trigger asChild>
-              <button
-                type="button"
-                aria-label={`Remover ${tag}: ${nativeTagDescriptions[tag]}`}
-                onClick={() => {
-                  onRemoveTag?.(tag);
-                }}
-              >
-                {tag}
-              </button>
-            </Tooltip.Trigger>
-            <Tooltip.Portal>
-              <Tooltip.Content className={styles.tooltipContent} side="top" sideOffset={6}>
-                {nativeTagDescriptions[tag]}
-                <Tooltip.Arrow className={styles.tooltipArrow} />
-              </Tooltip.Content>
-            </Tooltip.Portal>
-          </Tooltip.Root>
-        ))}
+        {tags.map((tag) => {
+          const isPinned = pinnedTagSet.has(tag);
+          const isLineTag = lineTagSet.has(tag);
+
+          return (
+            <Tooltip.Root key={tag}>
+              <Tooltip.Trigger asChild>
+                <button
+                  type="button"
+                  aria-label={`${isPinned && !isLineTag ? "Desfixar" : "Remover"} ${tag}: ${nativeTagDescriptions[tag]}`}
+                  data-pinned={isPinned}
+                  onClick={() => {
+                    if (isLineTag) {
+                      onRemoveTag?.(tag);
+                      return;
+                    }
+                    if (isPinned) {
+                      onTogglePinnedTag?.(tag);
+                    }
+                  }}
+                >
+                  <span>{tag}</span>
+                  {isPinned ? <Pin size={10} /> : null}
+                </button>
+              </Tooltip.Trigger>
+              <Tooltip.Portal>
+                <Tooltip.Content className={styles.tooltipContent} side="top" sideOffset={6}>
+                  {nativeTagDescriptions[tag]}
+                  <Tooltip.Arrow className={styles.tooltipArrow} />
+                </Tooltip.Content>
+              </Tooltip.Portal>
+            </Tooltip.Root>
+          );
+        })}
       </div>
     </Tooltip.Provider>
   );
@@ -442,6 +499,7 @@ interface LinePropertiesSidebarProps {
   selectedLineIndex: number;
   targetText: string;
   metadata: ProjectLineMetadata;
+  pinnedTags: readonly NativeTag[];
   isBusy: boolean;
   onMetadataChange: (patch: Partial<ProjectLineMetadata>) => void;
   onSettingsChange: (patch: Partial<NativeSynthesisSettings>) => void;
@@ -456,6 +514,7 @@ function LinePropertiesSidebar({
   selectedLineIndex,
   targetText,
   metadata,
+  pinnedTags,
   isBusy,
   onMetadataChange,
   onSettingsChange,
@@ -478,6 +537,7 @@ function LinePropertiesSidebar({
         lineCount={lineCount}
         currentDuration={currentDuration}
         metadata={metadata}
+        pinnedTags={pinnedTags}
         controlsDisabled={controlsDisabled}
         sectionOpenState={sectionOpenState}
         onSectionOpenChange={setSectionOpen}
@@ -501,6 +561,7 @@ interface LinePropertiesPanelProps {
   lineCount: number;
   currentDuration: number | null;
   metadata: ProjectLineMetadata;
+  pinnedTags: readonly NativeTag[];
   controlsDisabled: boolean;
   sectionOpenState: LineSectionOpenState;
   onSectionOpenChange: SetLineSectionOpen;
@@ -513,6 +574,7 @@ function LinePropertiesPanel({
   lineCount,
   currentDuration,
   metadata,
+  pinnedTags,
   controlsDisabled,
   sectionOpenState,
   onSectionOpenChange,
@@ -521,6 +583,7 @@ function LinePropertiesPanel({
 }: LinePropertiesPanelProps) {
   const settings = metadata.settings;
   const acceptedSettings = normalizeNativeSynthesisSettings(settings);
+  const effectiveTagCount = effectiveNativeTags(metadata.tags, pinnedTags).length;
   const isPropertiesOpen = sectionOpenState.properties;
 
   return (
@@ -626,7 +689,7 @@ function LinePropertiesPanel({
               </div>
               <div>
                 <dt>Marcadores</dt>
-                <dd>{metadata.tags.length}</dd>
+                <dd>{effectiveTagCount}</dd>
               </div>
             </dl>
 
@@ -1123,4 +1186,61 @@ function unsupportedNativeTagMessage(tag: string): string {
   }
 
   return `Marcador OmniVoice não suportado: ${tag}`;
+}
+
+interface StartSelectedDubbingWithSaveDialogOptions {
+  selectedFile: AudioFileEntry | null;
+  outputDir: string | null;
+  startDubbing: (saveOutputAs?: string | null) => Promise<void>;
+  appendLog: (message: string, level?: "info" | "warning" | "error" | "success") => void;
+}
+
+async function startSelectedDubbingWithSaveDialog({
+  selectedFile,
+  outputDir,
+  startDubbing,
+  appendLog
+}: StartSelectedDubbingWithSaveDialogOptions): Promise<void> {
+  if (!selectedFile || !outputDir) {
+    await startDubbing(null);
+    return;
+  }
+
+  try {
+    const saveOutputAs = await save({
+      title: "Salvar arquivo dublado",
+      defaultPath: joinNativePath(outputDir, dubbedOutputFileName(selectedFile.name)),
+      filters: [{ name: "Audio WAV", extensions: ["wav"] }]
+    });
+
+    if (saveOutputAs === null) {
+      appendLog("Dublagem cancelada: nenhum arquivo de destino foi escolhido.", "warning");
+      return;
+    }
+
+    await startDubbing(saveOutputAs);
+  } catch (unknownError: unknown) {
+    appendLog(
+      `Não foi possível abrir o diálogo de salvamento: ${dialogError(unknownError)}`,
+      "error"
+    );
+  }
+}
+
+function dubbedOutputFileName(sourceFileName: string): string {
+  const normalizedName = sourceFileName.trim() || "dublagem";
+  const fileNameStart = Math.max(normalizedName.lastIndexOf("/"), normalizedName.lastIndexOf("\\"));
+  const fileName = normalizedName.slice(fileNameStart + 1);
+  const extensionStart = fileName.lastIndexOf(".");
+  const stem = extensionStart > 0 ? fileName.slice(0, extensionStart) : fileName;
+  return `${stem || "dublagem"}_dublado.wav`;
+}
+
+function joinNativePath(directory: string, fileName: string): string {
+  const separator = directory.includes("\\") && !directory.includes("/") ? "\\" : "/";
+  return `${directory.replace(/[\\/]+$/, "")}${separator}${fileName}`;
+}
+
+function dialogError(unknownError: unknown): string {
+  return unknownError instanceof Error ? unknownError.message : String(unknownError);
 }

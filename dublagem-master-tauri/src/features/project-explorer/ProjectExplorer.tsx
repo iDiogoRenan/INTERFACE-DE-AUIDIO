@@ -6,15 +6,35 @@ import {
   Filter,
   ListChecks,
   Loader2,
+  Pin,
   Plus,
   RefreshCw
 } from "lucide-react";
-import { useEffect, useMemo, useState, type Dispatch, type SetStateAction } from "react";
-import { nativeTagDescriptions, nativeTagGroups } from "../../shared/omnivoice/nativeControls";
+import {
+  useEffect,
+  useMemo,
+  useState,
+  type Dispatch,
+  type MouseEvent as ReactMouseEvent,
+  type SetStateAction
+} from "react";
+import {
+  nativeTagDescriptions,
+  nativeTagGroups,
+  type NativeTag
+} from "../../shared/omnivoice/nativeControls";
 import { useWorkspaceStore } from "../../stores/workspaceStore";
 import styles from "./ProjectExplorer.module.css";
 
 const TAG_PALETTE_OPEN_STORAGE_KEY = "nsg-gaming-dub.tag-palette-open.v1";
+const TAG_CONTEXT_MENU_WIDTH = 164;
+const TAG_CONTEXT_MENU_HEIGHT = 38;
+
+interface TagContextMenuState {
+  tag: NativeTag;
+  x: number;
+  y: number;
+}
 
 export function ProjectExplorer() {
   const files = useWorkspaceStore((state) => state.files);
@@ -23,9 +43,13 @@ export function ProjectExplorer() {
   const scan = useWorkspaceStore((state) => state.scan);
   const startDubbingList = useWorkspaceStore((state) => state.startDubbingList);
   const insertNativeTag = useWorkspaceStore((state) => state.insertNativeTag);
+  const pinnedNativeTags = useWorkspaceStore((state) => state.pinnedNativeTags);
+  const togglePinnedNativeTag = useWorkspaceStore((state) => state.togglePinnedNativeTag);
+  const appendLog = useWorkspaceStore((state) => state.appendLog);
   const isBusy = useWorkspaceStore((state) => state.isBusy);
   const [familyFilter, setFamilyFilter] = useState<string>("all");
   const [isTagPaletteOpen, setIsTagPaletteOpen] = usePersistentTagPaletteOpenState();
+  const [tagContextMenu, setTagContextMenu] = useState<TagContextMenuState | null>(null);
 
   const families = useMemo(
     () => ["all", ...Array.from(new Set(files.map((file) => file.family))).sort()],
@@ -34,6 +58,41 @@ export function ProjectExplorer() {
   const visibleFiles =
     familyFilter === "all" ? files : files.filter((file) => file.family === familyFilter);
   const visibleFilePaths = visibleFiles.map((file) => file.path);
+
+  useEffect(() => {
+    if (!tagContextMenu) {
+      return;
+    }
+
+    const closeMenu = () => {
+      setTagContextMenu(null);
+    };
+    const closeMenuOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        closeMenu();
+      }
+    };
+
+    window.addEventListener("click", closeMenu);
+    window.addEventListener("blur", closeMenu);
+    window.addEventListener("resize", closeMenu);
+    window.addEventListener("scroll", closeMenu, true);
+    window.addEventListener("keydown", closeMenuOnEscape);
+
+    return () => {
+      window.removeEventListener("click", closeMenu);
+      window.removeEventListener("blur", closeMenu);
+      window.removeEventListener("resize", closeMenu);
+      window.removeEventListener("scroll", closeMenu, true);
+      window.removeEventListener("keydown", closeMenuOnEscape);
+    };
+  }, [tagContextMenu]);
+
+  function openTagContextMenu(event: ReactMouseEvent<HTMLButtonElement>, tag: NativeTag): void {
+    event.preventDefault();
+    event.stopPropagation();
+    setTagContextMenu({ tag, ...contextMenuPosition(event.clientX, event.clientY) });
+  }
 
   return (
     <aside className={styles.panel} aria-label="Explorador do projeto">
@@ -129,13 +188,25 @@ export function ProjectExplorer() {
                         <Tooltip.Trigger asChild>
                           <button
                             type="button"
-                            disabled={!selectedPath}
                             data-tag={tag}
+                            data-pinned={pinnedNativeTags.includes(tag)}
+                            data-disabled={!selectedPath}
+                            onContextMenu={(event) => {
+                              openTagContextMenu(event, tag);
+                            }}
                             onClick={() => {
-                              insertNativeTag(tag);
+                              if (selectedPath) {
+                                insertNativeTag(tag);
+                                return;
+                              }
+                              appendLog(
+                                "Selecione um arquivo antes de aplicar o marcador à linha.",
+                                "warning"
+                              );
                             }}
                           >
-                            {tag}
+                            <span>{tag}</span>
+                            {pinnedNativeTags.includes(tag) ? <Pin size={11} /> : null}
                           </button>
                         </Tooltip.Trigger>
                         <Tooltip.Portal>
@@ -161,8 +232,48 @@ export function ProjectExplorer() {
           </div>
         )}
       </section>
+
+      {tagContextMenu ? (
+        <div
+          className={styles.tagContextMenu}
+          role="menu"
+          style={{
+            insetInlineStart: tagContextMenu.x,
+            insetBlockStart: tagContextMenu.y
+          }}
+          onClick={(event) => {
+            event.stopPropagation();
+          }}
+        >
+          <button
+            type="button"
+            role="menuitem"
+            onClick={() => {
+              togglePinnedNativeTag(tagContextMenu.tag);
+              setTagContextMenu(null);
+            }}
+          >
+            <Pin size={14} />
+            {pinnedNativeTags.includes(tagContextMenu.tag) ? "Desfixar tag" : "Fixar tag"}
+          </button>
+        </div>
+      ) : null}
     </aside>
   );
+}
+
+function contextMenuPosition(
+  clientX: number,
+  clientY: number
+): Pick<TagContextMenuState, "x" | "y"> {
+  if (typeof window === "undefined") {
+    return { x: clientX, y: clientY };
+  }
+
+  return {
+    x: Math.max(0, Math.min(clientX, window.innerWidth - TAG_CONTEXT_MENU_WIDTH)),
+    y: Math.max(0, Math.min(clientY, window.innerHeight - TAG_CONTEXT_MENU_HEIGHT))
+  };
 }
 
 function usePersistentTagPaletteOpenState(): readonly [boolean, Dispatch<SetStateAction<boolean>>] {

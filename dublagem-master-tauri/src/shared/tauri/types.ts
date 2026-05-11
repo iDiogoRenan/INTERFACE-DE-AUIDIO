@@ -125,11 +125,13 @@ export interface TranslationResult {
 export interface DubbingRequest {
   inputPaths: string[];
   outputDir: string;
+  saveOutputAs: string | null;
   guideAudio: string | null;
   modelDir: string | null;
   options: DubbingOptions;
   customSourceText: string | null;
   customTargetText: string | null;
+  pinnedTags: string[];
   lineOverrides: LineSynthesisOverride[];
 }
 
@@ -149,6 +151,7 @@ export interface SynthesisLinePreviewRequest {
 
 export interface ProjectMetadata {
   version: number;
+  pinnedNativeTags: string[];
   files: Record<string, ProjectFileMetadata | undefined>;
 }
 

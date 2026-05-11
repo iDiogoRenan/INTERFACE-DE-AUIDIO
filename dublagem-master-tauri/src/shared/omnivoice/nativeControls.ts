@@ -251,6 +251,13 @@ export function mergeNativeTags(
   return Array.from(merged);
 }
 
+export function effectiveNativeTags(
+  lineTags: readonly string[],
+  pinnedTags: readonly NativeTag[]
+): NativeTag[] {
+  return mergeNativeTags(lineTags, pinnedTags);
+}
+
 export function createLineMetadata(
   line: string,
   baseSettings: NativeSynthesisSettings = defaultNativeSynthesisSettings

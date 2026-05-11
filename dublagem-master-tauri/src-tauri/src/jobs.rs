@@ -145,7 +145,13 @@ async fn run_job(
             "selecione ao menos um áudio de origem".to_string(),
         ));
     }
+    if request.save_output_as.is_some() && request.input_paths.len() != 1 {
+        return Err(AppError::InvalidConfig(
+            "o salvamento manual exige exatamente um áudio selecionado".to_string(),
+        ));
+    }
     project_metadata::validate_settings(&request.options.native_synthesis)?;
+    project_metadata::validate_native_tags(&request.pinned_tags)?;
     for line in &request.line_overrides {
         project_metadata::validate_text_native_tags(&line.target_text)?;
         project_metadata::validate_native_tags(&line.tags)?;
@@ -338,6 +344,7 @@ async fn run_job(
             reference_audio,
             output_path: &output_path,
             options: &request.options,
+            pinned_tags: &request.pinned_tags,
             line_overrides: &request.line_overrides,
             hooks: synthesis_hooks,
         })
@@ -389,6 +396,12 @@ async fn run_job(
             &source_text,
             &target_text,
         )?;
+        let completion_message = if let Some(save_output_as) = request.save_output_as.as_deref() {
+            save_selected_dubbing_output(&output_path, save_output_as)?;
+            format!("Arquivo concluido e salvo em {}.", save_output_as.display())
+        } else {
+            "Arquivo concluido.".to_string()
+        };
         emit(
             &app,
             EVENT_FILE_COMPLETE,
@@ -396,7 +409,7 @@ async fn run_job(
                 job_id,
                 JobEventKind::FileComplete,
                 Some(JobStage::FileComplete),
-                "Arquivo concluido.",
+                completion_message,
                 Some(context.progress(100)),
                 Some(&context),
             )
@@ -601,6 +614,7 @@ struct V14SynthesisJob<'a> {
     reference_audio: &'a Path,
     output_path: &'a Path,
     options: &'a DubbingOptions,
+    pinned_tags: &'a [String],
     line_overrides: &'a [LineSynthesisOverride],
     hooks: SynthesisHooks,
 }
@@ -671,6 +685,7 @@ async fn synthesize_with_v14_guard(job: V14SynthesisJob<'_>) -> AppResult<V14Syn
             reference_text: &reference_text,
             output_path: job.output_path,
             options: job.options.clone(),
+            pinned_tags: job.pinned_tags,
             line_overrides: job.line_overrides,
             hooks: job.hooks.clone(),
         }),
@@ -1244,6 +1259,23 @@ fn remove_file_if_exists(path: &Path) -> AppResult<()> {
     }
 }
 
+fn save_selected_dubbing_output(source: &Path, destination: &Path) -> AppResult<()> {
+    output_layout::ensure_output_parent(destination)?;
+    if same_output_path(source, destination) {
+        return Ok(());
+    }
+
+    std::fs::copy(source, destination)?;
+    Ok(())
+}
+
+fn same_output_path(left: &Path, right: &Path) -> bool {
+    match (std::fs::canonicalize(left), std::fs::canonicalize(right)) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => left == right,
+    }
+}
+
 fn synthesis_hooks(
     app: AppHandle,
     job_id: JobId,
@@ -1603,5 +1635,33 @@ mod tests {
 
         assert!(!v14_synthesis_uses_clone(&options, &[]));
         assert!(v14_synthesis_uses_clone(&options, &[clone_line]));
+    }
+
+    #[test]
+    fn saves_selected_dubbing_output_to_requested_path() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let source = workspace.path().join("internal").join("line.wav");
+        let destination = workspace.path().join("exports").join("line_dublado.wav");
+
+        output_layout::ensure_output_parent(&source).expect("source parent");
+        std::fs::write(&source, b"dubbed").expect("source audio");
+
+        save_selected_dubbing_output(&source, &destination).expect("save selected output");
+
+        assert_eq!(
+            std::fs::read(destination).expect("exported audio"),
+            b"dubbed"
+        );
+    }
+
+    #[test]
+    fn saving_selected_dubbing_output_is_idempotent_for_same_path() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let source = workspace.path().join("line.wav");
+        std::fs::write(&source, b"dubbed").expect("source audio");
+
+        save_selected_dubbing_output(&source, &source).expect("same output path");
+
+        assert_eq!(std::fs::read(source).expect("source audio"), b"dubbed");
     }
 }

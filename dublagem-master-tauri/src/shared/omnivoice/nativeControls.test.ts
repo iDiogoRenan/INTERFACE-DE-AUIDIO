@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  effectiveNativeTags,
   insertTagIntoLine,
   nativeTags,
   normalizeNativeSynthesisSettings,
@@ -95,6 +96,14 @@ describe("native OmniVoice controls", () => {
 
   it("extracts native tags from text in order", () => {
     expect(tagsInText("[sigh] Ola [question-ah]?")).toEqual(["[sigh]", "[question-ah]"]);
+  });
+
+  it("combines line and pinned tags without duplicates", () => {
+    expect(effectiveNativeTags(["[sigh]", "[laughter]"], ["[sigh]", "[surprise-oh]"])).toEqual([
+      "[sigh]",
+      "[laughter]",
+      "[surprise-oh]"
+    ]);
   });
 
   it("can lift official native tags out of spoken text", () => {

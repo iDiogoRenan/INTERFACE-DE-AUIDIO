@@ -47,6 +47,7 @@ struct OwnedSynthesisRequest {
     reference_text: String,
     output_path: PathBuf,
     options: DubbingOptions,
+    pinned_tags: Vec<String>,
     line_overrides: Vec<LineSynthesisOverride>,
     hooks: SynthesisHooks,
 }
@@ -61,6 +62,7 @@ impl OwnedSynthesisRequest {
             reference_text: request.reference_text.to_string(),
             output_path: request.output_path.to_path_buf(),
             options: request.options,
+            pinned_tags: request.pinned_tags.to_vec(),
             line_overrides: request.line_overrides.to_vec(),
             hooks: request.hooks,
         }
@@ -411,7 +413,10 @@ fn synthesis_segments_for_request(
 
 #[cfg(feature = "ml")]
 fn global_synthesis_segments(request: &OwnedSynthesisRequest) -> Vec<SynthesisSegmentPlan> {
-    let text = naturalized_terminal_punctuation(&whole_file_synthesis_text(request));
+    let text = naturalized_terminal_punctuation(&tagged_synthesis_text(
+        &request.pinned_tags,
+        &whole_file_synthesis_text(request),
+    ));
     if text.is_empty() {
         return Vec::new();
     }
@@ -436,8 +441,9 @@ fn line_override_synthesis_segments(request: &OwnedSynthesisRequest) -> Vec<Synt
     sorted
         .into_iter()
         .map(|line| {
+            let tags = effective_synthesis_tags(&request.pinned_tags, &line.tags);
             let text = naturalized_terminal_punctuation(&tagged_synthesis_text(
-                &line.tags,
+                &tags,
                 line.target_text.trim(),
             ));
             SynthesisSegmentPlan {
@@ -479,6 +485,17 @@ fn tagged_synthesis_text(tags: &[String], text: &str) -> String {
     format!("{} {}", missing_tags.join(" "), text)
         .trim()
         .to_string()
+}
+
+#[cfg(feature = "ml")]
+fn effective_synthesis_tags(pinned_tags: &[String], line_tags: &[String]) -> Vec<String> {
+    let mut tags = Vec::new();
+    for tag in pinned_tags.iter().chain(line_tags.iter()) {
+        if dublagem_domain::OMNIVOICE_NATIVE_TAGS.contains(&tag.as_str()) && !tags.contains(tag) {
+            tags.push(tag.clone());
+        }
+    }
+    tags
 }
 
 #[cfg(feature = "ml")]
@@ -1029,6 +1046,7 @@ mod tests {
             reference_text: "Original first sentence. Original second sentence.".to_string(),
             output_path: PathBuf::from("out.wav"),
             options: DubbingOptions::default(),
+            pinned_tags: Vec::new(),
             line_overrides: Vec::new(),
             hooks: SynthesisHooks::default(),
         };
@@ -1042,6 +1060,25 @@ mod tests {
     }
 
     #[test]
+    fn pinned_tags_are_applied_to_whole_file_synthesis() {
+        let request = OwnedSynthesisRequest {
+            text: "Ola mundo".to_string(),
+            source_audio: PathBuf::from("source.wav"),
+            reference_audio: PathBuf::from("source.wav"),
+            reference_text: "Original.".to_string(),
+            output_path: PathBuf::from("out.wav"),
+            options: DubbingOptions::default(),
+            pinned_tags: vec!["[sigh]".to_string()],
+            line_overrides: Vec::new(),
+            hooks: SynthesisHooks::default(),
+        };
+
+        let segments = synthesis_segments_for_request(&request, Some(2.0)).unwrap();
+
+        assert_eq!(segments[0].text, "[sigh] Ola mundo.");
+    }
+
+    #[test]
     fn synthesis_rejects_durations_above_omnivoice_limit() {
         let request = OwnedSynthesisRequest {
             text: "Texto acima do limite.".to_string(),
@@ -1050,6 +1087,7 @@ mod tests {
             reference_text: "Original.".to_string(),
             output_path: PathBuf::from("out.wav"),
             options: DubbingOptions::default(),
+            pinned_tags: Vec::new(),
             line_overrides: Vec::new(),
             hooks: SynthesisHooks::default(),
         };
@@ -1078,6 +1116,7 @@ mod tests {
                 native_synthesis: base_settings.clone(),
                 ..DubbingOptions::default()
             },
+            pinned_tags: Vec::new(),
             line_overrides: vec![
                 LineSynthesisOverride {
                     line_index: 0,
@@ -1203,6 +1242,13 @@ mod tests {
                 "[sigh] Ola mundo."
             ),
             "[sigh] Ola mundo."
+        );
+        assert_eq!(
+            effective_synthesis_tags(
+                &["[sigh]".to_string()],
+                &["[sigh]".to_string(), "[surprise-oh]".to_string()]
+            ),
+            vec!["[sigh]".to_string(), "[surprise-oh]".to_string()]
         );
     }
 

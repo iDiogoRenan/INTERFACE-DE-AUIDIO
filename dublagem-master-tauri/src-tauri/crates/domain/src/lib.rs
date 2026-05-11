@@ -398,11 +398,15 @@ pub struct TranscriptionResult {
 pub struct DubbingRequest {
     pub input_paths: Vec<PathBuf>,
     pub output_dir: PathBuf,
+    #[serde(default)]
+    pub save_output_as: Option<PathBuf>,
     pub guide_audio: Option<PathBuf>,
     pub model_dir: Option<PathBuf>,
     pub options: DubbingOptions,
     pub custom_source_text: Option<String>,
     pub custom_target_text: Option<String>,
+    #[serde(default)]
+    pub pinned_tags: Vec<String>,
     #[serde(default)]
     pub line_overrides: Vec<LineSynthesisOverride>,
 }
@@ -432,6 +436,8 @@ pub struct SynthesisLinePreviewRequest {
 pub struct ProjectMetadata {
     pub version: u16,
     #[serde(default)]
+    pub pinned_native_tags: Vec<String>,
+    #[serde(default)]
     pub files: BTreeMap<String, ProjectFileMetadata>,
 }
 
@@ -439,6 +445,7 @@ impl ProjectMetadata {
     pub fn v1() -> Self {
         Self {
             version: 1,
+            pinned_native_tags: Vec::new(),
             files: BTreeMap::new(),
         }
     }

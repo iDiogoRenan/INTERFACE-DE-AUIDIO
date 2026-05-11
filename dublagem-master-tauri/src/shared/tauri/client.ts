@@ -69,7 +69,7 @@ const defaultConfig: AppConfig = {
 };
 
 export function emptyProjectMetadata(): ProjectMetadata {
-  return { version: 1, files: {} };
+  return { version: 1, pinnedNativeTags: [], files: {} };
 }
 
 declare global {

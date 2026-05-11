@@ -164,6 +164,7 @@ pub async fn preview_synthesis_line(
             reference_text: "",
             output_path: &output_path,
             options,
+            pinned_tags: &[],
             line_overrides: &line_overrides,
             hooks: SynthesisHooks::default(),
         })

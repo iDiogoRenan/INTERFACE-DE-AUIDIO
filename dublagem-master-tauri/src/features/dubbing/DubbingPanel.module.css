@@ -78,6 +78,9 @@
 }
 
 .selectedTags button {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
   border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--border));
   background: color-mix(in srgb, var(--accent) 14%, var(--surface-2));
   color: var(--text);
@@ -87,6 +90,15 @@
   font-weight: 850;
   line-height: 1;
   padding: 5px 6px;
+}
+
+.selectedTags button[data-pinned="true"] {
+  border-color: color-mix(in srgb, var(--success) 58%, var(--border));
+  background: color-mix(in srgb, var(--success) 14%, var(--surface-2));
+}
+
+.selectedTags button svg {
+  flex: 0 0 auto;
 }
 
 .selectedTags button:hover {

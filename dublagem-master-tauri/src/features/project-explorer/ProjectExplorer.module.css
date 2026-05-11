@@ -201,6 +201,9 @@
 }
 
 .tagGroup button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
   border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--border));
   background: color-mix(in srgb, var(--accent) 12%, var(--surface-1));
   color: var(--text);
@@ -210,6 +213,21 @@
   font-weight: 800;
   line-height: 1;
   padding: 6px 7px;
+}
+
+.tagGroup button[data-pinned="true"] {
+  border-color: color-mix(in srgb, var(--success) 58%, var(--border));
+  background: color-mix(in srgb, var(--success) 15%, var(--surface-1));
+  color: color-mix(in srgb, var(--text) 88%, var(--success));
+}
+
+.tagGroup button svg {
+  flex: 0 0 auto;
+}
+
+.tagGroup button[data-disabled="true"] {
+  cursor: not-allowed;
+  opacity: 0.48;
 }
 
 .tagGroup button:disabled,
@@ -247,6 +265,38 @@
 
 .tooltipArrow {
   fill: var(--surface-2);
+}
+
+.tagContextMenu {
+  position: fixed;
+  z-index: 80;
+  inline-size: 164px;
+  border: 1px solid var(--border-strong);
+  background: var(--surface-2);
+  box-shadow: 0 14px 32px rgb(0 0 0 / 0.36);
+  padding: 4px;
+}
+
+.tagContextMenu button {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  inline-size: 100%;
+  min-block-size: 30px;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 800;
+  padding: 0 8px;
+  text-align: left;
+}
+
+.tagContextMenu button:hover,
+.tagContextMenu button:focus-visible {
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+  outline: none;
 }
 
 @keyframes spin {

@@ -2,6 +2,7 @@ import { listen } from "@tauri-apps/api/event";
 import { create } from "zustand";
 import {
   createLineMetadata,
+  effectiveNativeTags,
   mergeNativeTags,
   nativeTagSet,
   nativeSynthesisSettingsEqual,
@@ -56,6 +57,7 @@ interface WorkspaceState {
   config: AppConfig;
   files: AudioFileEntry[];
   projectMetadata: ProjectMetadata;
+  pinnedNativeTags: NativeTag[];
   selectedPath: string | null;
   selectedLineIndex: number;
   sourceText: string;
@@ -85,13 +87,14 @@ interface WorkspaceState {
   setTargetText: (value: string) => void;
   insertNativeTag: (tag: NativeTag) => void;
   removeNativeTag: (tag: NativeTag) => void;
+  togglePinnedNativeTag: (tag: NativeTag) => void;
   updateSelectedLineMetadata: (patch: Partial<ProjectLineMetadata>) => void;
   updateSelectedLineSettings: (patch: Partial<NativeSynthesisSettings>) => void;
   saveSelectedLineSettingsAsDefault: () => Promise<void>;
   resetSelectedLineSettingsToDefault: () => Promise<void>;
   previewSelectedLine: () => Promise<void>;
   revertTranscription: () => void;
-  startDubbing: () => Promise<void>;
+  startDubbing: (saveOutputAs?: string | null) => Promise<void>;
   startDubbingList: (paths: readonly string[]) => Promise<void>;
   cancelJob: () => Promise<void>;
   appendLog: (message: string, level?: LogEntry["level"], timestamp?: string) => void;
@@ -101,6 +104,7 @@ const maximumLogEntries = 200;
 
 interface StartDubbingPathsOptions {
   includeSelectedDraft: boolean;
+  saveOutputAs?: string | null;
 }
 
 const initialConfig: AppConfig = {
@@ -118,7 +122,7 @@ const initialConfig: AppConfig = {
 export const useWorkspaceStore = create<WorkspaceState>((set, get) => {
   async function startDubbingPaths(
     inputPaths: readonly string[],
-    { includeSelectedDraft }: StartDubbingPathsOptions
+    { includeSelectedDraft, saveOutputAs = null }: StartDubbingPathsOptions
   ): Promise<void> {
     if (get().isBusy) {
       get().appendLog("Aguarde o processamento atual terminar antes de iniciar outro.", "warning");
@@ -128,7 +132,15 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => {
     const requestedInputPaths = Array.from(
       new Set(inputPaths.filter((path) => path.trim().length > 0))
     );
-    const { config, selectedPath, sourceText, targetText, files, projectMetadata } = get();
+    const {
+      config,
+      selectedPath,
+      sourceText,
+      targetText,
+      files,
+      projectMetadata,
+      pinnedNativeTags
+    } = get();
     if (requestedInputPaths.length === 0 || !config.outputDir) {
       get().appendLog("Selecione arquivos visíveis e uma pasta de destino.", "warning");
       return;
@@ -172,6 +184,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => {
       const jobId = await tauriClient.startDubbingJob({
         inputPaths: requestedInputPaths,
         outputDir: config.outputDir,
+        saveOutputAs,
         guideAudio: config.guideAudio,
         modelDir: config.modelDir,
         options: {
@@ -180,6 +193,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => {
         },
         customSourceText: includeSelectedDraft && sourceText.trim().length > 0 ? sourceText : null,
         customTargetText: includeSelectedDraft && targetText.trim().length > 0 ? targetText : null,
+        pinnedTags: pinnedNativeTags,
         lineOverrides:
           includeSelectedDraft && selectedPath
             ? buildLineOverrides({
@@ -214,6 +228,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => {
     config: initialConfig,
     files: [],
     projectMetadata: emptyProjectMetadata(),
+    pinnedNativeTags: [],
     selectedPath: null,
     selectedLineIndex: 0,
     sourceText: "",
@@ -237,7 +252,11 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => {
     load: async () => {
       const config = await tauriClient.loadConfig();
       const projectMetadata = await loadProjectMetadataForConfig(config);
-      set({ config, projectMetadata });
+      set({
+        config,
+        projectMetadata,
+        pinnedNativeTags: pinnedNativeTagsFromMetadata(projectMetadata)
+      });
       if (isTauriRuntime()) {
         await registerJobListeners();
       }
@@ -245,7 +264,11 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => {
     saveConfig: async (config) => {
       const saved = await tauriClient.saveConfig(config);
       const projectMetadata = await loadProjectMetadataForConfig(saved);
-      set({ config: saved, projectMetadata });
+      set({
+        config: saved,
+        projectMetadata,
+        pinnedNativeTags: pinnedNativeTagsFromMetadata(projectMetadata)
+      });
     },
     scan: async () => {
       const { config, selectedPath } = get();
@@ -266,6 +289,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => {
         files,
         fileTranscriptions
       );
+      const pinnedNativeTags = pinnedNativeTagsFromMetadata(projectMetadata);
       const metadataTranscriptions = transcriptionsFromProjectMetadata(projectMetadata, files);
       const metadataBaselines = transcriptionBaselinesFromProjectMetadata(projectMetadata, files);
       const transcriptionDrafts = {
@@ -283,6 +307,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => {
       set({
         files,
         projectMetadata,
+        pinnedNativeTags,
         selectedPath: nextSelectedPath,
         selectedLineIndex: 0,
         lastOutputPath: outputPathForSelection(nextSelectedPath, files),
@@ -365,6 +390,21 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => {
         return { projectMetadata };
       });
     },
+    togglePinnedNativeTag: (tag) => {
+      if (!nativeTagSet.has(tag)) {
+        get().appendLog(`Marcador OmniVoice não suportado: ${tag}`, "warning");
+        return;
+      }
+
+      set((state) => {
+        const pinnedNativeTags = state.pinnedNativeTags.includes(tag)
+          ? state.pinnedNativeTags.filter((currentTag) => currentTag !== tag)
+          : mergeNativeTags(state.pinnedNativeTags, [tag]);
+        const projectMetadata = withPinnedNativeTags(state.projectMetadata, pinnedNativeTags);
+        queueProjectMetadataSave(state.config.outputDir, projectMetadata);
+        return { pinnedNativeTags, projectMetadata };
+      });
+    },
     updateSelectedLineMetadata: (patch) => {
       set((state) => {
         const projectMetadata = upsertSelectedLineMetadata(state, patch);
@@ -434,7 +474,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => {
         const linePreviewPath = await tauriClient.previewSynthesisLine({
           sourceAudio: state.selectedPath,
           text,
-          tags: lineMetadata.tags,
+          tags: effectiveNativeTags(lineMetadata.tags, state.pinnedNativeTags),
           settings: normalizeNativeSynthesisSettings(lineMetadata.settings)
         });
         set((current) => {
@@ -475,13 +515,13 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => {
         };
       });
     },
-    startDubbing: async () => {
+    startDubbing: async (saveOutputAs = null) => {
       const { config, selectedPath } = get();
       if (!selectedPath || !config.outputDir) {
         get().appendLog("Selecione um arquivo e uma pasta de destino.", "warning");
         return;
       }
-      await startDubbingPaths([selectedPath], { includeSelectedDraft: true });
+      await startDubbingPaths([selectedPath], { includeSelectedDraft: true, saveOutputAs });
     },
     startDubbingList: async (paths) => {
       await startDubbingPaths(paths, { includeSelectedDraft: false });
@@ -784,6 +824,21 @@ function outputPathForSelection(
   }
 
   return selectedFile.outputPath;
+}
+
+function pinnedNativeTagsFromMetadata(metadata: ProjectMetadata): NativeTag[] {
+  return mergeNativeTags(metadata.pinnedNativeTags, []);
+}
+
+function withPinnedNativeTags(
+  metadata: ProjectMetadata,
+  pinnedNativeTags: readonly NativeTag[]
+): ProjectMetadata {
+  return {
+    ...metadata,
+    version: 1,
+    pinnedNativeTags: mergeNativeTags([], pinnedNativeTags)
+  };
 }
 
 function transcriptionsFromFiles(files: AudioFileEntry[]): TranscriptionMap {
