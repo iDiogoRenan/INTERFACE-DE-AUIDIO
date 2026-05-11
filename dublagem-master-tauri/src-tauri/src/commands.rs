@@ -1,7 +1,7 @@
 use crate::{
     audio, config,
     error::{AppError, AppResult},
-    jobs, project_metadata,
+    jobs, output_layout, project_metadata,
     speech::{SynthesisHooks, SynthesisRequest},
     state::AppState,
 };
@@ -182,8 +182,12 @@ pub fn approve_file(source: PathBuf, approved_dir: PathBuf) -> AppResult<PathBuf
 }
 
 #[tauri::command]
-pub fn reject_file(source: PathBuf, rejected_dir: PathBuf) -> AppResult<PathBuf> {
-    copy_to_dir(source, rejected_dir)
+pub fn reject_file(source: PathBuf, output_dir: PathBuf) -> AppResult<PathBuf> {
+    if !source.is_file() {
+        return Err(AppError::InvalidPath(source));
+    }
+    output_layout::ensure_output_layout(&output_dir)?;
+    output_layout::copy_to_rejected(&source, &output_dir)
 }
 
 #[tauri::command]

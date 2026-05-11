@@ -6,6 +6,9 @@ import styles from "./ValidationPanel.module.css";
 export function ValidationPanel() {
   const config = useWorkspaceStore((state) => state.config);
   const selectedPath = useWorkspaceStore((state) => state.selectedPath);
+  const selectedOutputPath = useWorkspaceStore(
+    (state) => state.files.find((file) => file.path === state.selectedPath)?.outputPath ?? null
+  );
   const appendLog = useWorkspaceStore((state) => state.appendLog);
   const startDubbing = useWorkspaceStore((state) => state.startDubbing);
 
@@ -14,7 +17,7 @@ export function ValidationPanel() {
       appendLog("Selecione arquivo e pasta de aprovados.", "warning");
       return;
     }
-    await tauriClient.approveFile(selectedPath, config.approvedDir);
+    await tauriClient.approveFile(selectedOutputPath ?? selectedPath, config.approvedDir);
     appendLog("Arquivo aprovado.", "success");
   }
 
@@ -23,8 +26,8 @@ export function ValidationPanel() {
       appendLog("Selecione arquivo e pasta de destino.", "warning");
       return;
     }
-    await tauriClient.rejectFile(selectedPath, `${config.outputDir}/rejeitados_revisao_manual`);
-    appendLog("Arquivo marcado para revisao manual.", "warning");
+    await tauriClient.rejectFile(selectedOutputPath ?? selectedPath, config.outputDir);
+    appendLog("Arquivo movido para Reprovados.", "warning");
   }
 
   return (

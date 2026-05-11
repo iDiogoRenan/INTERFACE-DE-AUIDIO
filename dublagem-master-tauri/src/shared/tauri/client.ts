@@ -51,8 +51,8 @@ export const tauriClient = {
   cancelJob: (jobId: string) => runCommand("cancel_job", { jobId }),
   approveFile: (source: string, approvedDir: string) =>
     command<string>("approve_file", { source, approvedDir }),
-  rejectFile: (source: string, rejectedDir: string) =>
-    command<string>("reject_file", { source, rejectedDir }),
+  rejectFile: (source: string, outputDir: string) =>
+    command<string>("reject_file", { source, outputDir }),
   generateVoicePool: (outputDir: string) => command<string[]>("generate_voice_pool", { outputDir })
 };
 

@@ -337,6 +337,7 @@ pub struct AudioFileEntry {
     pub path: PathBuf,
     pub family: String,
     pub status: AudioFileStatus,
+    pub output_path: Option<PathBuf>,
     pub metadata: Option<AudioMetadata>,
     pub transcription: Option<CachedTranscription>,
 }
@@ -519,6 +520,7 @@ pub struct DubbingJobEvent {
     pub source_text: Option<String>,
     pub target_text: Option<String>,
     pub output_path: Option<PathBuf>,
+    pub output_status: Option<AudioFileStatus>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

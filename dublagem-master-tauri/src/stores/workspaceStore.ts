@@ -21,6 +21,7 @@ import {
   defaultOptions,
   type AppConfig,
   type AudioFileEntry,
+  type AudioFileStatus,
   type DubbingJobEvent,
   type JobStage,
   type LineSynthesisOverride,
@@ -284,7 +285,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => {
         projectMetadata,
         selectedPath: nextSelectedPath,
         selectedLineIndex: 0,
-        lastOutputPath: outputPathForSelection(nextSelectedPath, files, config),
+        lastOutputPath: outputPathForSelection(nextSelectedPath, files),
         lastOutputRevision: stateNextOutputRevision(get()),
         transcriptionDrafts,
         transcriptionBaselines,
@@ -302,7 +303,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => {
           selectedPath: path,
           selectedLineIndex: 0,
           linePreviewPath: null,
-          lastOutputPath: outputPathForSelection(path, state.files, state.config),
+          lastOutputPath: outputPathForSelection(path, state.files),
           lastOutputRevision: state.lastOutputRevision + 1,
           transcriptionBaselines,
           ...draftStateForPath(path, state.transcriptionDrafts, state.files)
@@ -596,6 +597,7 @@ export function applyJobEvent(payload: DubbingJobEvent): void {
   const resolvedSourceText = resolvedEventText(payload.sourceText, submittedDraft?.sourceText);
   const resolvedTargetText = resolvedEventText(payload.targetText, submittedDraft?.targetText);
   const terminalEvent = isTerminalJobEvent(payload);
+  const completedStatus = completedFileStatus(payload);
   const update: Partial<WorkspaceState> = {
     currentStatus: payload.message
   };
@@ -651,21 +653,28 @@ export function applyJobEvent(payload: DubbingJobEvent): void {
   if (shouldHydrateSelectedEditor && resolvedTargetText !== null) {
     update.targetText = resolvedTargetText;
   }
-  if (shouldHydrateSelectedEditor && payload.outputPath !== null) {
+  if (
+    shouldHydrateSelectedEditor &&
+    payload.outputPath !== null &&
+    (completedStatus === null || hasReviewableOutput(completedStatus))
+  ) {
     update.lastOutputPath = payload.outputPath;
     update.lastOutputRevision = state.lastOutputRevision + 1;
   }
-  if (eventPath && payload.outputPath !== null) {
+  if (eventPath && completedStatus !== null) {
     const transcriptionBaselines = update.transcriptionBaselines ?? state.transcriptionBaselines;
-    const completedTranscription = transcriptionBaselines[eventPath] ?? null;
+    const completedTranscription = hasReviewableOutput(completedStatus)
+      ? (transcriptionBaselines[eventPath] ?? null)
+      : null;
     update.files = state.files.map((file) =>
       file.path === eventPath
-        ? { ...file, status: "dubbed", transcription: completedTranscription ?? file.transcription }
+        ? {
+            ...file,
+            status: completedStatus,
+            outputPath: payload.outputPath ?? file.outputPath,
+            transcription: completedTranscription ?? file.transcription
+          }
         : file
-    );
-  } else if (eventPath && payload.kind === "file_complete") {
-    update.files = state.files.map((file) =>
-      file.path === eventPath ? { ...file, status: "ignored" } : file
     );
   }
 
@@ -737,6 +746,18 @@ function isTerminalJobEvent(payload: DubbingJobEvent): boolean {
   );
 }
 
+function completedFileStatus(payload: DubbingJobEvent): AudioFileStatus | null {
+  if (payload.kind !== "file_complete") {
+    return null;
+  }
+
+  return payload.outputStatus ?? (payload.outputPath === null ? "ignored" : "dubbed");
+}
+
+function hasReviewableOutput(status: AudioFileStatus): boolean {
+  return status === "dubbed" || status === "approved" || status === "rejected";
+}
+
 async function loadProjectMetadataForConfig(config: AppConfig): Promise<ProjectMetadata> {
   if (!config.outputDir) {
     return emptyProjectMetadata();
@@ -751,31 +772,18 @@ async function loadProjectMetadataForConfig(config: AppConfig): Promise<ProjectM
 
 function outputPathForSelection(
   selectedPath: string | null,
-  files: AudioFileEntry[],
-  config: AppConfig
+  files: AudioFileEntry[]
 ): string | null {
-  if (!selectedPath || !config.outputDir) {
+  if (!selectedPath) {
     return null;
   }
 
   const selectedFile = files.find((file) => file.path === selectedPath);
-  if (selectedFile?.status !== "dubbed") {
+  if (!selectedFile || !hasReviewableOutput(selectedFile.status)) {
     return null;
   }
 
-  return outputPathForAudioFile(config.outputDir, selectedFile);
-}
-
-function outputPathForAudioFile(
-  outputDir: string,
-  file: Pick<AudioFileEntry, "family" | "name">
-): string {
-  return joinNativePath(joinNativePath(outputDir, file.family), file.name);
-}
-
-function joinNativePath(directory: string, fileName: string): string {
-  const separator = directory.includes("\\") ? "\\" : "/";
-  return `${directory.replace(/[\\/]+$/u, "")}${separator}${fileName}`;
+  return selectedFile.outputPath;
 }
 
 function transcriptionsFromFiles(files: AudioFileEntry[]): TranscriptionMap {

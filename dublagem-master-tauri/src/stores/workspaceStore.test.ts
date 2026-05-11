@@ -143,7 +143,9 @@ describe("workspaceStore transcription hydration", () => {
 
     useWorkspaceStore.getState().selectFile(dubbedFile.path);
 
-    expect(useWorkspaceStore.getState().lastOutputPath).toBe("E:\\audio\\saida\\line\\line_c.wav");
+    expect(useWorkspaceStore.getState().lastOutputPath).toBe(
+      "E:\\audio\\saida\\Aprovados\\Chunk 1\\line_c.wav"
+    );
 
     useWorkspaceStore.getState().selectFile(fileB.path);
 
@@ -255,7 +257,7 @@ describe("workspaceStore transcription hydration", () => {
         kind: "file_complete",
         stage: "file_complete",
         filePath: cachedDubbedFile.path,
-        outputPath: "E:\\audio\\saida\\line\\line_d.wav",
+        outputPath: approvedChunkPath("line_d.wav"),
         sourceText: "Hello from cache.",
         targetText: "Ola do cache."
       })
@@ -449,6 +451,27 @@ describe("workspaceStore transcription hydration", () => {
     expect(useWorkspaceStore.getState().files[0].status).toBe("ignored");
   });
 
+  it("keeps ignored files out of the result player when the backend stores the source copy", () => {
+    useWorkspaceStore.setState({ files: [fileA], selectedPath: fileA.path });
+
+    applyJobEvent(
+      jobEvent({
+        kind: "file_complete",
+        stage: "file_complete",
+        filePath: fileA.path,
+        outputPath: "E:\\audio\\saida\\Ignorados\\line_a.wav",
+        outputStatus: "ignored",
+        message: "Ignorado: áudio com 31.00s excede o limite OmniVoice de 30.00s."
+      })
+    );
+
+    expect(useWorkspaceStore.getState().files[0]).toMatchObject({
+      status: "ignored",
+      outputPath: "E:\\audio\\saida\\Ignorados\\line_a.wav"
+    });
+    expect(useWorkspaceStore.getState().lastOutputPath).toBeNull();
+  });
+
   it("keeps execution logs timestamped and sorted newest first", () => {
     const store = useWorkspaceStore.getState();
 
@@ -493,7 +516,7 @@ describe("workspaceStore transcription hydration", () => {
         kind: "file_complete",
         stage: "file_complete",
         filePath: cachedDubbedFile.path,
-        outputPath: "E:\\audio\\saida\\line\\line_d.wav",
+        outputPath: approvedChunkPath("line_d.wav"),
         sourceText: "Hello from cache.",
         targetText: "Texto editado para redublagem."
       })
@@ -513,16 +536,35 @@ function audioFile(
   path: string,
   name: string,
   status: AudioFileEntry["status"] = "pending",
-  transcription: AudioFileEntry["transcription"] = null
+  transcription: AudioFileEntry["transcription"] = null,
+  outputPath: string | null = outputPathForStatus(name, status)
 ): AudioFileEntry {
   return {
     name,
     path,
     family: "line",
     status,
+    outputPath,
     metadata: null,
     transcription
   };
+}
+
+function outputPathForStatus(name: string, status: AudioFileEntry["status"]): string | null {
+  if (status === "dubbed" || status === "approved") {
+    return approvedChunkPath(name);
+  }
+  if (status === "rejected") {
+    return `E:\\audio\\saida\\Reprovados\\${name}`;
+  }
+  if (status === "ignored") {
+    return `E:\\audio\\saida\\Ignorados\\${name}`;
+  }
+  return null;
+}
+
+function approvedChunkPath(name: string): string {
+  return `E:\\audio\\saida\\Aprovados\\Chunk 1\\${name}`;
 }
 
 function jobEvent(patch: Partial<DubbingJobEvent>): DubbingJobEvent {
@@ -540,6 +582,7 @@ function jobEvent(patch: Partial<DubbingJobEvent>): DubbingJobEvent {
     sourceText: null,
     targetText: null,
     outputPath: null,
+    outputStatus: null,
     ...patch
   };
 }

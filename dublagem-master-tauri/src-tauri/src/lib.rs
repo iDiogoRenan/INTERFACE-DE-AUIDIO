@@ -3,6 +3,7 @@ mod commands;
 mod config;
 mod error;
 mod jobs;
+mod output_layout;
 mod project_metadata;
 mod speech;
 mod state;

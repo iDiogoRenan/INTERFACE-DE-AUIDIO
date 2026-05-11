@@ -94,6 +94,7 @@ export interface AudioFileEntry {
   path: string;
   family: string;
   status: AudioFileStatus;
+  outputPath: string | null;
   metadata: AudioMetadata | null;
   transcription: CachedTranscription | null;
 }
@@ -180,6 +181,7 @@ export interface DubbingJobEvent {
   sourceText: string | null;
   targetText: string | null;
   outputPath: string | null;
+  outputStatus: AudioFileStatus | null;
 }
 
 export const defaultOptions: DubbingOptions = {

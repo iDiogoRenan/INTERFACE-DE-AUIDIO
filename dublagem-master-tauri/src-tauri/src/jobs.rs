@@ -1,7 +1,7 @@
 use crate::{
     audio,
     error::{AppError, AppResult},
-    project_metadata,
+    output_layout, project_metadata,
     speech::{
         runtime::SpeechRuntime, SynthesisCancellationCheck, SynthesisHooks,
         SynthesisProgressCallback, SynthesisRequest, Transcriber, VoiceSynthesizer,
@@ -11,8 +11,9 @@ use crate::{
 };
 use chrono::{SecondsFormat, Utc};
 use dublagem_domain::{
-    DubbingJobEvent, DubbingOptions, DubbingRequest, JobEventKind, JobId, JobStage, LanguageCode,
-    LineSynthesisOverride, TranslationRequest, OMNIVOICE_MAX_SYNTHESIS_SECONDS,
+    AudioFileStatus, DubbingJobEvent, DubbingOptions, DubbingRequest, JobEventKind, JobId,
+    JobStage, LanguageCode, LineSynthesisOverride, TranslationRequest,
+    OMNIVOICE_MAX_SYNTHESIS_SECONDS,
 };
 use std::{
     collections::HashMap,
@@ -151,7 +152,7 @@ async fn run_job(
         project_metadata::validate_settings(&line.settings)?;
     }
 
-    std::fs::create_dir_all(&request.output_dir)?;
+    output_layout::ensure_output_layout(&request.output_dir)?;
     let total = request.input_paths.len();
     let ignored_inputs = ignored_source_audio_reasons(&request.input_paths)?;
     let needs_speech_engines = ignored_inputs.len() < total;
@@ -240,7 +241,18 @@ async fn run_job(
         )?;
 
         if let Some(reason) = ignored_inputs.get(input_path) {
-            emit_ignored_file(&app, job_id, &context, reason.clone())?;
+            let metadata = audio::get_audio_metadata(input_path).ok();
+            output_layout::remove_approved_outputs(
+                &request.output_dir,
+                &context.file_name,
+                metadata.as_ref(),
+            )?;
+            let output_path = output_layout::copy_to_ignored(
+                input_path,
+                &request.output_dir,
+                &context.file_name,
+            )?;
+            emit_ignored_file(&app, job_id, &context, reason.clone(), output_path)?;
             emit_progress(&app, job_id, context.progress(100), Some(&context))?;
             continue;
         }
@@ -294,7 +306,13 @@ async fn run_job(
             Some(&target_text),
         )?;
 
-        let output_path = audio::dubbed_output_path(&request.output_dir, &context.file_name);
+        let source_metadata = audio::get_audio_metadata(input_path).ok();
+        let output_path = output_layout::approved_output_path_for_metadata(
+            &request.output_dir,
+            &context.file_name,
+            source_metadata.as_ref(),
+        );
+        output_layout::ensure_output_parent(&output_path)?;
         let reference_audio = request.guide_audio.as_deref().unwrap_or(input_path);
         let synthesis_hooks =
             synthesis_hooks(app.clone(), job_id, context.clone(), cancellation.clone());
@@ -328,6 +346,7 @@ async fn run_job(
             emit_cancelled(&app, job_id, Some(&context))?;
             return Ok(());
         }
+        output_layout::remove_ignored_and_rejected(&request.output_dir, &context.file_name)?;
 
         emit_stage(
             &app,
@@ -355,7 +374,8 @@ async fn run_job(
                 Some(&context),
             )
             .with_text(Some(source_text), Some(target_text))
-            .with_output_path(output_path),
+            .with_output_path(output_path)
+            .with_output_status(AudioFileStatus::Dubbed),
         )?;
         emit_progress(&app, job_id, context.progress(100), Some(&context))?;
     }
@@ -1235,6 +1255,7 @@ fn synthesis_hooks(
 trait JobEventExt {
     fn with_text(self, source_text: Option<String>, target_text: Option<String>) -> Self;
     fn with_output_path(self, output_path: impl Into<std::path::PathBuf>) -> Self;
+    fn with_output_status(self, status: AudioFileStatus) -> Self;
     fn with_total_files(self, total_files: usize) -> Self;
 }
 
@@ -1247,6 +1268,11 @@ impl JobEventExt for DubbingJobEvent {
 
     fn with_output_path(mut self, output_path: impl Into<std::path::PathBuf>) -> Self {
         self.output_path = Some(output_path.into());
+        self
+    }
+
+    fn with_output_status(mut self, status: AudioFileStatus) -> Self {
+        self.output_status = Some(status);
         self
     }
 
@@ -1306,6 +1332,7 @@ fn emit_ignored_file(
     job_id: JobId,
     context: &FileContext,
     reason: String,
+    output_path: PathBuf,
 ) -> AppResult<()> {
     emit(
         app,
@@ -1317,7 +1344,9 @@ fn emit_ignored_file(
             reason,
             Some(context.progress(100)),
             Some(context),
-        ),
+        )
+        .with_output_path(output_path)
+        .with_output_status(AudioFileStatus::Ignored),
     )
 }
 
@@ -1437,6 +1466,7 @@ fn event(
         source_text: None,
         target_text: None,
         output_path: None,
+        output_status: None,
     }
 }
 
