@@ -1,7 +1,10 @@
 .panel {
   display: grid;
   grid-template-rows: var(--workspace-header-block-size, 88px) auto minmax(0, 1fr) auto auto;
+  block-size: 100%;
   min-width: 300px;
+  min-height: 0;
+  overflow: hidden;
   border-right: 1px solid var(--border);
   background: var(--surface-0);
 }
@@ -148,7 +151,11 @@
 
 .tagPalette {
   display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
   gap: 10px;
+  max-block-size: min(46dvh, 430px);
+  min-height: 0;
+  overflow: hidden;
   border-top: 1px solid var(--border);
   padding: 12px;
   background: color-mix(in srgb, var(--surface-1) 70%, var(--surface-0));
@@ -187,6 +194,9 @@
 .paletteContent {
   display: grid;
   gap: 10px;
+  min-height: 0;
+  overflow: auto;
+  padding-inline-end: 2px;
 }
 
 .tagGroup {

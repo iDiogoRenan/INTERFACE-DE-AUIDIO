@@ -1060,6 +1060,25 @@ mod tests {
     }
 
     #[test]
+    fn whole_file_synthesis_preserves_inline_native_tags() {
+        let request = OwnedSynthesisRequest {
+            text: "[sigh] Ola [question-ah]?".to_string(),
+            source_audio: PathBuf::from("source.wav"),
+            reference_audio: PathBuf::from("source.wav"),
+            reference_text: "Original.".to_string(),
+            output_path: PathBuf::from("out.wav"),
+            options: DubbingOptions::default(),
+            pinned_tags: Vec::new(),
+            line_overrides: Vec::new(),
+            hooks: SynthesisHooks::default(),
+        };
+
+        let segments = synthesis_segments_for_request(&request, Some(2.0)).unwrap();
+
+        assert_eq!(segments[0].text, "[sigh] Ola [question-ah]?");
+    }
+
+    #[test]
     fn pinned_tags_are_applied_to_whole_file_synthesis() {
         let request = OwnedSynthesisRequest {
             text: "Ola mundo".to_string(),
@@ -1125,7 +1144,7 @@ mod tests {
             line_overrides: vec![
                 LineSynthesisOverride {
                     line_index: 0,
-                    target_text: "Primeira frase.".to_string(),
+                    target_text: "[sigh] Primeira frase.".to_string(),
                     tags: vec!["[sigh]".to_string()],
                     settings: line_settings,
                 },
@@ -1205,22 +1224,6 @@ mod tests {
     }
 
     #[test]
-    fn generation_request_preserves_native_tags_for_omnivoice_frontend() {
-        let options = DubbingOptions::default();
-        let settings = NativeSynthesisSettings::default();
-
-        let request = generation_request(
-            "[sigh] Ola [question-ah]?".to_string(),
-            None,
-            None,
-            &options,
-            &settings,
-        );
-
-        assert_eq!(request.texts[0], "[sigh] Ola [question-ah]?");
-    }
-
-    #[test]
     fn generated_segment_cleanup_preserves_trailing_tail() {
         let samples = vec![0.0, 0.0, 0.5, 0.25, 0.001, 0.0];
 
@@ -1259,6 +1262,33 @@ mod tests {
             ),
             vec!["[sigh]".to_string(), "[surprise-oh]".to_string()]
         );
+    }
+
+    #[test]
+    fn sanitized_fallback_line_overrides_strip_native_tags() {
+        let base_settings = NativeSynthesisSettings::default();
+        let request = OwnedSynthesisRequest {
+            text: "Fallback sem marcador.".to_string(),
+            source_audio: PathBuf::from("source.wav"),
+            reference_audio: PathBuf::from("source.wav"),
+            reference_text: "Original.".to_string(),
+            output_path: PathBuf::from("out.wav"),
+            options: DubbingOptions::default(),
+            pinned_tags: Vec::new(),
+            line_overrides: vec![LineSynthesisOverride {
+                line_index: 0,
+                target_text: dublagem_domain::strip_omnivoice_native_tags(
+                    "Ola [surprise-oh] mundo.",
+                ),
+                tags: Vec::new(),
+                settings: base_settings,
+            }],
+            hooks: SynthesisHooks::default(),
+        };
+
+        let segments = synthesis_segments_for_request(&request, Some(2.0)).unwrap();
+
+        assert_eq!(segments[0].text, "Ola mundo.");
     }
 
     #[test]

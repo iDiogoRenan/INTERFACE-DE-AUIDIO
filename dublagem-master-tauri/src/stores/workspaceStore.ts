@@ -5,7 +5,6 @@ import {
   effectiveNativeTags,
   mergeNativeTags,
   nativeTagSet,
-  nativeSynthesisSettingsEqual,
   normalizeNativeSynthesisSettings,
   removeNativeTagsFromText,
   splitLines,
@@ -89,9 +88,9 @@ interface WorkspaceState {
   removeNativeTag: (tag: NativeTag) => void;
   togglePinnedNativeTag: (tag: NativeTag) => void;
   updateSelectedLineMetadata: (patch: Partial<ProjectLineMetadata>) => void;
-  updateSelectedLineSettings: (patch: Partial<NativeSynthesisSettings>) => void;
-  saveSelectedLineSettingsAsDefault: () => Promise<void>;
-  resetSelectedLineSettingsToDefault: () => Promise<void>;
+  updateGlobalSynthesisSettings: (patch: Partial<NativeSynthesisSettings>) => void;
+  saveGlobalSynthesisSettings: () => Promise<void>;
+  resetGlobalSynthesisSettings: () => Promise<void>;
   previewSelectedLine: () => Promise<void>;
   revertTranscription: () => void;
   startDubbing: (saveOutputAs?: string | null) => Promise<void>;
@@ -201,7 +200,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => {
                 files,
                 projectMetadata,
                 targetText,
-                baseSettings: nativeSynthesis
+                globalSettings: nativeSynthesis
               })
             : []
       });
@@ -412,48 +411,37 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => {
         return { projectMetadata };
       });
     },
-    updateSelectedLineSettings: (patch) => {
+    updateGlobalSynthesisSettings: (patch) => {
       set((state) => {
-        const current = selectedLineMetadata(state);
-        const projectMetadata = upsertSelectedLineMetadata(state, {
-          settings: normalizeNativeSynthesisSettings({ ...current.settings, ...patch })
+        const settings = normalizeNativeSynthesisSettings({
+          ...activeNativeSynthesisSettings(state.config),
+          ...patch
         });
-        queueProjectMetadataSave(state.config.outputDir, projectMetadata);
-        return { projectMetadata };
+        return { config: configWithActiveNativeSynthesis(state.config, settings) };
       });
     },
-    saveSelectedLineSettingsAsDefault: async () => {
+    saveGlobalSynthesisSettings: async () => {
       const state = get();
-      const settings = normalizeNativeSynthesisSettings(selectedLineMetadata(state).settings);
+      const settings = activeNativeSynthesisSettings(state.config);
       const nextConfig = configWithActiveNativeSynthesis(state.config, settings);
       try {
         const saved = await tauriClient.saveConfig(nextConfig);
         set({ config: saved });
-        get().appendLog("Ajustes de síntese salvos como padrão global.", "success");
+        get().appendLog("Ajustes globais de síntese salvos.", "success");
       } catch (unknownError: unknown) {
         get().appendLog(errorMessage(unknownError), "error");
       }
     },
-    resetSelectedLineSettingsToDefault: async () => {
+    resetGlobalSynthesisSettings: async () => {
       const defaultSettings = normalizeNativeSynthesisSettings(defaultOptions.nativeSynthesis);
       const state = get();
       const nextConfig = configWithActiveNativeSynthesis(state.config, defaultSettings);
-      set((current) => {
-        const projectMetadata = upsertSelectedLineMetadata(current, {
-          characterId: null,
-          settings: defaultSettings
-        });
-        queueProjectMetadataSave(current.config.outputDir, projectMetadata);
-        return {
-          config: nextConfig,
-          projectMetadata
-        };
-      });
+      set({ config: nextConfig });
 
       try {
         const saved = await tauriClient.saveConfig(nextConfig);
         set({ config: saved });
-        get().appendLog("Padrões de síntese restaurados.", "success");
+        get().appendLog("Ajustes globais de síntese restaurados.", "success");
       } catch (unknownError: unknown) {
         get().appendLog(errorMessage(unknownError), "error");
       }
@@ -470,12 +458,13 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => {
         return;
       }
       const lineMetadata = selectedLineMetadata(state);
+      const settings = activeNativeSynthesisSettings(state.config);
       try {
         const linePreviewPath = await tauriClient.previewSynthesisLine({
           sourceAudio: state.selectedPath,
           text,
           tags: effectiveNativeTags(lineMetadata.tags, state.pinnedNativeTags),
-          settings: normalizeNativeSynthesisSettings(lineMetadata.settings)
+          settings
         });
         set((current) => {
           const lastOutputRevision = current.lastOutputRevision + 1;
@@ -1126,11 +1115,11 @@ function buildLineOverrides(input: {
   files: AudioFileEntry[];
   projectMetadata: ProjectMetadata;
   targetText: string;
-  baseSettings: NativeSynthesisSettings;
+  globalSettings: NativeSynthesisSettings;
 }): LineSynthesisOverride[] {
   const fileKey = fileKeyForPath(input.selectedPath, input.files);
   const fileMetadata = fileKey ? input.projectMetadata.files[fileKey] : undefined;
-  if (!fileMetadata || !hasFileLineOverrides(fileMetadata, input.baseSettings)) {
+  if (!fileMetadata || !hasFileLineOverrides(fileMetadata)) {
     return [];
   }
 
@@ -1139,24 +1128,17 @@ function buildLineOverrides(input: {
       lineIndex,
       targetText: removeNativeTagsFromText(line).trim(),
       tags: fileMetadata.lines[String(lineIndex)]?.tags ?? [],
-      settings: cloneSettings(fileMetadata.lines[String(lineIndex)]?.settings ?? input.baseSettings)
+      settings: cloneSettings(input.globalSettings)
     }))
     .filter((line) => line.targetText.length > 0);
 }
 
-function hasFileLineOverrides(
-  fileMetadata: ProjectFileMetadata,
-  baseSettings: NativeSynthesisSettings
-): boolean {
+function hasFileLineOverrides(fileMetadata: ProjectFileMetadata): boolean {
   return Object.values(fileMetadata.lines).some((line) => {
     if (!line) {
       return false;
     }
-    return (
-      line.tags.length > 0 ||
-      line.characterId !== null ||
-      !nativeSynthesisSettingsEqual(line.settings, baseSettings)
-    );
+    return line.tags.length > 0 || line.characterId !== null;
   });
 }
 

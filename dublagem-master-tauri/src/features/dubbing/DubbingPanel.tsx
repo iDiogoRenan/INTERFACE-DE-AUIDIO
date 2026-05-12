@@ -31,6 +31,7 @@ import {
   type NativeTag
 } from "../../shared/omnivoice/nativeControls";
 import { useWorkspaceStore, selectedLineMetadata } from "../../stores/workspaceStore";
+import { activeNativeSynthesisSettings } from "../../shared/speechModels";
 import type {
   AudioFileEntry,
   JobStage,
@@ -89,12 +90,14 @@ export function DubbingPanel() {
   const setTargetText = useWorkspaceStore((state) => state.setTargetText);
   const setSelectedLineIndex = useWorkspaceStore((state) => state.setSelectedLineIndex);
   const updateSelectedLineMetadata = useWorkspaceStore((state) => state.updateSelectedLineMetadata);
-  const updateSelectedLineSettings = useWorkspaceStore((state) => state.updateSelectedLineSettings);
-  const saveSelectedLineSettingsAsDefault = useWorkspaceStore(
-    (state) => state.saveSelectedLineSettingsAsDefault
+  const updateGlobalSynthesisSettings = useWorkspaceStore(
+    (state) => state.updateGlobalSynthesisSettings
   );
-  const resetSelectedLineSettingsToDefault = useWorkspaceStore(
-    (state) => state.resetSelectedLineSettingsToDefault
+  const saveGlobalSynthesisSettings = useWorkspaceStore(
+    (state) => state.saveGlobalSynthesisSettings
+  );
+  const resetGlobalSynthesisSettings = useWorkspaceStore(
+    (state) => state.resetGlobalSynthesisSettings
   );
   const removeNativeTag = useWorkspaceStore((state) => state.removeNativeTag);
   const pinnedNativeTags = useWorkspaceStore((state) => state.pinnedNativeTags);
@@ -125,6 +128,7 @@ export function DubbingPanel() {
     selectedLineIndex,
     targetText
   });
+  const globalSynthesisSettings = activeNativeSynthesisSettings(config);
   const primaryAction = dubbingActionCopy(selectedFile?.status ?? null);
   const PrimaryActionIcon = primaryAction.intent === "redub" ? RotateCcw : Wand2;
   const transcriptionBaseline = selectedPath ? transcriptionBaselines[selectedPath] : undefined;
@@ -229,15 +233,16 @@ export function DubbingPanel() {
         selectedLineIndex={selectedLineIndex}
         targetText={targetText}
         metadata={lineMetadata}
+        settings={globalSynthesisSettings}
         pinnedTags={pinnedNativeTags}
         isBusy={isBusy}
         onMetadataChange={updateSelectedLineMetadata}
-        onSettingsChange={updateSelectedLineSettings}
+        onSettingsChange={updateGlobalSynthesisSettings}
         onSaveSettingsAsDefault={() => {
-          void saveSelectedLineSettingsAsDefault();
+          void saveGlobalSynthesisSettings();
         }}
         onResetSettingsToDefault={() => {
-          void resetSelectedLineSettingsToDefault();
+          void resetGlobalSynthesisSettings();
         }}
         onPreview={() => {
           void previewSelectedLine();
@@ -499,6 +504,7 @@ interface LinePropertiesSidebarProps {
   selectedLineIndex: number;
   targetText: string;
   metadata: ProjectLineMetadata;
+  settings: NativeSynthesisSettings;
   pinnedTags: readonly NativeTag[];
   isBusy: boolean;
   onMetadataChange: (patch: Partial<ProjectLineMetadata>) => void;
@@ -514,6 +520,7 @@ function LinePropertiesSidebar({
   selectedLineIndex,
   targetText,
   metadata,
+  settings,
   pinnedTags,
   isBusy,
   onMetadataChange,
@@ -537,6 +544,7 @@ function LinePropertiesSidebar({
         lineCount={lineCount}
         currentDuration={currentDuration}
         metadata={metadata}
+        settings={settings}
         pinnedTags={pinnedTags}
         controlsDisabled={controlsDisabled}
         sectionOpenState={sectionOpenState}
@@ -561,6 +569,7 @@ interface LinePropertiesPanelProps {
   lineCount: number;
   currentDuration: number | null;
   metadata: ProjectLineMetadata;
+  settings: NativeSynthesisSettings;
   pinnedTags: readonly NativeTag[];
   controlsDisabled: boolean;
   sectionOpenState: LineSectionOpenState;
@@ -574,6 +583,7 @@ function LinePropertiesPanel({
   lineCount,
   currentDuration,
   metadata,
+  settings,
   pinnedTags,
   controlsDisabled,
   sectionOpenState,
@@ -581,7 +591,6 @@ function LinePropertiesPanel({
   onMetadataChange,
   onSettingsChange
 }: LinePropertiesPanelProps) {
-  const settings = metadata.settings;
   const acceptedSettings = normalizeNativeSynthesisSettings(settings);
   const effectiveTagCount = effectiveNativeTags(metadata.tags, pinnedTags).length;
   const isPropertiesOpen = sectionOpenState.properties;
@@ -707,7 +716,7 @@ function LinePropertiesPanel({
           </CollapsibleSection>
 
           <CollapsibleSection
-            title="Ajustes nativos"
+            title="Ajustes nativos globais"
             isOpen={sectionOpenState.nativeAdjustments}
             onOpenChange={(isOpen) => {
               onSectionOpenChange("nativeAdjustments", isOpen);
@@ -784,14 +793,14 @@ function LinePropertiesPanel({
           </CollapsibleSection>
 
           <CollapsibleSection
-            title="Polimento de áudio"
+            title="Polimento de áudio global"
             isOpen={sectionOpenState.audioPolish}
             onOpenChange={(isOpen) => {
               onSectionOpenChange("audioPolish", isOpen);
             }}
           >
             <NativeCheckbox
-              label="Casar volume percebido com origem"
+              label="Nivelar volume automaticamente"
               checked={acceptedSettings.matchSourceLoudness}
               disabled={controlsDisabled}
               onCheckedChange={(matchSourceLoudness) => {
@@ -799,7 +808,7 @@ function LinePropertiesPanel({
               }}
             />
             <RangeField
-              label="Força do ajuste de volume"
+              label="Quanto seguir o volume da origem"
               value={acceptedSettings.loudnessMatchStrength}
               min={nativeSynthesisNumberControls.loudnessMatchStrength.min}
               max={nativeSynthesisNumberControls.loudnessMatchStrength.max}
@@ -871,14 +880,14 @@ function LineActionDock({
   onRegenerate
 }: LineActionDockProps) {
   return (
-    <section className={styles.propertyActions} aria-label="Controles da linha">
+    <section className={styles.propertyActions} aria-label="Controles de síntese">
       <button type="button" disabled={controlsDisabled} onClick={onSaveSettingsAsDefault}>
         <CheckCircle2 size={15} />
-        Salvar padrão global
+        Salvar ajustes globais
       </button>
       <button type="button" disabled={controlsDisabled} onClick={onResetSettingsToDefault}>
         <Undo2 size={15} />
-        Restaurar padrões
+        Restaurar globais
       </button>
       <button type="button" disabled={controlsDisabled || !canPreviewLine} onClick={onPreview}>
         <Play size={15} />

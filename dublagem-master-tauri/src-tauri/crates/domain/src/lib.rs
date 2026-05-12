@@ -21,6 +21,85 @@ pub const OMNIVOICE_NATIVE_TAGS: &[&str] = &[
     "[dissatisfaction-hnn]",
 ];
 
+pub fn strip_omnivoice_native_tags(text: &str) -> String {
+    let mut without_tags = String::with_capacity(text.len());
+    let mut cursor = 0;
+
+    while cursor < text.len() {
+        let remaining = &text[cursor..];
+        if let Some(tag) = omnivoice_native_tag_at(remaining) {
+            without_tags.push(' ');
+            cursor += tag.len();
+            continue;
+        }
+
+        let Some(character) = remaining.chars().next() else {
+            break;
+        };
+        without_tags.push(character);
+        cursor += character.len_utf8();
+    }
+
+    normalize_speakable_tag_spacing(&without_tags)
+}
+
+fn omnivoice_native_tag_at(text: &str) -> Option<&'static str> {
+    OMNIVOICE_NATIVE_TAGS
+        .iter()
+        .copied()
+        .find(|tag| text.starts_with(tag))
+}
+
+fn normalize_speakable_tag_spacing(text: &str) -> String {
+    let mut normalized = String::with_capacity(text.len());
+    let mut pending_space = false;
+
+    for character in text.chars() {
+        if character.is_whitespace() {
+            pending_space = !normalized.is_empty();
+            continue;
+        }
+
+        if punctuation_without_leading_space(character) {
+            pending_space = false;
+            if normalized.ends_with(' ') {
+                normalized.pop();
+            }
+        } else if pending_space {
+            normalized.push(' ');
+            pending_space = false;
+        }
+
+        normalized.push(character);
+    }
+
+    normalized.trim().to_string()
+}
+
+fn punctuation_without_leading_space(character: char) -> bool {
+    matches!(
+        character,
+        ',' | '.'
+            | '!'
+            | '?'
+            | ';'
+            | ':'
+            | '…'
+            | ')'
+            | ']'
+            | '}'
+            | '，'
+            | '。'
+            | '！'
+            | '？'
+            | '；'
+            | '：'
+            | '、'
+            | '）'
+            | '】'
+    )
+}
+
 pub const OMNIVOICE_MAX_SYNTHESIS_SECONDS: f32 = 30.0;
 pub const MIN_SYNTHESIS_CHUNKS: u32 = 1;
 pub const DEFAULT_MAX_SYNTHESIS_CHUNKS: u32 = MIN_SYNTHESIS_CHUNKS;
@@ -602,4 +681,29 @@ pub struct TranslationRequest {
 pub struct TranslationResult {
     pub translated_text: String,
     pub provider: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn strips_native_tags_from_speakable_text() {
+        assert_eq!(
+            strip_omnivoice_native_tags("[sigh] Ola [question-ah]?"),
+            "Ola?"
+        );
+        assert_eq!(
+            strip_omnivoice_native_tags("Inicio [laughter] meio [surprise-oh] fim."),
+            "Inicio meio fim."
+        );
+    }
+
+    #[test]
+    fn keeps_pronunciation_hints_when_stripping_native_tags() {
+        assert_eq!(
+            strip_omnivoice_native_tags("[sigh] He plays [B EY1 S] guitar."),
+            "He plays [B EY1 S] guitar."
+        );
+    }
 }

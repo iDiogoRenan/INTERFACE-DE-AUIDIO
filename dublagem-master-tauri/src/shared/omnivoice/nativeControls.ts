@@ -274,9 +274,5 @@ export function hasLineSpecificSynthesis(metadata: ProjectLineMetadata | undefin
   if (!metadata) {
     return false;
   }
-  return (
-    metadata.tags.length > 0 ||
-    metadata.characterId !== null ||
-    !nativeSynthesisSettingsEqual(metadata.settings, defaultNativeSynthesisSettings)
-  );
+  return metadata.tags.length > 0 || metadata.characterId !== null;
 }

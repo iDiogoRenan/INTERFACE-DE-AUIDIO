@@ -635,6 +635,7 @@ struct V14ValidationJob<'a> {
     cancellation: &'a CancellationToken,
     transcriber: &'a dyn Transcriber,
     expected_text: &'a str,
+    expected_native_tags: &'a [String],
     output_path: &'a Path,
     target_language: LanguageCode,
 }
@@ -643,6 +644,7 @@ struct V14ValidationJob<'a> {
 struct V14OutputValidation {
     accepted: bool,
     message: String,
+    native_tag_literal_detected: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -670,48 +672,20 @@ async fn synthesize_with_v14_guard(job: V14SynthesisJob<'_>) -> AppResult<V14Syn
         return Ok(V14SynthesisOutcome::Cancelled);
     }
 
-    remove_file_if_exists(job.output_path)?;
-    emit_stage(
-        job.app,
-        job.job_id,
-        JobStage::Synthesizing,
-        "Gerando síntese v14 única.",
-        Some(job.context.progress(65)),
-        Some(job.context),
-    )?;
-
-    let synth_result = cancellable_phase(
-        job.app,
-        job.job_id,
-        job.cancellation,
-        Some(job.context),
-        "síntese OmniVoice v14",
-        SYNTHESIS_TIMEOUT,
-        job.synthesizer.synthesize(SynthesisRequest {
-            text: job.target_text,
-            source_audio: job.source_audio,
-            reference_audio: job.reference_audio,
-            reference_text: &reference_text,
-            output_path: job.output_path,
-            options: job.options.clone(),
-            pinned_tags: job.pinned_tags,
-            line_overrides: job.line_overrides,
-            hooks: job.hooks.clone(),
-        }),
-    )
-    .await;
-
-    match synth_result {
-        Ok(Some(())) => {}
-        Ok(None) => return Ok(V14SynthesisOutcome::Cancelled),
-        Err(_) if job.cancellation.is_cancelled() => return Ok(V14SynthesisOutcome::Cancelled),
-        Err(error) => return Err(error),
-    }
-    if !job.output_path.is_file() {
-        return Err(AppError::Internal(format!(
-            "síntese OmniVoice finalizou sem escrever o arquivo de saída em {}",
-            job.output_path.display()
-        )));
+    let primary_native_tags =
+        native_tags_for_v14_attempt(job.target_text, job.pinned_tags, job.line_overrides);
+    if !synthesize_v14_once(V14SynthesisAttempt {
+        job: &job,
+        reference_text: &reference_text,
+        text: job.target_text,
+        pinned_tags: job.pinned_tags,
+        line_overrides: job.line_overrides,
+        stage_message: "Gerando síntese v14 única.",
+        progress: 65,
+    })
+    .await?
+    {
+        return Ok(V14SynthesisOutcome::Cancelled);
     }
 
     let validation = validate_v14_output(V14ValidationJob {
@@ -721,6 +695,7 @@ async fn synthesize_with_v14_guard(job: V14SynthesisJob<'_>) -> AppResult<V14Syn
         cancellation: job.cancellation,
         transcriber: job.transcriber,
         expected_text: job.target_text,
+        expected_native_tags: &primary_native_tags,
         output_path: job.output_path,
         target_language: job.options.target_language,
     })
@@ -738,10 +713,235 @@ async fn synthesize_with_v14_guard(job: V14SynthesisJob<'_>) -> AppResult<V14Syn
         return Ok(V14SynthesisOutcome::Accepted);
     }
 
+    if validation.native_tag_literal_detected && !primary_native_tags.is_empty() {
+        emit_stage(
+            job.app,
+            job.job_id,
+            JobStage::Synthesizing,
+            "Marcador vocalizado; refazendo síntese sem tags faláveis.",
+            Some(job.context.progress(72)),
+            Some(job.context),
+        )?;
+
+        let fallback_target_text = dublagem_domain::strip_omnivoice_native_tags(job.target_text);
+        let fallback_pinned_tags = Vec::<String>::new();
+        let fallback_line_overrides = speakable_line_overrides(job.line_overrides);
+        if !synthesize_v14_once(V14SynthesisAttempt {
+            job: &job,
+            reference_text: &reference_text,
+            text: &fallback_target_text,
+            pinned_tags: &fallback_pinned_tags,
+            line_overrides: &fallback_line_overrides,
+            stage_message: "Gerando síntese v14 de segurança sem marcadores.",
+            progress: 74,
+        })
+        .await?
+        {
+            return Ok(V14SynthesisOutcome::Cancelled);
+        }
+
+        let fallback_validation = validate_v14_output(V14ValidationJob {
+            app: job.app,
+            job_id: job.job_id,
+            context: job.context,
+            cancellation: job.cancellation,
+            transcriber: job.transcriber,
+            expected_text: &fallback_target_text,
+            expected_native_tags: &fallback_pinned_tags,
+            output_path: job.output_path,
+            target_language: job.options.target_language,
+        })
+        .await?;
+
+        if fallback_validation.accepted {
+            emit_stage(
+                job.app,
+                job.job_id,
+                JobStage::Synthesizing,
+                format!(
+                    "Síntese v14 aprovada sem marcador falável: {}.",
+                    fallback_validation.message
+                ),
+                Some(job.context.progress(90)),
+                Some(job.context),
+            )?;
+            return Ok(V14SynthesisOutcome::Accepted);
+        }
+
+        return Ok(V14SynthesisOutcome::Rejected(format!(
+            "Síntese v14 reprovada após fallback sem tags: {}",
+            fallback_validation.message
+        )));
+    }
+
     Ok(V14SynthesisOutcome::Rejected(format!(
         "Síntese v14 reprovada: {}",
         validation.message
     )))
+}
+
+struct V14SynthesisAttempt<'a, 'b> {
+    job: &'a V14SynthesisJob<'b>,
+    reference_text: &'a str,
+    text: &'a str,
+    pinned_tags: &'a [String],
+    line_overrides: &'a [LineSynthesisOverride],
+    stage_message: &'a str,
+    progress: u8,
+}
+
+async fn synthesize_v14_once(attempt: V14SynthesisAttempt<'_, '_>) -> AppResult<bool> {
+    let job = attempt.job;
+    remove_file_if_exists(job.output_path)?;
+    emit_stage(
+        job.app,
+        job.job_id,
+        JobStage::Synthesizing,
+        attempt.stage_message,
+        Some(job.context.progress(attempt.progress)),
+        Some(job.context),
+    )?;
+
+    let synth_result = cancellable_phase(
+        job.app,
+        job.job_id,
+        job.cancellation,
+        Some(job.context),
+        "síntese OmniVoice v14",
+        SYNTHESIS_TIMEOUT,
+        job.synthesizer.synthesize(SynthesisRequest {
+            text: attempt.text,
+            source_audio: job.source_audio,
+            reference_audio: job.reference_audio,
+            reference_text: attempt.reference_text,
+            output_path: job.output_path,
+            options: job.options.clone(),
+            pinned_tags: attempt.pinned_tags,
+            line_overrides: attempt.line_overrides,
+            hooks: job.hooks.clone(),
+        }),
+    )
+    .await;
+
+    match synth_result {
+        Ok(Some(())) => {}
+        Ok(None) => return Ok(false),
+        Err(_) if job.cancellation.is_cancelled() => return Ok(false),
+        Err(error) => return Err(error),
+    }
+    if !job.output_path.is_file() {
+        return Err(AppError::Internal(format!(
+            "síntese OmniVoice finalizou sem escrever o arquivo de saída em {}",
+            job.output_path.display()
+        )));
+    }
+
+    Ok(true)
+}
+
+fn native_tags_for_v14_attempt(
+    target_text: &str,
+    pinned_tags: &[String],
+    line_overrides: &[LineSynthesisOverride],
+) -> Vec<String> {
+    let mut tags = Vec::new();
+    for tag in native_tags_in_text(target_text) {
+        push_unique_native_tag(&mut tags, &tag);
+    }
+    for tag in pinned_tags {
+        push_unique_native_tag(&mut tags, tag);
+    }
+    for line in line_overrides {
+        for tag in native_tags_in_text(&line.target_text) {
+            push_unique_native_tag(&mut tags, &tag);
+        }
+        for tag in &line.tags {
+            push_unique_native_tag(&mut tags, tag);
+        }
+    }
+    tags
+}
+
+fn native_tags_in_text(text: &str) -> Vec<String> {
+    let mut tags = Vec::new();
+    for tag in dublagem_domain::OMNIVOICE_NATIVE_TAGS {
+        if text.contains(tag) {
+            tags.push((*tag).to_string());
+        }
+    }
+    tags
+}
+
+fn push_unique_native_tag(tags: &mut Vec<String>, tag: &str) {
+    if dublagem_domain::OMNIVOICE_NATIVE_TAGS.contains(&tag) && !tags.iter().any(|item| item == tag)
+    {
+        tags.push(tag.to_string());
+    }
+}
+
+fn speakable_line_overrides(
+    line_overrides: &[LineSynthesisOverride],
+) -> Vec<LineSynthesisOverride> {
+    line_overrides
+        .iter()
+        .map(|line| LineSynthesisOverride {
+            line_index: line.line_index,
+            target_text: dublagem_domain::strip_omnivoice_native_tags(&line.target_text),
+            tags: Vec::new(),
+            settings: line.settings.clone(),
+        })
+        .filter(|line| !line.target_text.trim().is_empty())
+        .collect()
+}
+
+fn spoken_native_tag_literal(native_tags: &[String], heard_text: &str) -> Option<String> {
+    if native_tags.is_empty() {
+        return None;
+    }
+
+    let heard_tokens = normalized_qc_tokens(heard_text);
+    native_tags.iter().find_map(|tag| {
+        native_tag_literal_patterns(tag)
+            .iter()
+            .any(|pattern| contains_token_sequence(&heard_tokens, pattern))
+            .then(|| tag.clone())
+    })
+}
+
+fn native_tag_literal_patterns(tag: &str) -> Vec<Vec<String>> {
+    let Some(inner) = tag
+        .strip_prefix('[')
+        .and_then(|value| value.strip_suffix(']'))
+    else {
+        return Vec::new();
+    };
+
+    let mut patterns = vec![inner
+        .split('-')
+        .filter(|token| !token.is_empty())
+        .map(str::to_string)
+        .collect::<Vec<_>>()];
+    match tag {
+        "[sigh]" => patterns.push(vec!["suspiro".to_string()]),
+        "[laughter]" => {
+            patterns.push(vec!["laugh".to_string()]);
+            patterns.push(vec!["risada".to_string()]);
+            patterns.push(vec!["risos".to_string()]);
+        }
+        _ => {}
+    }
+    patterns.retain(|pattern| !pattern.is_empty());
+    patterns
+}
+
+fn contains_token_sequence(tokens: &[String], pattern: &[String]) -> bool {
+    !pattern.is_empty()
+        && tokens.windows(pattern.len()).any(|window| {
+            window
+                .iter()
+                .zip(pattern)
+                .all(|(left, right)| left == right)
+        })
 }
 
 #[cfg(feature = "ml")]
@@ -901,6 +1101,7 @@ async fn validate_v14_output(job: V14ValidationJob<'_>) -> AppResult<V14OutputVa
         return Ok(V14OutputValidation {
             accepted: false,
             message: error.to_string(),
+            native_tag_literal_detected: false,
         });
     }
 
@@ -928,10 +1129,19 @@ async fn validate_v14_output(job: V14ValidationJob<'_>) -> AppResult<V14OutputVa
         return Ok(V14OutputValidation {
             accepted: false,
             message: "Cancelado durante conferência Whisper.".to_string(),
+            native_tag_literal_detected: false,
         });
     };
 
     let heard_text = transcription.source_text.trim();
+    if let Some(tag) = spoken_native_tag_literal(job.expected_native_tags, heard_text) {
+        return Ok(V14OutputValidation {
+            accepted: false,
+            message: format!("Marcador OmniVoice vocalizado literalmente: {tag}."),
+            native_tag_literal_detected: true,
+        });
+    }
+
     let metrics = v14_text_metrics(job.expected_text, heard_text);
     let accepted = metrics.similarity >= 0.55
         && (metrics.expected_tokens.len() <= 2 || metrics.coverage >= 0.70)
@@ -979,7 +1189,11 @@ async fn validate_v14_output(job: V14ValidationJob<'_>) -> AppResult<V14OutputVa
         )
     };
 
-    Ok(V14OutputValidation { accepted, message })
+    Ok(V14OutputValidation {
+        accepted,
+        message,
+        native_tag_literal_detected: false,
+    })
 }
 
 fn validate_v14_audio_tail(path: &Path) -> AppResult<()> {
@@ -1062,10 +1276,11 @@ fn rms_for_v14_validation(samples: &[f32]) -> f32 {
 }
 
 fn v14_text_metrics(expected_text: &str, heard_text: &str) -> V14TextMetrics {
-    let expected_similarity_text = normalized_similarity_text(expected_text);
+    let expected_text = dublagem_domain::strip_omnivoice_native_tags(expected_text);
+    let expected_similarity_text = normalized_similarity_text(&expected_text);
     let heard_similarity_text = normalized_similarity_text(heard_text);
     let similarity = sequence_similarity(&expected_similarity_text, &heard_similarity_text);
-    let expected_tokens = normalized_qc_tokens(expected_text);
+    let expected_tokens = normalized_qc_tokens(&expected_text);
     let heard_tokens = normalized_qc_tokens(heard_text);
     let coverage = if expected_tokens.is_empty() {
         1.0
@@ -1643,6 +1858,73 @@ mod tests {
 
         assert!(!metrics.tail_ok);
         assert!(metrics.coverage < 0.75);
+    }
+
+    #[test]
+    fn v14_metrics_ignore_native_tags_in_expected_text() {
+        let metrics = v14_text_metrics("[sigh] Olá [question-ah]?", "Ola");
+
+        assert_eq!(metrics.expected_tokens, vec!["ola"]);
+        assert!(metrics.similarity >= 0.90);
+        assert!(metrics.tail_ok);
+    }
+
+    #[test]
+    fn detects_spoken_native_tag_literals() {
+        let tags = vec![
+            "[sigh]".to_string(),
+            "[question-ah]".to_string(),
+            "[surprise-oh]".to_string(),
+        ];
+
+        assert_eq!(
+            spoken_native_tag_literal(&tags, "Ele disse question ah antes da fala."),
+            Some("[question-ah]".to_string())
+        );
+        assert_eq!(
+            spoken_native_tag_literal(&tags, "O personagem soltou um suspiro."),
+            Some("[sigh]".to_string())
+        );
+        assert_eq!(
+            spoken_native_tag_literal(&tags, "Ola, tudo bem agora."),
+            None
+        );
+    }
+
+    #[test]
+    fn builds_speakable_fallback_line_overrides_without_tags() {
+        let line_overrides = vec![LineSynthesisOverride {
+            line_index: 2,
+            target_text: "[sigh] Ola [surprise-oh] mundo.".to_string(),
+            tags: vec!["[sigh]".to_string()],
+            settings: dublagem_domain::NativeSynthesisSettings::default(),
+        }];
+
+        let fallback = speakable_line_overrides(&line_overrides);
+
+        assert_eq!(fallback[0].line_index, 2);
+        assert_eq!(fallback[0].target_text, "Ola mundo.");
+        assert!(fallback[0].tags.is_empty());
+    }
+
+    #[test]
+    fn collects_native_tags_for_v14_attempt_from_text_and_metadata() {
+        let line_overrides = vec![LineSynthesisOverride {
+            line_index: 0,
+            target_text: "Linha [question-ah].".to_string(),
+            tags: vec!["[surprise-oh]".to_string()],
+            settings: dublagem_domain::NativeSynthesisSettings::default(),
+        }];
+        let pinned_tags = vec!["[sigh]".to_string()];
+
+        assert_eq!(
+            native_tags_for_v14_attempt("[sigh] Ola.", &pinned_tags, &line_overrides),
+            vec![
+                "[sigh]".to_string(),
+                "[question-ah]".to_string(),
+                "[surprise-oh]".to_string()
+            ]
+        );
     }
 
     #[test]

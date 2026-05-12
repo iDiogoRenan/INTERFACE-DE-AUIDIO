@@ -301,11 +301,11 @@ describe("workspaceStore transcription hydration", () => {
     expect(useWorkspaceStore.getState().targetText).toBe("Texto revisado para nova sintese.");
   });
 
-  it("sends line synthesis overrides when selected lines have native metadata", async () => {
+  it("sends line tag overrides with the active global synthesis settings", async () => {
     useWorkspaceStore.getState().setTargetText("Ola linha um.\nOla linha dois.");
     useWorkspaceStore.getState().setSelectedLineIndex(0);
     useWorkspaceStore.getState().insertNativeTag("[sigh]");
-    useWorkspaceStore.getState().updateSelectedLineSettings({ speed: 1.2 });
+    useWorkspaceStore.getState().updateGlobalSynthesisSettings({ speed: 1.2 });
 
     await useWorkspaceStore.getState().startDubbing();
 
@@ -322,6 +322,7 @@ describe("workspaceStore transcription hydration", () => {
       targetText: "Ola linha dois.",
       tags: []
     });
+    expect(request.lineOverrides[1].settings.speed).toBe(1.2);
   });
 
   it("keeps native tags as removable line metadata instead of spoken text", () => {
@@ -388,10 +389,10 @@ describe("workspaceStore transcription hydration", () => {
     ]);
   });
 
-  it("generates a preview for the selected line using its native settings", async () => {
+  it("generates a preview for the selected line using global native settings", async () => {
     useWorkspaceStore.getState().setTargetText("Linha para previa.");
     useWorkspaceStore.getState().insertNativeTag("[sigh]");
-    useWorkspaceStore.getState().updateSelectedLineSettings({ voiceMode: "auto" });
+    useWorkspaceStore.getState().updateGlobalSynthesisSettings({ voiceMode: "auto" });
 
     await useWorkspaceStore.getState().previewSelectedLine();
 
@@ -415,9 +416,9 @@ describe("workspaceStore transcription hydration", () => {
     expect(useWorkspaceStore.getState().lastOutputRevision).toBe(2);
   });
 
-  it("normalizes line synthesis controls before sending them to the backend", async () => {
+  it("normalizes global synthesis controls before sending them to the backend", async () => {
     useWorkspaceStore.getState().setTargetText("Linha com controles aceitos.");
-    useWorkspaceStore.getState().updateSelectedLineSettings({
+    useWorkspaceStore.getState().updateGlobalSynthesisSettings({
       voiceMode: "design",
       instruct: "   ",
       speed: Number.NaN,
@@ -434,7 +435,8 @@ describe("workspaceStore transcription hydration", () => {
     await useWorkspaceStore.getState().startDubbing();
 
     const [[request]] = clientMocks.startDubbingJob.mock.calls;
-    expect(request.lineOverrides[0].settings).toMatchObject({
+    expect(request.lineOverrides).toEqual([]);
+    expect(request.options.nativeSynthesis).toMatchObject({
       voiceMode: "design",
       instruct: "female, young adult, moderate pitch",
       speed: null,
@@ -459,15 +461,15 @@ describe("workspaceStore transcription hydration", () => {
     expect(request.lineOverrides).toEqual([]);
   });
 
-  it("persists selected synthesis controls as the next global default", async () => {
+  it("persists global synthesis controls as the next global default", async () => {
     useWorkspaceStore.getState().setTargetText("Linha com padrao novo.");
-    useWorkspaceStore.getState().updateSelectedLineSettings({
+    useWorkspaceStore.getState().updateGlobalSynthesisSettings({
       outputGainDb: -6,
       sibilanceReduction: 0.7,
       artifactReduction: 0.4
     });
 
-    await useWorkspaceStore.getState().saveSelectedLineSettingsAsDefault();
+    await useWorkspaceStore.getState().saveGlobalSynthesisSettings();
 
     const [[savedConfig]] = clientMocks.saveConfig.mock.calls;
     expect(savedConfig.options.nativeSynthesis).toMatchObject({
@@ -480,14 +482,14 @@ describe("workspaceStore transcription hydration", () => {
     expect(useWorkspaceStore.getState().config.options.nativeSynthesis.outputGainDb).toBe(-6);
   });
 
-  it("restores factory synthesis defaults for the selected line and global config", async () => {
+  it("restores factory synthesis defaults for the global config only", async () => {
     useWorkspaceStore.getState().setTargetText("Linha com ajuste para reset.");
-    useWorkspaceStore.getState().updateSelectedLineSettings({
+    useWorkspaceStore.getState().updateGlobalSynthesisSettings({
       outputGainDb: -6,
       sibilanceReduction: 0.7
     });
 
-    await useWorkspaceStore.getState().resetSelectedLineSettingsToDefault();
+    await useWorkspaceStore.getState().resetGlobalSynthesisSettings();
 
     const [[savedConfig]] = clientMocks.saveConfig.mock.calls;
     expect(savedConfig.options.nativeSynthesis).toMatchObject({
@@ -495,13 +497,9 @@ describe("workspaceStore transcription hydration", () => {
       sibilanceReduction: 0,
       artifactReduction: 0
     });
-    expect(
-      useWorkspaceStore.getState().projectMetadata.files[fileA.name]?.lines["0"]?.settings
-    ).toMatchObject({
-      outputGainDb: 0,
-      sibilanceReduction: 0,
-      artifactReduction: 0
-    });
+    expect(useWorkspaceStore.getState().projectMetadata.files[fileA.name]?.lines["0"]).toBe(
+      undefined
+    );
   });
 
   it("releases central controls when a terminal job event arrives", () => {
