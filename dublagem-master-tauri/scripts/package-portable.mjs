@@ -17,10 +17,10 @@ const modelTarget = path.join(portableAppDir, "models");
 await assertFile(executableSource, "release executable");
 const modelSource = await firstExistingDirectory(modelSourceCandidates);
 
-await rm(portableAppDir, { recursive: true, force: true });
 await mkdir(portableAppDir, { recursive: true });
+await rm(executableTarget, { force: true });
 await cp(executableSource, executableTarget);
-await cp(modelSource, modelTarget, { recursive: true });
+await cp(modelSource, modelTarget, { recursive: true, force: true });
 
 const modelBytes = await directorySize(modelTarget);
 process.stdout.write(`Portable distribution ready: ${portableAppDir}\n`);
