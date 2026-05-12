@@ -1,5 +1,5 @@
-import { open } from "@tauri-apps/plugin-dialog";
 import { FolderOpen, FileAudio } from "lucide-react";
+import { pickPath } from "../tauri/pathPicker";
 import styles from "./PathField.module.css";
 
 interface PathFieldProps {
@@ -11,16 +11,9 @@ interface PathFieldProps {
 }
 
 export function PathField({ label, value, mode, placeholder, onChange }: PathFieldProps) {
-  async function pickPath(): Promise<void> {
-    const selected = await open({
-      directory: mode === "directory",
-      multiple: false,
-      filters:
-        mode === "file"
-          ? [{ name: "Audio", extensions: ["wav", "mp3", "wem", "ogg", "flac"] }]
-          : undefined
-    });
-    onChange(typeof selected === "string" ? selected : null);
+  async function pickSelectedPath(): Promise<void> {
+    const selected = await pickPath(mode);
+    onChange(selected);
   }
 
   const Icon = mode === "directory" ? FolderOpen : FileAudio;
@@ -34,7 +27,7 @@ export function PathField({ label, value, mode, placeholder, onChange }: PathFie
           type="button"
           aria-label={`Selecionar ${label}`}
           onClick={() => {
-            void pickPath();
+            void pickSelectedPath();
           }}
         >
           <Icon size={16} />

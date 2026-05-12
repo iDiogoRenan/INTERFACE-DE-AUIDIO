@@ -13,10 +13,15 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 12px;
   block-size: 100%;
   min-block-size: 0;
   padding: 18px;
   border-bottom: 1px solid var(--border);
+}
+
+.title {
+  min-width: 0;
 }
 
 .header h2 {
@@ -31,6 +36,13 @@
   text-transform: uppercase;
 }
 
+.headerActions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 8px;
+}
+
 .iconButton {
   display: grid;
   width: 36px;
@@ -40,6 +52,11 @@
   background: var(--surface-1);
   color: var(--text);
   cursor: pointer;
+}
+
+.iconButton:disabled {
+  cursor: not-allowed;
+  opacity: 0.52;
 }
 
 .filter {

@@ -12,6 +12,7 @@ import {
 import { defaultSpeechModelPresets } from "../shared/speechModels";
 
 const clientMocks = vi.hoisted(() => ({
+  loadConfig: vi.fn<() => Promise<AppConfig>>(),
   loadProjectMetadata: vi.fn<() => Promise<ProjectMetadata>>(() =>
     Promise.resolve({ version: 1, pinnedNativeTags: [], files: {} })
   ),
@@ -39,7 +40,7 @@ vi.mock("../shared/tauri/client", () => ({
   emptyProjectMetadata: () => ({ version: 1, pinnedNativeTags: [], files: {} }),
   isTauriRuntime: () => false,
   tauriClient: {
-    loadConfig: vi.fn(),
+    loadConfig: clientMocks.loadConfig,
     saveConfig: clientMocks.saveConfig,
     loadProjectMetadata: clientMocks.loadProjectMetadata,
     saveProjectMetadata: clientMocks.saveProjectMetadata,
@@ -72,12 +73,27 @@ const cachedDubbedFile = audioFile("E:\\audio\\origem\\line_d.wav", "line_d.wav"
 
 describe("workspaceStore transcription hydration", () => {
   beforeEach(() => {
-    clientMocks.loadProjectMetadata.mockClear();
-    clientMocks.saveProjectMetadata.mockClear();
-    clientMocks.previewSynthesisLine.mockClear();
+    clientMocks.loadConfig.mockReset();
+    clientMocks.loadConfig.mockResolvedValue(config);
+    clientMocks.loadProjectMetadata.mockReset();
+    clientMocks.loadProjectMetadata.mockResolvedValue({
+      version: 1,
+      pinnedNativeTags: [],
+      files: {}
+    });
+    clientMocks.saveProjectMetadata.mockReset();
+    clientMocks.saveProjectMetadata.mockResolvedValue({
+      version: 1,
+      pinnedNativeTags: [],
+      files: {}
+    });
+    clientMocks.previewSynthesisLine.mockReset();
+    clientMocks.previewSynthesisLine.mockResolvedValue("E:\\audio\\preview.wav");
     clientMocks.scanAudioFolder.mockReset();
-    clientMocks.saveConfig.mockClear();
-    clientMocks.startDubbingJob.mockClear();
+    clientMocks.saveConfig.mockReset();
+    clientMocks.saveConfig.mockImplementation((nextConfig) => Promise.resolve(nextConfig));
+    clientMocks.startDubbingJob.mockReset();
+    clientMocks.startDubbingJob.mockResolvedValue("job-1");
     useWorkspaceStore.setState({
       config,
       files: [fileA, fileB],
@@ -171,6 +187,28 @@ describe("workspaceStore transcription hydration", () => {
     expect(useWorkspaceStore.getState().selectedPath).toBe(cachedDubbedFile.path);
     expect(useWorkspaceStore.getState().sourceText).toBe("Hello from cache.");
     expect(useWorkspaceStore.getState().targetText).toBe("Ola do cache.");
+  });
+
+  it("hydrates fresh files during load when an input folder is configured", async () => {
+    clientMocks.scanAudioFolder.mockResolvedValue([cachedDubbedFile]);
+    useWorkspaceStore.setState({ files: [], selectedPath: null });
+
+    await useWorkspaceStore.getState().load();
+
+    expect(clientMocks.scanAudioFolder).toHaveBeenCalledWith(config.inputDir, config.outputDir);
+    expect(useWorkspaceStore.getState().selectedPath).toBe(cachedDubbedFile.path);
+    expect(useWorkspaceStore.getState().sourceText).toBe("Hello from cache.");
+    expect(useWorkspaceStore.getState().targetText).toBe("Ola do cache.");
+  });
+
+  it("loads configuration without scanning when no input folder is configured", async () => {
+    clientMocks.loadConfig.mockResolvedValue({ ...config, inputDir: null });
+    useWorkspaceStore.setState({ files: [], logs: [] });
+
+    await useWorkspaceStore.getState().load();
+
+    expect(clientMocks.scanAudioFolder).not.toHaveBeenCalled();
+    expect(useWorkspaceStore.getState().logs).toEqual([]);
   });
 
   it("keeps original sidecar baselines when scan cache contains a redubbed draft", async () => {

@@ -12,6 +12,7 @@ import {
   type NativeTag
 } from "../shared/omnivoice/nativeControls";
 import { emptyProjectMetadata, isTauriRuntime, tauriClient } from "../shared/tauri/client";
+import { hasConfiguredInputDirectory } from "../shared/tauri/configGuards";
 import {
   activeNativeSynthesisSettings,
   configWithActiveNativeSynthesis,
@@ -259,6 +260,9 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => {
       if (isTauriRuntime()) {
         await registerJobListeners();
       }
+      if (hasConfiguredInputDirectory(config)) {
+        await get().scan();
+      }
     },
     saveConfig: async (config) => {
       const saved = await tauriClient.saveConfig(config);
@@ -271,7 +275,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => {
     },
     scan: async () => {
       const { config, selectedPath } = get();
-      if (!config.inputDir) {
+      if (!hasConfiguredInputDirectory(config)) {
         get().appendLog("Selecione a pasta de origem antes de escanear.", "warning");
         return;
       }

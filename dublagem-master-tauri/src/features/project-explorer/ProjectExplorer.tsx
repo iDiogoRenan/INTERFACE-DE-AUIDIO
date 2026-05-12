@@ -4,6 +4,8 @@ import {
   ChevronRight,
   FileAudio,
   Filter,
+  FolderInput,
+  FolderOutput,
   ListChecks,
   Loader2,
   Pin,
@@ -16,6 +18,7 @@ import {
   useState,
   type Dispatch,
   type MouseEvent as ReactMouseEvent,
+  type ReactElement,
   type SetStateAction
 } from "react";
 import {
@@ -23,6 +26,9 @@ import {
   nativeTagGroups,
   type NativeTag
 } from "../../shared/omnivoice/nativeControls";
+import { hasConfiguredInputDirectory } from "../../shared/tauri/configGuards";
+import { pickDirectory } from "../../shared/tauri/pathPicker";
+import type { AppConfig } from "../../shared/tauri/types";
 import { useWorkspaceStore } from "../../stores/workspaceStore";
 import styles from "./ProjectExplorer.module.css";
 
@@ -36,9 +42,22 @@ interface TagContextMenuState {
   y: number;
 }
 
+type WorkspaceDirectoryKey = "inputDir" | "outputDir";
+
+const workspaceDirectoryActions = [
+  { configKey: "inputDir", label: "Pasta de entrada", Icon: FolderInput },
+  { configKey: "outputDir", label: "Pasta de saída", Icon: FolderOutput }
+] as const satisfies readonly {
+  configKey: WorkspaceDirectoryKey;
+  label: string;
+  Icon: typeof FolderInput;
+}[];
+
 export function ProjectExplorer() {
+  const config = useWorkspaceStore((state) => state.config);
   const files = useWorkspaceStore((state) => state.files);
   const selectedPath = useWorkspaceStore((state) => state.selectedPath);
+  const saveConfig = useWorkspaceStore((state) => state.saveConfig);
   const selectFile = useWorkspaceStore((state) => state.selectFile);
   const scan = useWorkspaceStore((state) => state.scan);
   const startDubbingList = useWorkspaceStore((state) => state.startDubbingList);
@@ -49,6 +68,9 @@ export function ProjectExplorer() {
   const isBusy = useWorkspaceStore((state) => state.isBusy);
   const [familyFilter, setFamilyFilter] = useState<string>("all");
   const [isTagPaletteOpen, setIsTagPaletteOpen] = usePersistentTagPaletteOpenState();
+  const [activeDirectoryPicker, setActiveDirectoryPicker] = useState<WorkspaceDirectoryKey | null>(
+    null
+  );
   const [tagContextMenu, setTagContextMenu] = useState<TagContextMenuState | null>(null);
 
   const families = useMemo(
@@ -94,23 +116,77 @@ export function ProjectExplorer() {
     setTagContextMenu({ tag, ...contextMenuPosition(event.clientX, event.clientY) });
   }
 
+  async function selectWorkspaceDirectory(configKey: WorkspaceDirectoryKey): Promise<void> {
+    if (activeDirectoryPicker) {
+      return;
+    }
+
+    setActiveDirectoryPicker(configKey);
+    try {
+      const selectedDirectory = await pickDirectory();
+      if (!selectedDirectory) {
+        return;
+      }
+
+      const nextConfig: AppConfig = { ...config, [configKey]: selectedDirectory };
+      await saveConfig(nextConfig);
+      if (hasConfiguredInputDirectory(nextConfig)) {
+        await scan();
+      }
+    } catch (unknownError: unknown) {
+      appendLog(directoryPickerError(unknownError), "error");
+    } finally {
+      setActiveDirectoryPicker(null);
+    }
+  }
+
   return (
     <aside className={styles.panel} aria-label="Explorador do projeto">
       <div className={styles.header}>
-        <div>
+        <div className={styles.title}>
           <span className={styles.kicker}>Projeto</span>
           <h2>Arquivos</h2>
         </div>
-        <button
-          type="button"
-          className={styles.iconButton}
-          aria-label="Atualizar lista"
-          onClick={() => {
-            void scan();
-          }}
-        >
-          <RefreshCw size={16} />
-        </button>
+        <div className={styles.headerActions} aria-label="Ações do projeto">
+          <Tooltip.Provider delayDuration={120}>
+            {workspaceDirectoryActions.map((action) => {
+              const Icon = action.Icon;
+              const isPickingThisDirectory = activeDirectoryPicker === action.configKey;
+              return (
+                <HeaderActionTooltip key={action.configKey} label={action.label}>
+                  <button
+                    type="button"
+                    className={styles.iconButton}
+                    aria-label={action.label}
+                    disabled={activeDirectoryPicker !== null}
+                    onClick={() => {
+                      void selectWorkspaceDirectory(action.configKey);
+                    }}
+                  >
+                    {isPickingThisDirectory ? (
+                      <Loader2 size={16} className={styles.spin} />
+                    ) : (
+                      <Icon size={16} />
+                    )}
+                  </button>
+                </HeaderActionTooltip>
+              );
+            })}
+            <HeaderActionTooltip label="Atualizar lista">
+              <button
+                type="button"
+                className={styles.iconButton}
+                aria-label="Atualizar lista"
+                disabled={activeDirectoryPicker !== null}
+                onClick={() => {
+                  void scan();
+                }}
+              >
+                <RefreshCw size={16} />
+              </button>
+            </HeaderActionTooltip>
+          </Tooltip.Provider>
+        </div>
       </div>
 
       <label className={styles.filter}>
@@ -276,6 +352,25 @@ function contextMenuPosition(
   };
 }
 
+interface HeaderActionTooltipProps {
+  label: string;
+  children: ReactElement;
+}
+
+function HeaderActionTooltip({ label, children }: HeaderActionTooltipProps) {
+  return (
+    <Tooltip.Root>
+      <Tooltip.Trigger asChild>{children}</Tooltip.Trigger>
+      <Tooltip.Portal>
+        <Tooltip.Content className={styles.tooltipContent} side="bottom" sideOffset={6}>
+          {label}
+          <Tooltip.Arrow className={styles.tooltipArrow} />
+        </Tooltip.Content>
+      </Tooltip.Portal>
+    </Tooltip.Root>
+  );
+}
+
 function usePersistentTagPaletteOpenState(): readonly [boolean, Dispatch<SetStateAction<boolean>>] {
   const [isOpen, setIsOpen] = useState(readTagPaletteOpenState);
 
@@ -328,4 +423,12 @@ function statusLabel(status: string): string {
     failed: "Falhou"
   };
   return labels[status] ?? status;
+}
+
+function directoryPickerError(unknownError: unknown): string {
+  const details =
+    unknownError instanceof Error
+      ? unknownError.message
+      : "Erro desconhecido ao abrir o seletor de pasta.";
+  return `Não foi possível selecionar a pasta: ${details}`;
 }
