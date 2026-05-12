@@ -7,4 +7,5 @@ CudaToolkitDir = "C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v13.2\\
 CUDACXX = "C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v13.2\\bin\\nvcc.exe"
 CUDARC_CUDA_VERSION = "13020"
 CUDA_COMPUTE_CAP = "89"
+CUDA_EXTRA_COMPUTE_CAPS = "120a"
 NVCC_CCBIN = "C:\\Program Files (x86)\\Microsoft Visual Studio\\2022\\BuildTools\\VC\\Tools\\MSVC\\14.44.35207\\bin\\Hostx64\\x64\\cl.exe"
