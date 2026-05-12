@@ -1,8 +1,9 @@
 .panel {
   display: grid;
-  align-content: start;
+  grid-template-rows: auto auto auto auto minmax(0, 1fr) auto;
+  align-content: stretch;
   gap: 18px;
-  min-height: 0;
+  min-height: 100%;
 }
 
 .pathGrid,
@@ -73,11 +74,12 @@
 }
 
 .authorCredit {
+  grid-row: 6;
   display: inline-flex;
-  justify-self: start;
+  align-self: end;
+  justify-self: center;
   align-items: center;
   gap: 7px;
-  margin-top: 2px;
   color: var(--text-muted);
   font-size: 12px;
   font-weight: 650;
