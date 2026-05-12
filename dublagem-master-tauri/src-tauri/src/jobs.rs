@@ -176,7 +176,10 @@ async fn run_job(
             None,
         )?;
 
-        let requested_model_dir = request.model_dir.clone();
+        let requested_model_dir = request
+            .model_dir
+            .clone()
+            .or_else(|| crate::speech::models::discover_model_dir_for_app(&app));
         let speech_engines = cancellable_phase(
             &app,
             job_id,

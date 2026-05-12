@@ -30,8 +30,14 @@
     }
   },
   "bundle": {
-    "active": true,
-    "targets": "all",
+    "active": false,
+    "targets": "nsis",
+    "resources": {
+      "../models/MODEL_MANIFEST.json": "models/MODEL_MANIFEST.json",
+      "../models/whisper/ggml-large-v3.bin": "models/whisper/ggml-large-v3.bin",
+      "../models/whisper/ggml-silero-v6.2.0.bin": "models/whisper/ggml-silero-v6.2.0.bin",
+      "../models/omnivoice/": "models/omnivoice/"
+    },
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

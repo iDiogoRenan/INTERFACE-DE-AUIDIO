@@ -4,9 +4,15 @@ use crate::{
 };
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
-use std::path::{Path, PathBuf};
+use std::{
+    fs::File,
+    io::{BufReader, Read},
+    path::{Path, PathBuf},
+};
+use tauri::{path::BaseDirectory, AppHandle, Manager};
 
 const MODEL_MANIFEST_FILE_NAME: &str = "MODEL_MANIFEST.json";
+const BUNDLED_MODELS_RESOURCE_DIR: &str = "models";
 const WHISPER_MODEL_ID: &str = "whisper-large-v3-ggml";
 const WHISPER_ENGINE: &str = "whisper-rs";
 const WHISPER_FALLBACK_PATH: &str = "whisper/ggml-large-v3.bin";
@@ -84,8 +90,33 @@ pub fn resolve_speech_model_paths(model_dir: Option<&Path>) -> AppResult<SpeechM
     Ok(paths)
 }
 
+pub fn discover_model_dir_for_app(app: &AppHandle) -> Option<PathBuf> {
+    discover_bundled_model_dir(app)
+        .or_else(discover_exe_adjacent_model_dir)
+        .or_else(discover_model_dir)
+}
+
 pub fn discover_model_dir() -> Option<PathBuf> {
-    let model_dir = project_model_dir();
+    model_dir_if_manifested(project_model_dir())
+}
+
+fn discover_bundled_model_dir(app: &AppHandle) -> Option<PathBuf> {
+    let model_dir = app
+        .path()
+        .resolve(BUNDLED_MODELS_RESOURCE_DIR, BaseDirectory::Resource)
+        .ok()?;
+    model_dir_if_manifested(model_dir)
+}
+
+fn discover_exe_adjacent_model_dir() -> Option<PathBuf> {
+    let model_dir = std::env::current_exe()
+        .ok()?
+        .parent()
+        .map(|directory| directory.join(BUNDLED_MODELS_RESOURCE_DIR))?;
+    model_dir_if_manifested(model_dir)
+}
+
+fn model_dir_if_manifested(model_dir: PathBuf) -> Option<PathBuf> {
     model_dir
         .join(MODEL_MANIFEST_FILE_NAME)
         .is_file()
@@ -195,8 +226,16 @@ fn verify_file_hash(path: &Path, expected_sha256: Option<&str>) -> AppResult<()>
     }
 
     let mut hasher = Sha256::new();
-    let bytes = std::fs::read(path)?;
-    hasher.update(bytes);
+    let file = File::open(path)?;
+    let mut reader = BufReader::new(file);
+    let mut buffer = [0_u8; 1024 * 1024];
+    loop {
+        let bytes_read = reader.read(&mut buffer)?;
+        if bytes_read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..bytes_read]);
+    }
     let actual = hasher
         .finalize()
         .iter()
