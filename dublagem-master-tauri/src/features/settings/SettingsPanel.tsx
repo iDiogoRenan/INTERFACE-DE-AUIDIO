@@ -1,10 +1,13 @@
 import * as Checkbox from "@radix-ui/react-checkbox";
-import { Check, Save } from "lucide-react";
+import { Check, Heart, Save } from "lucide-react";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { PathField } from "../../shared/ui/PathField";
 import { useWorkspaceStore } from "../../stores/workspaceStore";
+import { isTauriRuntime } from "../../shared/tauri/client";
 import type { AppConfig, LanguageCode } from "../../shared/tauri/types";
 import styles from "./SettingsPanel.module.css";
 
+const authorGithubUrl = "https://github.com/iDiogoRenan";
 const sourceLanguages: LanguageCode[] = ["auto", "en", "fr", "sv", "pt"];
 const targetLanguages: LanguageCode[] = ["pt", "fr", "sv", "en"];
 const synthesisChunkLimits = {
@@ -194,6 +197,26 @@ export function SettingsPanel() {
         <Save size={16} />
         Salvar configuração
       </button>
+
+      <footer className={styles.authorCredit}>
+        <span>Feito com</span>
+        <Heart size={13} aria-hidden="true" />
+        <span>por</span>
+        <a
+          href={authorGithubUrl}
+          target="_blank"
+          rel="noreferrer"
+          onClick={(event) => {
+            if (!isTauriRuntime()) {
+              return;
+            }
+            event.preventDefault();
+            void openUrl(authorGithubUrl);
+          }}
+        >
+          iDiogoRenan
+        </a>
+      </footer>
     </section>
   );
 }
