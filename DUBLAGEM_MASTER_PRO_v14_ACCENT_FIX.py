@@ -6,6 +6,7 @@ import time
 import shutil
 import datetime
 import threading
+import tempfile
 import numpy as np
 import librosa
 import soundfile as sf
@@ -44,6 +45,7 @@ from PyQt6.QtGui import QFont, QColor, QTextCursor, QTextCharFormat
 from PyQt6.QtMultimedia import QAudioOutput, QMediaPlayer
 
 APP_VERSION = "14.1 (Anti-Sotaque + Anti-Corte Final)"
+TRANSCRIPTION_CACHE_FLUSH_INTERVAL = 50
 
 # ─────────────────────────────────────────────────────────────────────────────
 # OMNI11 - LÓGICA BASE IMUTÁVEL
@@ -174,6 +176,96 @@ def sorted_audio_files(folder: str) -> list[str]:
         file_name for file_name in os.listdir(folder)
         if file_name.lower().endswith(AUDIO_EXTENSIONS)
     )
+
+
+class TranscriptionCacheWriter:
+    def __init__(self, flush_interval: int) -> None:
+        self._flush_interval = max(1, int(flush_interval))
+        self._cache_file = ""
+        self._entries: dict[str, dict[str, str]] = {}
+        self._dirty = False
+        self._pending_updates = 0
+
+    def begin(self, output_folder: str) -> None:
+        cache_file = self._cache_path(output_folder)
+        if cache_file == self._cache_file:
+            return
+        self.end()
+        self._cache_file = cache_file
+        self._entries = self._load(cache_file)
+        self._dirty = False
+        self._pending_updates = 0
+
+    def record(self, output_folder: str, original_name: str, txt_en: str,
+               txt_pt: str, defer_write: bool) -> None:
+        if not output_folder or not original_name or not txt_en or not txt_pt:
+            return
+        self.begin(output_folder)
+        self._entries[original_name] = {"en": txt_en, "pt": txt_pt}
+        self._dirty = True
+        self._pending_updates += 1
+        if not defer_write or self._pending_updates >= self._flush_interval:
+            self.flush()
+
+    def flush(self) -> None:
+        if not self._dirty or not self._cache_file:
+            return
+        folder = os.path.dirname(self._cache_file)
+        os.makedirs(folder, exist_ok=True)
+        temp_name = ""
+        try:
+            with tempfile.NamedTemporaryFile(
+                "w",
+                encoding="utf-8",
+                dir=folder,
+                prefix=".transcricoes_cache.",
+                suffix=".tmp",
+                delete=False,
+            ) as handle:
+                temp_name = handle.name
+                json.dump(self._entries, handle, ensure_ascii=False, indent=2)
+                handle.write("\n")
+            os.replace(temp_name, self._cache_file)
+            self._dirty = False
+            self._pending_updates = 0
+        except Exception:
+            if temp_name and os.path.exists(temp_name):
+                try:
+                    os.remove(temp_name)
+                except OSError:
+                    pass
+            raise
+
+    def end(self) -> None:
+        self.flush()
+        self._cache_file = ""
+        self._entries = {}
+        self._dirty = False
+        self._pending_updates = 0
+
+    @staticmethod
+    def _cache_path(output_folder: str) -> str:
+        return os.path.join(output_folder, "transcricoes_cache.json")
+
+    @staticmethod
+    def _load(cache_file: str) -> dict[str, dict[str, str]]:
+        if not os.path.exists(cache_file):
+            return {}
+        try:
+            with open(cache_file, "r", encoding="utf-8") as handle:
+                raw = json.load(handle)
+        except Exception:
+            return {}
+        if not isinstance(raw, dict):
+            return {}
+        entries: dict[str, dict[str, str]] = {}
+        for name, value in raw.items():
+            if not isinstance(name, str) or not isinstance(value, dict):
+                continue
+            en = value.get("en", "")
+            pt = value.get("pt", "")
+            entries[name] = {"en": str(en or ""), "pt": str(pt or "")}
+        return entries
 
 # ─────────────────────────────────────────────────────────────────────────────
 # WORKERS
@@ -542,6 +634,7 @@ class FileExplorer(QWidget):
         self._status = {}
         self._families = []
         self._hidden_families = set()
+        self._item_by_name = {}
         
     def _show_menu(self, pos):
         items = self.tree.selectedItems()
@@ -632,6 +725,21 @@ class FileExplorer(QWidget):
             f"{visible_count}/{total_count} áudios visíveis; {hidden_count} família(s) ocultas."
         )
 
+    def _status_from_result(self, ok, motivo):
+        if not ok and str(motivo or "").startswith("IGNORADO:"):
+            return "Ignorado"
+        return "Pronto" if ok else f"Falha: {str(motivo or '')[:25]}"
+
+    def _apply_status_to_item(self, item, status):
+        item.setText(1, status)
+        item.setForeground(1, QColor(self._status_color(status)))
+        if status == "Pronto":
+            item.setToolTip(1, "Já existe dublagem na pasta Destino.")
+        elif status == "Pendente":
+            item.setToolTip(1, "")
+        else:
+            item.setToolTip(1, status)
+
     def refresh(self):
         selected_paths = {
             item.data(0, Qt.ItemDataRole.UserRole)
@@ -639,6 +747,7 @@ class FileExplorer(QWidget):
             if item.data(0, Qt.ItemDataRole.UserRole)
         }
         self.tree.clear()
+        self._item_by_name = {}
         if not self._in or not os.path.isdir(self._in):
             self._families = []
             self.lbl_folder.setText("Nenhuma pasta")
@@ -663,23 +772,22 @@ class FileExplorer(QWidget):
                 item = QTreeWidgetItem(self.tree, [file_name, status])
                 item.setData(0, Qt.ItemDataRole.UserRole, path)
                 item.setData(0, Qt.ItemDataRole.UserRole + 1, family)
-                item.setForeground(1, QColor(self._status_color(status)))
+                self._apply_status_to_item(item, status)
                 item.setToolTip(0, f"{family}\n{path}")
-                if status == "Pronto":
-                    item.setToolTip(1, "Já existe dublagem na pasta Destino.")
                 if path in selected_paths:
                     item.setSelected(True)
+                self._item_by_name[file_name] = item
                 visible_count += 1
             self._refresh_filter_button(visible_count, len(files))
         except Exception as e:
             print(f"Erro ao ler diretório: {e}")
 
     def update_status(self, name, ok, motivo):
-        if not ok and str(motivo or "").startswith("IGNORADO:"):
-            self._status[name] = "Ignorado"
-        else:
-            self._status[name] = "Pronto" if ok else f"Falha: {motivo[:25]}"
-        self.refresh()
+        status = self._status_from_result(ok, motivo)
+        self._status[name] = status
+        item = self._item_by_name.get(name)
+        if item is not None:
+            self._apply_status_to_item(item, status)
 
     def _on_click(self, item):
         path = item.data(0, Qt.ItemDataRole.UserRole)
@@ -719,6 +827,7 @@ class MainWindow(QMainWindow):
         self.pool_worker = None
         self._qt_workers = set()
         self._pending_dub_paths = None
+        self._transcription_cache = TranscriptionCacheWriter(TRANSCRIPTION_CACHE_FLUSH_INTERVAL)
         self._cfg_file = os.environ.get("DUBLAGEM_MASTER_CONFIG", "config_pratico.json")
         self._load_cfg()
         
@@ -801,6 +910,42 @@ class MainWindow(QMainWindow):
                 pass
             worker.terminate()
             worker.wait(2000)
+
+    def _begin_transcription_cache(self, out_folder: str) -> None:
+        if not out_folder:
+            return
+        try:
+            self._transcription_cache.begin(out_folder)
+        except Exception as exc:
+            self._log(f"⚠️ Cache de transcrições indisponível: {exc}", "warning")
+
+    def _record_transcription_cache(self, out_folder: str, original_name: str,
+                                    txt_en: str, txt_pt_final: str,
+                                    defer_write: bool) -> None:
+        try:
+            self._transcription_cache.record(
+                out_folder,
+                original_name,
+                txt_en,
+                txt_pt_final,
+                defer_write=defer_write,
+            )
+            if not defer_write:
+                self._transcription_cache.end()
+        except Exception as exc:
+            self._log(f"⚠️ Não foi possível atualizar o cache de transcrições: {exc}", "warning")
+
+    def _finish_transcription_cache(self) -> None:
+        try:
+            self._transcription_cache.end()
+        except Exception as exc:
+            self._log(f"⚠️ Não foi possível finalizar o cache de transcrições: {exc}", "warning")
+
+    def _on_dub_worker_finished(self) -> None:
+        self._finish_transcription_cache()
+        self._set_botoes_ativos(True)
+        self.lbl_status.setText("✅ Processo concluído!")
+        self.prog_bar.setValue(100)
 
     def _build_ui(self):
         cen = QWidget()
@@ -1025,6 +1170,7 @@ class MainWindow(QMainWindow):
         log_l = QVBoxLayout(grp_log)
         self.log_box = QTextEdit()
         self.log_box.setReadOnly(True)
+        self.log_box.document().setMaximumBlockCount(20000)
         self.log_box.setFont(QFont("Consolas", 10))
         log_l.addWidget(self.log_box)
         right.addWidget(grp_log, 2)
@@ -1225,10 +1371,7 @@ class MainWindow(QMainWindow):
         if not pasta_out:
             return QMessageBox.warning(self, "Aviso", "Defina a pasta Destino (PT) primeiro.")
 
-        arquivos = sorted([
-            os.path.join(pasta_in, f) for f in os.listdir(pasta_in)
-            if f.lower().endswith(AUDIO_EXTENSIONS)
-        ])
+        arquivos = [os.path.join(pasta_in, f) for f in sorted_audio_files(pasta_in)]
         if not arquivos:
             return QMessageBox.warning(self, "Aviso", "Nenhum arquivo de áudio encontrado na pasta Origem.")
 
@@ -1238,6 +1381,7 @@ class MainWindow(QMainWindow):
     def _cancelar(self):
         if self.worker and self.worker.isRunning():
             self._stop_worker(self.worker, "Dublagem", timeout_ms=5000)
+            self._finish_transcription_cache()
             self._log("⏹ Cancelado pelo usuário.", "warning")
             self.lbl_status.setText("⏹ Cancelado.")
             self.lbl_status.setStyleSheet("color:#d29922;")
@@ -1266,6 +1410,10 @@ class MainWindow(QMainWindow):
         self.lbl_status.setText(f"⏳ [{modo.upper()}] Processando {len(paths)} arquivo(s)...")
         self.lbl_status.setStyleSheet("color:#f0883e;")
         self.prog_bar.setValue(0)
+        if self._last_dub_is_multi:
+            self._begin_transcription_cache(self.lne_out.text().strip())
+        else:
+            self._finish_transcription_cache()
 
         s_lang = current_language_code(self.cmb_source_lang, "auto")
         t_lang = current_language_code(self.cmb_target_lang, "pt")
@@ -1285,11 +1433,7 @@ class MainWindow(QMainWindow):
         worker.progress_signal.connect(self.prog_bar.setValue)
         worker.file_done_signal.connect(self._on_dub_done)
         worker.transcription_ready_signal.connect(self._on_dub_transcription_ready)
-        worker.finished_signal.connect(lambda: (
-            self._set_botoes_ativos(True),
-            self.lbl_status.setText("✅ Processo concluído!"),
-            self.prog_bar.setValue(100),
-        ))
+        worker.finished_signal.connect(self._on_dub_worker_finished)
         worker.start()
 
     def _on_dub_log(self, msg, level="info"):
@@ -1377,51 +1521,51 @@ class MainWindow(QMainWindow):
         self._log(f"📂 Enviado para revisão: {pasta_revisao}", "warning")
 
     def _on_dub_done(self, ok, mov, path_out, original_name, txt_en="", txt_pt_final=""):
+        is_multi = getattr(self, '_last_dub_is_multi', False)
+        out_folder = self.lne_out.text().strip()
+
         if ok and path_out:
             self._current_result = path_out
             self._session_dubbed_paths[original_name] = path_out
-            self.exp.update_status(original_name, True, "")
-            self.play_pt.load(path_out)
-
-            is_multi = getattr(self, '_last_dub_is_multi', False)
-            out_folder = self.lne_out.text().strip()
+            saved_to_output = False
 
             if is_multi:
-                # ── AUTO-SAVE no batch: salva direto na pasta destino ──
                 if out_folder:
                     os.makedirs(out_folder, exist_ok=True)
                     dest = os.path.join(out_folder, original_name)
                     try:
                         shutil.copy2(path_out, dest)
+                        saved_to_output = True
                         self._log(f"💾 Auto-salvo: {original_name}", "success")
                         self.exp.update_status(original_name, True, "")
                     except Exception as e:
-                        self._log(f"❌ Erro ao salvar {original_name}: {e}", "error")
+                        motivo = f"Erro ao salvar: {e}"
+                        self.exp.update_status(original_name, False, motivo)
+                        self._log(f"❌ {original_name} {motivo}", "error")
                 else:
+                    self.exp.update_status(original_name, False, "Destino não definido")
                     self._log("⚠️ Pasta destino não definida — arquivo não salvo!", "warning")
             else:
-                # Arquivo único: toca automaticamente, usuário salva quando quiser
+                saved_to_output = True
+                self.exp.update_status(original_name, True, "")
+                self.play_pt.load(path_out)
                 self.play_pt.toggle_play()
 
-            # Atualiza o cache de transcrição com o texto final se o usuário quiser ver depois
-            if out_folder and txt_en and txt_pt_final:
-                cache_file = os.path.join(out_folder, "transcricoes_cache.json")
-                cache_data = {}
-                if os.path.exists(cache_file):
-                    try:
-                        import json
-                        with open(cache_file, "r", encoding="utf-8") as f:
-                            cache_data = json.load(f)
-                    except: pass
-                cache_data[original_name] = {"en": txt_en, "pt": txt_pt_final}
-                try:
-                    import json
-                    with open(cache_file, "w", encoding="utf-8") as f:
-                        json.dump(cache_data, f, ensure_ascii=False, indent=2)
-                except: pass
+            if out_folder and txt_en and txt_pt_final and (not is_multi or saved_to_output):
+                self._record_transcription_cache(
+                    out_folder,
+                    original_name,
+                    txt_en,
+                    txt_pt_final,
+                    defer_write=is_multi,
+                )
 
-            self.lbl_status.setText(f"✅ {original_name} concluído!")
-            self.lbl_status.setStyleSheet("color:#3fb950; font-weight:bold;")
+            if saved_to_output:
+                self.lbl_status.setText(f"✅ {original_name} concluído!")
+                self.lbl_status.setStyleSheet("color:#3fb950; font-weight:bold;")
+            else:
+                self.lbl_status.setText(f"❌ {original_name} gerado, mas não foi salvo.")
+                self.lbl_status.setStyleSheet("color:#f85149;")
         else:
             self.exp.update_status(original_name, False, mov)
             if str(mov or "").startswith("IGNORADO:"):

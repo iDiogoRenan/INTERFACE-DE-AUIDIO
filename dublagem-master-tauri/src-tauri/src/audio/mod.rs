@@ -6,7 +6,12 @@ use dublagem_domain::{
     AudioFileEntry, AudioMetadata, CachedTranscription, QualityClassification, QualityReport,
 };
 use serde::{Deserialize, Serialize};
-use std::{collections::BTreeMap, fs::File, path::Path};
+use std::{
+    collections::BTreeMap,
+    fs::{File, OpenOptions},
+    io::{BufWriter, Write},
+    path::{Path, PathBuf},
+};
 #[cfg(feature = "ml")]
 use symphonia::core::{
     audio::SampleBuffer,
@@ -19,6 +24,8 @@ use symphonia::core::{
 
 pub const AUDIO_EXTENSIONS: &[&str] = &["wav", "mp3", "wem", "ogg", "flac"];
 const TRANSCRIPTION_CACHE_FILE: &str = "transcricoes_cache.json";
+const TRANSCRIPTION_CACHE_JOURNAL_FILE: &str = "transcricoes_cache.journal.jsonl";
+const TRANSCRIPTION_CACHE_COMPACT_THRESHOLD: usize = 128;
 const FAMILY_MARKER_TOKENS: &[&str] = &["questdialog", "narration", "player"];
 #[cfg(feature = "ml")]
 const WHISPER_SAMPLE_RATE: u32 = 16_000;
@@ -115,26 +122,46 @@ pub fn scan_audio_folder(
     Ok(entries)
 }
 
-pub fn save_transcription_cache(
-    output_dir: &Path,
-    file_name: &str,
-    source_text: &str,
-    target_text: &str,
-) -> AppResult<()> {
-    std::fs::create_dir_all(output_dir)?;
-    let path = output_dir.join(TRANSCRIPTION_CACHE_FILE);
-    let mut cache = if path.exists() {
-        read_transcription_cache_file(&path)?
-    } else {
-        BTreeMap::new()
-    };
-    cache.insert(
-        file_name.to_string(),
-        TranscriptionCacheEntry::from_texts(source_text, target_text),
-    );
-    let payload = serde_json::to_string_pretty(&cache)?;
-    std::fs::write(path, payload)?;
-    Ok(())
+pub struct TranscriptionCacheWriter {
+    output_dir: PathBuf,
+    cache: BTreeMap<String, TranscriptionCacheEntry>,
+    pending_journal_records: usize,
+}
+
+impl TranscriptionCacheWriter {
+    pub fn load_for_output_dir(output_dir: &Path) -> AppResult<Self> {
+        std::fs::create_dir_all(output_dir)?;
+        Ok(Self {
+            output_dir: output_dir.to_path_buf(),
+            cache: read_transcription_cache_for_output_dir(output_dir)?,
+            pending_journal_records: 0,
+        })
+    }
+
+    pub fn record(
+        &mut self,
+        file_name: &str,
+        source_text: &str,
+        target_text: &str,
+    ) -> AppResult<()> {
+        let entry = TranscriptionCacheEntry::from_texts(source_text, target_text);
+        self.cache.insert(file_name.to_string(), entry.clone());
+        append_transcription_cache_journal(&self.output_dir, file_name, &entry)?;
+        self.pending_journal_records += 1;
+
+        if self.pending_journal_records >= TRANSCRIPTION_CACHE_COMPACT_THRESHOLD {
+            self.compact()?;
+        }
+
+        Ok(())
+    }
+
+    pub fn compact(&mut self) -> AppResult<()> {
+        write_transcription_cache_snapshot(&self.output_dir, &self.cache)?;
+        remove_file_if_exists(&self.output_dir.join(TRANSCRIPTION_CACHE_JOURNAL_FILE))?;
+        self.pending_journal_records = 0;
+        Ok(())
+    }
 }
 
 pub fn get_audio_metadata(path: &Path) -> AppResult<AudioMetadata> {
@@ -511,9 +538,7 @@ fn quality_summary(classification: QualityClassification, issues: &[String]) -> 
 
 fn load_transcription_cache(output_dir: Option<&Path>) -> BTreeMap<String, CachedTranscription> {
     output_dir
-        .map(|dir| dir.join(TRANSCRIPTION_CACHE_FILE))
-        .filter(|path| path.is_file())
-        .and_then(|path| read_transcription_cache_file(&path).ok())
+        .and_then(|dir| read_transcription_cache_for_output_dir(dir).ok())
         .map(|cache| {
             cache
                 .into_iter()
@@ -523,11 +548,103 @@ fn load_transcription_cache(output_dir: Option<&Path>) -> BTreeMap<String, Cache
         .unwrap_or_default()
 }
 
+fn read_transcription_cache_for_output_dir(
+    output_dir: &Path,
+) -> AppResult<BTreeMap<String, TranscriptionCacheEntry>> {
+    let snapshot_path = output_dir.join(TRANSCRIPTION_CACHE_FILE);
+    let mut cache = if snapshot_path.is_file() {
+        read_transcription_cache_file(&snapshot_path)?
+    } else {
+        BTreeMap::new()
+    };
+
+    let journal_path = output_dir.join(TRANSCRIPTION_CACHE_JOURNAL_FILE);
+    if journal_path.is_file() {
+        apply_transcription_cache_journal(&journal_path, &mut cache)?;
+    }
+
+    Ok(cache)
+}
+
 fn read_transcription_cache_file(
     path: &Path,
 ) -> AppResult<BTreeMap<String, TranscriptionCacheEntry>> {
     let payload = std::fs::read_to_string(path)?;
     Ok(serde_json::from_str(&payload)?)
+}
+
+fn write_transcription_cache_snapshot(
+    output_dir: &Path,
+    cache: &BTreeMap<String, TranscriptionCacheEntry>,
+) -> AppResult<()> {
+    let path = output_dir.join(TRANSCRIPTION_CACHE_FILE);
+    let temp_path = path.with_extension("json.tmp");
+    let payload = serde_json::to_string_pretty(cache)?;
+    std::fs::write(&temp_path, payload)?;
+    replace_file(&temp_path, &path)
+}
+
+fn append_transcription_cache_journal(
+    output_dir: &Path,
+    file_name: &str,
+    entry: &TranscriptionCacheEntry,
+) -> AppResult<()> {
+    let path = output_dir.join(TRANSCRIPTION_CACHE_JOURNAL_FILE);
+    let file = OpenOptions::new().create(true).append(true).open(path)?;
+    let mut writer = BufWriter::new(file);
+    serde_json::to_writer(
+        &mut writer,
+        &TranscriptionCacheJournalRecord {
+            file_name: file_name.to_string(),
+            entry: entry.clone(),
+        },
+    )?;
+    writer.write_all(b"\n")?;
+    writer.flush()?;
+    Ok(())
+}
+
+fn apply_transcription_cache_journal(
+    path: &Path,
+    cache: &mut BTreeMap<String, TranscriptionCacheEntry>,
+) -> AppResult<()> {
+    let payload = std::fs::read_to_string(path)?;
+    for line in payload.lines().filter(|line| !line.trim().is_empty()) {
+        let Ok(record) = serde_json::from_str::<TranscriptionCacheJournalRecord>(line) else {
+            continue;
+        };
+        if !record.file_name.trim().is_empty() {
+            cache.insert(record.file_name, record.entry);
+        }
+    }
+    Ok(())
+}
+
+fn replace_file(source: &Path, destination: &Path) -> AppResult<()> {
+    match std::fs::rename(source, destination) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            std::fs::remove_file(destination)?;
+            std::fs::rename(source, destination)?;
+            Ok(())
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn remove_file_if_exists(path: &Path) -> AppResult<()> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TranscriptionCacheJournalRecord {
+    file_name: String,
+    entry: TranscriptionCacheEntry,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -965,14 +1082,17 @@ mod tests {
     #[test]
     fn saves_transcription_cache_in_legacy_and_frontend_shapes() {
         let output_dir = tempfile::tempdir().expect("output tempdir");
+        let mut writer =
+            TranscriptionCacheWriter::load_for_output_dir(output_dir.path()).expect("cache writer");
 
-        save_transcription_cache(
-            output_dir.path(),
-            "line_saved.wav",
-            "Fresh source text.",
-            "Texto destino novo.",
-        )
-        .expect("save transcription cache");
+        writer
+            .record(
+                "line_saved.wav",
+                "Fresh source text.",
+                "Texto destino novo.",
+            )
+            .expect("save transcription cache");
+        writer.compact().expect("compact transcription cache");
 
         let cache_payload =
             std::fs::read_to_string(output_dir.path().join(TRANSCRIPTION_CACHE_FILE))
@@ -988,6 +1108,39 @@ mod tests {
             .expect("saved cached transcription");
         assert_eq!(transcription.source_text, "Fresh source text.");
         assert_eq!(transcription.target_text, "Texto destino novo.");
+    }
+
+    #[test]
+    fn records_large_transcription_cache_batches_incrementally() {
+        let output_dir = tempfile::tempdir().expect("output tempdir");
+        let mut writer =
+            TranscriptionCacheWriter::load_for_output_dir(output_dir.path()).expect("cache writer");
+
+        for index in 0..5_000 {
+            writer
+                .record(
+                    &format!("line_{index:04}.wav"),
+                    &format!("Source text {index}."),
+                    &format!("Texto destino {index}."),
+                )
+                .expect("record transcription");
+        }
+
+        let cache = load_transcription_cache(Some(output_dir.path()));
+        assert_eq!(cache.len(), 5_000);
+        for index in [999, 1_999, 4_999] {
+            let transcription = cache
+                .get(&format!("line_{index:04}.wav"))
+                .expect("cached transcription");
+            assert_eq!(transcription.source_text, format!("Source text {index}."));
+            assert_eq!(transcription.target_text, format!("Texto destino {index}."));
+        }
+
+        writer.compact().expect("compact cache");
+        assert!(!output_dir
+            .path()
+            .join(TRANSCRIPTION_CACHE_JOURNAL_FILE)
+            .exists());
     }
 
     #[test]

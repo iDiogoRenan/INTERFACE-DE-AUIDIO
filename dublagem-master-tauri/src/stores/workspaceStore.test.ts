@@ -627,6 +627,37 @@ describe("workspaceStore transcription hydration", () => {
     expect(useWorkspaceStore.getState().files[0].status).toBe("ignored");
   });
 
+  it("clears stale output paths when a file-level completion fails", () => {
+    useWorkspaceStore.setState({
+      files: [
+        {
+          ...dubbedFile,
+          path: fileA.path,
+          name: fileA.name,
+          outputPath: approvedChunkPath(fileA.name)
+        }
+      ],
+      selectedPath: fileA.path,
+      lastOutputPath: approvedChunkPath(fileA.name)
+    });
+
+    applyJobEvent(
+      jobEvent({
+        kind: "file_complete",
+        stage: "file_complete",
+        filePath: fileA.path,
+        outputStatus: "failed",
+        message: "Falha ao preparar arquivo: codec não suportado."
+      })
+    );
+
+    expect(useWorkspaceStore.getState().files[0]).toMatchObject({
+      status: "failed",
+      outputPath: null
+    });
+    expect(useWorkspaceStore.getState().lastOutputPath).toBeNull();
+  });
+
   it("keeps ignored files out of the result player when the backend stores the source copy", () => {
     useWorkspaceStore.setState({ files: [fileA], selectedPath: fileA.path });
 

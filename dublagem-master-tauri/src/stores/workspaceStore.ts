@@ -706,7 +706,8 @@ export function applyJobEvent(payload: DubbingJobEvent): void {
         ? {
             ...file,
             status: completedStatus,
-            outputPath: payload.outputPath ?? file.outputPath,
+            outputPath:
+              payload.outputPath ?? (hasReviewableOutput(completedStatus) ? file.outputPath : null),
             transcription: completedTranscription ?? file.transcription
           }
         : file
@@ -751,6 +752,14 @@ export function applyJobEvent(payload: DubbingJobEvent): void {
     (completedStatus === null || hasReviewableOutput(completedStatus))
   ) {
     update.lastOutputPath = payload.outputPath;
+    update.lastOutputRevision = state.lastOutputRevision + 1;
+  }
+  if (
+    shouldHydrateSelectedEditor &&
+    completedStatus !== null &&
+    !hasReviewableOutput(completedStatus)
+  ) {
+    update.lastOutputPath = null;
     update.lastOutputRevision = state.lastOutputRevision + 1;
   }
 

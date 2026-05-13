@@ -171,61 +171,19 @@ async fn run_job(
 
     output_layout::ensure_output_layout(&request.output_dir)?;
     let total = request.input_paths.len();
-    let ignored_inputs =
-        ignored_source_audio_reasons(&request.input_paths, request.options.max_synthesis_chunks)?;
-    let needs_speech_engines = ignored_inputs.len() < total;
+    let mut transcription_cache =
+        audio::TranscriptionCacheWriter::load_for_output_dir(&request.output_dir)?;
+    let mut requested_model_dir: Option<PathBuf> = None;
+    let mut speech_engines_validated = false;
 
-    let requested_model_dir = if needs_speech_engines {
-        emit_stage(
-            &app,
-            job_id,
-            JobStage::LoadingModels,
-            "Validando modelos locais antes do processamento.",
-            Some(1),
-            None,
-        )?;
-
-        let requested_model_dir =
-            crate::speech::models::model_dir_or_discovered_for_app(&app, request.model_dir.clone());
-        let model_paths = cancellable_phase(
-            &app,
-            job_id,
-            &cancellation,
-            None,
-            "validação de modelos locais",
-            MODEL_LOADING_TIMEOUT,
-            speech.model_paths_for_model_dir(requested_model_dir.clone()),
-        )
-        .await?;
-        let Some(_model_paths) = model_paths else {
-            emit_cancelled(&app, job_id, None)?;
-            return Ok(());
-        };
-
-        emit_stage(
-            &app,
-            job_id,
-            JobStage::Queued,
-            "Modelos locais validados; motores de fala serão carregados por etapa para preservar VRAM.",
-            Some(2),
-            None,
-        )?;
-
-        requested_model_dir
-    } else {
-        emit_stage(
-            &app,
-            job_id,
-            JobStage::Queued,
-            format!(
-                "Todos os arquivos excedem o limite configurado de {} chunk(s); modelos de fala não foram carregados.",
-                request.options.max_synthesis_chunks
-            ),
-            Some(2),
-            None,
-        )?;
-        None
-    };
+    emit_stage(
+        &app,
+        job_id,
+        JobStage::Queued,
+        format!("{total} arquivo(s) enfileirados para dublagem."),
+        Some(0),
+        None,
+    )?;
 
     for (index, input_path) in request.input_paths.iter().enumerate() {
         let file_name = input_path
@@ -254,12 +212,37 @@ async fn run_job(
             Some(&context),
         )?;
 
-        if let Some(reason) = ignored_inputs.get(input_path) {
-            let metadata = audio::get_audio_metadata(input_path).ok();
+        let source_metadata = match audio::get_audio_metadata(input_path) {
+            Ok(metadata) => metadata,
+            Err(error) => {
+                output_layout::remove_approved_outputs(
+                    &request.output_dir,
+                    &context.file_name,
+                    None,
+                )?;
+                output_layout::remove_ignored_and_rejected(
+                    &request.output_dir,
+                    &context.file_name,
+                )?;
+                emit_failed_file(
+                    &app,
+                    job_id,
+                    &context,
+                    format!("Falha ao preparar arquivo: {error}."),
+                )?;
+                emit_progress(&app, job_id, context.progress(100), Some(&context))?;
+                continue;
+            }
+        };
+
+        if let Some(reason) = ignored_source_audio_reason_for_duration(
+            source_metadata.duration_seconds,
+            request.options.max_synthesis_chunks,
+        ) {
             output_layout::remove_approved_outputs(
                 &request.output_dir,
                 &context.file_name,
-                metadata.as_ref(),
+                Some(&source_metadata),
             )?;
             let output_path = output_layout::copy_to_ignored(
                 input_path,
@@ -269,6 +252,47 @@ async fn run_job(
             emit_ignored_file(&app, job_id, &context, reason.clone(), output_path)?;
             emit_progress(&app, job_id, context.progress(100), Some(&context))?;
             continue;
+        }
+
+        if !speech_engines_validated {
+            emit_stage(
+                &app,
+                job_id,
+                JobStage::LoadingModels,
+                "Validando modelos locais antes do primeiro arquivo processável.",
+                Some(context.progress(10)),
+                Some(&context),
+            )?;
+
+            let resolved_model_dir = crate::speech::models::model_dir_or_discovered_for_app(
+                &app,
+                request.model_dir.clone(),
+            );
+            let model_paths = cancellable_phase(
+                &app,
+                job_id,
+                &cancellation,
+                Some(&context),
+                "validação de modelos locais",
+                MODEL_LOADING_TIMEOUT,
+                speech.model_paths_for_model_dir(resolved_model_dir.clone()),
+            )
+            .await?;
+            let Some(_model_paths) = model_paths else {
+                emit_cancelled(&app, job_id, Some(&context))?;
+                return Ok(());
+            };
+
+            requested_model_dir = resolved_model_dir;
+            speech_engines_validated = true;
+            emit_stage(
+                &app,
+                job_id,
+                JobStage::Queued,
+                "Modelos locais validados; motores de fala serão carregados por etapa para preservar VRAM.",
+                Some(context.progress(12)),
+                Some(&context),
+            )?;
         }
 
         let speech_stage = SpeechStageContext {
@@ -313,11 +337,10 @@ async fn run_job(
             Some(&target_text),
         )?;
 
-        let source_metadata = audio::get_audio_metadata(input_path).ok();
         let output_path = output_layout::approved_output_path_for_metadata(
             &request.output_dir,
             &context.file_name,
-            source_metadata.as_ref(),
+            Some(&source_metadata),
         );
         output_layout::ensure_output_parent(&output_path)?;
         let reference_audio = request.guide_audio.as_deref().unwrap_or(input_path);
@@ -369,7 +392,7 @@ async fn run_job(
                 output_layout::remove_approved_outputs(
                     &request.output_dir,
                     &context.file_name,
-                    source_metadata.as_ref(),
+                    Some(&source_metadata),
                 )?;
                 emit_rejected_file(
                     &app,
@@ -394,12 +417,7 @@ async fn run_job(
             Some(context.progress(92)),
             Some(&context),
         )?;
-        audio::save_transcription_cache(
-            &request.output_dir,
-            &context.file_name,
-            &source_text,
-            &target_text,
-        )?;
+        transcription_cache.record(&context.file_name, &source_text, &target_text)?;
         let completion_message = if let Some(save_output_as) = request.save_output_as.as_deref() {
             save_selected_dubbing_output(&output_path, save_output_as)?;
             format!("Arquivo concluido e salvo em {}.", save_output_as.display())
@@ -423,6 +441,8 @@ async fn run_job(
         )?;
         emit_progress(&app, job_id, context.progress(100), Some(&context))?;
     }
+
+    transcription_cache.compact()?;
 
     emit(
         &app,
@@ -1705,17 +1725,6 @@ fn apply_text_options(
     Ok(target_text)
 }
 
-fn ignored_source_audio_reason(
-    path: &Path,
-    max_synthesis_chunks: u32,
-) -> AppResult<Option<String>> {
-    let metadata = audio::get_audio_metadata(path)?;
-    Ok(ignored_source_audio_reason_for_duration(
-        metadata.duration_seconds,
-        max_synthesis_chunks,
-    ))
-}
-
 fn ignored_source_audio_reason_for_duration(
     duration_seconds: Option<f64>,
     max_synthesis_chunks: u32,
@@ -1735,19 +1744,6 @@ fn ignored_source_audio_reason_for_duration(
         dublagem_domain::OMNIVOICE_MAX_SYNTHESIS_SECONDS,
         max_synthesis_chunks
     ))
-}
-
-fn ignored_source_audio_reasons(
-    paths: &[PathBuf],
-    max_synthesis_chunks: u32,
-) -> AppResult<HashMap<PathBuf, String>> {
-    let mut ignored = HashMap::new();
-    for path in paths {
-        if let Some(reason) = ignored_source_audio_reason(path, max_synthesis_chunks)? {
-            ignored.insert(path.clone(), reason);
-        }
-    }
-    Ok(ignored)
 }
 
 fn emit_ignored_file(
@@ -1770,6 +1766,27 @@ fn emit_ignored_file(
         )
         .with_output_path(output_path)
         .with_output_status(AudioFileStatus::Ignored),
+    )
+}
+
+fn emit_failed_file(
+    app: &AppHandle,
+    job_id: JobId,
+    context: &FileContext,
+    reason: String,
+) -> AppResult<()> {
+    emit(
+        app,
+        EVENT_FILE_COMPLETE,
+        event(
+            job_id,
+            JobEventKind::FileComplete,
+            Some(JobStage::FileComplete),
+            reason,
+            Some(context.progress(100)),
+            Some(context),
+        )
+        .with_output_status(AudioFileStatus::Failed),
     )
 }
 
