@@ -47,6 +47,44 @@ const waveformTheme: WaveformTheme = {
   text: "#c6d0d9"
 };
 
+function createAudioContextDisposer(audioContext: AudioContext): () => void {
+  let closePromise: Promise<void> | null = null;
+
+  return () => {
+    if (closePromise !== null) {
+      return;
+    }
+
+    closePromise = releaseAudioContext(audioContext);
+    void closePromise.catch(reportAudioContextReleaseFailure);
+  };
+}
+
+async function releaseAudioContext(audioContext: AudioContext): Promise<void> {
+  if (audioContext.state === "closed") {
+    return;
+  }
+
+  try {
+    await audioContext.close();
+  } catch (unknownError: unknown) {
+    if (!isInvalidStateError(unknownError)) {
+      throw unknownError;
+    }
+  }
+}
+
+function isInvalidStateError(unknownError: unknown): boolean {
+  return (
+    (unknownError instanceof DOMException || unknownError instanceof Error) &&
+    unknownError.name === "InvalidStateError"
+  );
+}
+
+function reportAudioContextReleaseFailure(unknownError: unknown): void {
+  console.error("Falha ao liberar recursos do analisador de audio.", unknownError);
+}
+
 export function AudioPlayer({ title, path, revision = 0 }: AudioPlayerProps) {
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -176,9 +214,11 @@ export function AudioPlayer({ title, path, revision = 0 }: AudioPlayerProps) {
     }
 
     let cancelled = false;
+    const abortController = new AbortController();
     const audioContext = new AudioContext();
+    const disposeAudioContext = createAudioContextDisposer(audioContext);
 
-    void fetch(source)
+    void fetch(source, { signal: abortController.signal })
       .then((response) => {
         if (!response.ok) {
           throw new Error(`Falha ao carregar prévia (${String(response.status)})`);
@@ -209,12 +249,13 @@ export function AudioPlayer({ title, path, revision = 0 }: AudioPlayerProps) {
         }
       })
       .finally(() => {
-        void audioContext.close();
+        disposeAudioContext();
       });
 
     return () => {
       cancelled = true;
-      void audioContext.close();
+      abortController.abort();
+      disposeAudioContext();
     };
   }, [source]);
 
