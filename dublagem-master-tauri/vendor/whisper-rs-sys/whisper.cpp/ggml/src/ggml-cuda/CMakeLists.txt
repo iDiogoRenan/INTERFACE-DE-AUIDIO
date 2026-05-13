@@ -37,20 +37,12 @@ if (CUDAToolkit_FOUND)
             endif()
 
             if (CUDAToolkit_VERSION VERSION_GREATER_EQUAL "12.8")
-                # The CUDA architecture 120f-virtual would in principle work for Blackwell support
-                #     but the newly added "f" suffix conflicted with a preexising regex for validating CUDA architectures in CMake.
-                # So either a recent CMake version or one with the backported fix is needed.
-                # The following versions should work:
-                #   - CMake >= v3.31.8 && CMake < v4.0.0
-                #   - CMake >= v4.0.2
-                # This is NOT documented in the CMake release notes,
-                #     check Modules/Internal/CMakeCUDAArchitecturesValidate.cmake in the CMake git repository instead.
-                # However, the architectures 120a-real and 121a-real should work with basically any CMake version and
-                #     until the release of e.g. Rubin there is no benefit to shipping virtual architectures for Blackwell.
-                list(APPEND CMAKE_CUDA_ARCHITECTURES 120a-real)
+                # Desktop Blackwell RTX 50 GPUs expose compute capability sm_120.
+                # Shipping sm_120 avoids runtime "no kernel image" failures on consumer Blackwell devices.
+                list(APPEND CMAKE_CUDA_ARCHITECTURES 120-real)
             endif()
             if (CUDAToolkit_VERSION VERSION_GREATER_EQUAL "12.9")
-                list(APPEND CMAKE_CUDA_ARCHITECTURES 121a-real)
+                list(APPEND CMAKE_CUDA_ARCHITECTURES 121-real)
             endif()
         endif()
     endif()
@@ -71,28 +63,8 @@ if (CUDAToolkit_FOUND)
         FetchContent_MakeAvailable(CCCL)
     endif()
 
-    # Replace any plain 12X CUDA architectures with their "architecture-specific" equivalents 12Xa.
-    # 12X is forwards-compatible, 12Xa is not.
-    # Notably the Blackwell FP4 tensor core instructions are not forwards compatible and therefore need 12Xa.
-    # But while 12X vs. 12Xa can be checked in device code there is (to my knowledge) no easy way to do the same check in host code.
-    # So for now just replace all instances of 12X with 12Xa, this should be fine until Rubin is released.
-    foreach(ARCHS IN ITEMS CMAKE_CUDA_ARCHITECTURES CMAKE_CUDA_ARCHITECTURES_NATIVE)
-        set(FIXED_ARCHS "")
-        foreach(ARCH IN LISTS ${ARCHS})
-            if (ARCH MATCHES "^12[0-9](-real|-virtual)?$")
-                string(REGEX REPLACE "^(12[0-9])((-real|-virtual)?)$" "\\1a\\2" FIXED_ARCH ${ARCH})
-                message(STATUS "Replacing ${ARCH} in ${ARCHS} with ${FIXED_ARCH}")
-                list(APPEND FIXED_ARCHS "${FIXED_ARCH}")
-            else()
-                list(APPEND FIXED_ARCHS "${ARCH}")
-            endif()
-        endforeach()
-        set(${ARCHS} ${FIXED_ARCHS})
-    endforeach()
-
-    # If we try to compile a "native" build it will use the 12X architectures and fail.
-    # So we should instead use the native architectures as determined by CMake after replacing 12X with 12Xa.
-    # But if at the time of the build no GPUs are connected at all CMAKE_CUDA_ARCHITECTURES will contain garbage that we should not use.
+    # If we try to compile a "native" build, CMake may report host-specific architectures.
+    # Use the detected native list only when CMake reports a valid CUDA architecture list.
     if (CMAKE_CUDA_ARCHITECTURES STREQUAL "native" AND CMAKE_CUDA_ARCHITECTURES_NATIVE MATCHES "^[0-9]+(a|f)?(-real|-virtual)?(;[0-9]+(a|f)?(-real|-virtual)?|;)*$")
         set(CMAKE_CUDA_ARCHITECTURES ${CMAKE_CUDA_ARCHITECTURES_NATIVE})
     endif()
@@ -107,6 +79,9 @@ if (CUDAToolkit_FOUND)
     file(GLOB   SRCS "template-instances/fattn-mma*.cu")
     list(APPEND GGML_SOURCES_CUDA ${SRCS})
     file(GLOB   SRCS "template-instances/mmq*.cu")
+    # MXFP4 MMQ instantiates architecture-specific Blackwell FP4 instructions.
+    # Whisper large-v3 does not use MXFP4 tensors, and excluding it keeps consumer RTX 50 sm_120 builds valid.
+    list(FILTER SRCS EXCLUDE REGEX "mmq-instance-mxfp4\\.cu$")
     list(APPEND GGML_SOURCES_CUDA ${SRCS})
     file(GLOB   SRCS "template-instances/mmf*.cu")
     list(APPEND GGML_SOURCES_CUDA ${SRCS})

@@ -96,8 +96,26 @@ pub fn discover_model_dir_for_app(app: &AppHandle) -> Option<PathBuf> {
         .or_else(discover_model_dir)
 }
 
+pub fn model_dir_or_discovered_for_app(
+    app: &AppHandle,
+    configured_model_dir: Option<PathBuf>,
+) -> Option<PathBuf> {
+    model_dir_or_discovered(configured_model_dir, discover_model_dir_for_app(app))
+}
+
+pub fn model_dir_or_discovered(
+    configured_model_dir: Option<PathBuf>,
+    discovered_model_dir: Option<PathBuf>,
+) -> Option<PathBuf> {
+    match configured_model_dir {
+        Some(model_dir) if is_usable_model_dir(&model_dir) => Some(model_dir),
+        Some(model_dir) => discovered_model_dir.or(Some(model_dir)),
+        None => discovered_model_dir,
+    }
+}
+
 pub fn discover_model_dir() -> Option<PathBuf> {
-    model_dir_if_manifested(project_model_dir())
+    model_dir_if_available(project_model_dir())
 }
 
 fn discover_bundled_model_dir(app: &AppHandle) -> Option<PathBuf> {
@@ -105,7 +123,7 @@ fn discover_bundled_model_dir(app: &AppHandle) -> Option<PathBuf> {
         .path()
         .resolve(BUNDLED_MODELS_RESOURCE_DIR, BaseDirectory::Resource)
         .ok()?;
-    model_dir_if_manifested(model_dir)
+    model_dir_if_available(model_dir)
 }
 
 fn discover_exe_adjacent_model_dir() -> Option<PathBuf> {
@@ -113,14 +131,19 @@ fn discover_exe_adjacent_model_dir() -> Option<PathBuf> {
         .ok()?
         .parent()
         .map(|directory| directory.join(BUNDLED_MODELS_RESOURCE_DIR))?;
-    model_dir_if_manifested(model_dir)
+    model_dir_if_available(model_dir)
 }
 
-fn model_dir_if_manifested(model_dir: PathBuf) -> Option<PathBuf> {
-    model_dir
-        .join(MODEL_MANIFEST_FILE_NAME)
-        .is_file()
-        .then_some(model_dir)
+pub fn is_usable_model_dir(model_dir: &Path) -> bool {
+    model_dir.is_dir()
+        && (model_dir.join(MODEL_MANIFEST_FILE_NAME).is_file()
+            || (model_dir.join(WHISPER_FALLBACK_PATH).is_file()
+                && model_dir.join(WHISPER_VAD_FALLBACK_PATH).is_file()
+                && model_dir.join(OMNIVOICE_FALLBACK_PATH).is_dir()))
+}
+
+fn model_dir_if_available(model_dir: PathBuf) -> Option<PathBuf> {
+    is_usable_model_dir(&model_dir).then_some(model_dir)
 }
 
 pub fn project_model_dir() -> PathBuf {
@@ -362,6 +385,70 @@ mod tests {
             resolve_speech_model_paths(Some(missing_dir.path())).expect_err("missing config");
 
         assert!(error.to_string().contains("whisper-rs ggml large-v3"));
+    }
+
+    #[test]
+    fn accepts_manifested_model_dir_as_usable_without_hashing_payload() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            temp_dir.path().join(MODEL_MANIFEST_FILE_NAME),
+            r#"{"schemaVersion":1,"models":[]}"#,
+        )
+        .expect("manifest");
+
+        assert!(is_usable_model_dir(temp_dir.path()));
+    }
+
+    #[test]
+    fn accepts_conventional_model_dir_as_usable_without_manifest() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let whisper_dir = temp_dir.path().join("whisper");
+        let omnivoice_dir = temp_dir.path().join("omnivoice");
+        std::fs::create_dir_all(&whisper_dir).expect("whisper dir");
+        std::fs::create_dir_all(&omnivoice_dir).expect("omnivoice dir");
+        std::fs::write(whisper_dir.join("ggml-large-v3.bin"), b"model").expect("whisper model");
+        std::fs::write(whisper_dir.join("ggml-silero-v6.2.0.bin"), b"vad").expect("vad model");
+
+        assert!(is_usable_model_dir(temp_dir.path()));
+    }
+
+    #[test]
+    fn replaces_stale_model_dir_with_discovered_portable_models() {
+        let discovered_models = tempfile::tempdir().expect("discovered models");
+        std::fs::write(
+            discovered_models.path().join(MODEL_MANIFEST_FILE_NAME),
+            r#"{"schemaVersion":1,"models":[]}"#,
+        )
+        .expect("manifest");
+
+        let resolved = model_dir_or_discovered(
+            Some(PathBuf::from(
+                r"D:\CD DUBLAGEM PROJETO\NSG Gaming Dub 1.0\models",
+            )),
+            Some(discovered_models.path().to_path_buf()),
+        );
+
+        assert_eq!(resolved, Some(discovered_models.path().to_path_buf()));
+    }
+
+    #[test]
+    fn preserves_valid_user_selected_model_dir() {
+        let selected_models = tempfile::tempdir().expect("selected models");
+        let discovered_models = tempfile::tempdir().expect("discovered models");
+        for directory in [selected_models.path(), discovered_models.path()] {
+            std::fs::write(
+                directory.join(MODEL_MANIFEST_FILE_NAME),
+                r#"{"schemaVersion":1,"models":[]}"#,
+            )
+            .expect("manifest");
+        }
+
+        let resolved = model_dir_or_discovered(
+            Some(selected_models.path().to_path_buf()),
+            Some(discovered_models.path().to_path_buf()),
+        );
+
+        assert_eq!(resolved, Some(selected_models.path().to_path_buf()));
     }
 
     #[test]

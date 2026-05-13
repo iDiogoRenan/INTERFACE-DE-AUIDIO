@@ -111,6 +111,25 @@
   background: var(--surface-1);
 }
 
+.selectedItem {
+  border-color: color-mix(in srgb, var(--danger) 62%, var(--border-strong));
+  background:
+    linear-gradient(90deg, color-mix(in srgb, var(--danger) 24%, transparent), transparent 72%),
+    color-mix(in srgb, var(--danger) 9%, var(--surface-1));
+  box-shadow: inset 3px 0 0 color-mix(in srgb, var(--danger) 82%, white);
+}
+
+.selectedItem:hover {
+  background:
+    linear-gradient(90deg, color-mix(in srgb, var(--danger) 30%, transparent), transparent 72%),
+    color-mix(in srgb, var(--danger) 12%, var(--surface-1));
+}
+
+.selectedItem .fileName {
+  color: color-mix(in srgb, var(--text) 78%, var(--danger));
+  font-weight: 850;
+}
+
 .fileName {
   overflow: hidden;
   text-overflow: ellipsis;
@@ -294,7 +313,7 @@
   fill: var(--surface-2);
 }
 
-.tagContextMenu {
+.contextMenu {
   position: fixed;
   z-index: 80;
   inline-size: 164px;
@@ -304,7 +323,7 @@
   padding: 4px;
 }
 
-.tagContextMenu button {
+.contextMenu button {
   display: inline-flex;
   align-items: center;
   gap: 8px;
@@ -320,8 +339,8 @@
   text-align: left;
 }
 
-.tagContextMenu button:hover,
-.tagContextMenu button:focus-visible {
+.contextMenu button:hover,
+.contextMenu button:focus-visible {
   background: color-mix(in srgb, var(--accent) 18%, transparent);
   outline: none;
 }

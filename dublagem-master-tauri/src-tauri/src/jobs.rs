@@ -79,6 +79,15 @@ struct FileContext {
     total_files: usize,
 }
 
+struct SpeechStageContext<'a> {
+    app: &'a AppHandle,
+    job_id: JobId,
+    context: &'a FileContext,
+    cancellation: &'a CancellationToken,
+    speech: &'a SpeechRuntime,
+    model_dir: &'a Option<PathBuf>,
+}
+
 impl FileContext {
     fn progress(&self, file_percent: u8) -> u8 {
         let completed_files = self.file_index as f32;
@@ -166,53 +175,43 @@ async fn run_job(
         ignored_source_audio_reasons(&request.input_paths, request.options.max_synthesis_chunks)?;
     let needs_speech_engines = ignored_inputs.len() < total;
 
-    let (transcriber, synthesizer) = if needs_speech_engines {
+    let requested_model_dir = if needs_speech_engines {
         emit_stage(
             &app,
             job_id,
             JobStage::LoadingModels,
-            "Validando modelos locais e preparando motores de fala.",
+            "Validando modelos locais antes do processamento.",
             Some(1),
             None,
         )?;
 
-        let requested_model_dir = request
-            .model_dir
-            .clone()
-            .or_else(|| crate::speech::models::discover_model_dir_for_app(&app));
-        let speech_engines = cancellable_phase(
+        let requested_model_dir =
+            crate::speech::models::model_dir_or_discovered_for_app(&app, request.model_dir.clone());
+        let model_paths = cancellable_phase(
             &app,
             job_id,
             &cancellation,
             None,
-            "validação e carga de modelos",
+            "validação de modelos locais",
             MODEL_LOADING_TIMEOUT,
-            speech.engines(requested_model_dir),
+            speech.model_paths_for_model_dir(requested_model_dir.clone()),
         )
         .await?;
-        let Some(speech_engines) = speech_engines else {
+        let Some(_model_paths) = model_paths else {
             emit_cancelled(&app, job_id, None)?;
             return Ok(());
-        };
-        let runtime_message = if speech_engines.reused_runtime {
-            "Ambiente de fala residente reutilizado; modelos já estavam carregados."
-        } else {
-            "Ambiente de fala carregado e mantido residente enquanto o aplicativo estiver aberto."
         };
 
         emit_stage(
             &app,
             job_id,
             JobStage::Queued,
-            runtime_message,
+            "Modelos locais validados; motores de fala serão carregados por etapa para preservar VRAM.",
             Some(2),
             None,
         )?;
 
-        (
-            Some(speech_engines.transcriber),
-            Some(speech_engines.synthesizer),
-        )
+        requested_model_dir
     } else {
         emit_stage(
             &app,
@@ -225,7 +224,7 @@ async fn run_job(
             Some(2),
             None,
         )?;
-        (None, None)
+        None
     };
 
     for (index, input_path) in request.input_paths.iter().enumerate() {
@@ -272,23 +271,16 @@ async fn run_job(
             continue;
         }
 
-        let transcriber = transcriber.as_ref().ok_or_else(|| {
-            AppError::Internal("motor de transcrição indisponível para arquivo válido".to_string())
-        })?;
-        let synthesizer = synthesizer.as_ref().ok_or_else(|| {
-            AppError::Internal("motor de síntese indisponível para arquivo válido".to_string())
-        })?;
-
-        let source_text = resolve_source_text(
-            &app,
+        let speech_stage = SpeechStageContext {
+            app: &app,
             job_id,
-            &context,
-            &request,
-            input_path,
-            transcriber.as_ref(),
-            &cancellation,
-        )
-        .await?;
+            context: &context,
+            cancellation: &cancellation,
+            speech: speech.as_ref(),
+            model_dir: &requested_model_dir,
+        };
+
+        let source_text = resolve_source_text(&speech_stage, &request, input_path).await?;
         let Some(source_text) = source_text else {
             emit_cancelled(&app, job_id, Some(&context))?;
             return Ok(());
@@ -345,8 +337,8 @@ async fn run_job(
             job_id,
             context: &context,
             cancellation: &cancellation,
-            synthesizer: synthesizer.as_ref(),
-            transcriber: transcriber.as_ref(),
+            speech: speech.as_ref(),
+            model_dir: requested_model_dir.clone(),
             target_text: &target_text,
             source_text: &source_text,
             source_audio: input_path,
@@ -448,22 +440,18 @@ async fn run_job(
 }
 
 async fn resolve_source_text(
-    app: &AppHandle,
-    job_id: JobId,
-    context: &FileContext,
+    stage: &SpeechStageContext<'_>,
     request: &DubbingRequest,
     input_path: &Path,
-    transcriber: &dyn Transcriber,
-    cancellation: &CancellationToken,
 ) -> AppResult<Option<String>> {
     let source_text = request.custom_source_text.clone().unwrap_or_default();
     if !source_text.trim().is_empty() {
         emit_transcription(
-            app,
-            job_id,
-            context,
+            stage.app,
+            stage.job_id,
+            stage.context,
             "Texto origem manual carregado.",
-            context.progress(35),
+            stage.context.progress(35),
             &source_text,
             None,
         )?;
@@ -471,18 +459,27 @@ async fn resolve_source_text(
     }
 
     emit_stage(
-        app,
-        job_id,
+        stage.app,
+        stage.job_id,
         JobStage::Transcribing,
         "Transcrevendo áudio com Whisper local.",
-        Some(context.progress(15)),
-        Some(context),
+        Some(stage.context.progress(15)),
+        Some(stage.context),
     )?;
+    let transcriber = load_transcriber_for_stage(
+        stage,
+        "Carregando Whisper local para transcrição.",
+        stage.context.progress(14),
+    )
+    .await?;
+    let Some(transcriber) = transcriber else {
+        return Ok(None);
+    };
     let transcription = cancellable_phase(
-        app,
-        job_id,
-        cancellation,
-        Some(context),
+        stage.app,
+        stage.job_id,
+        stage.cancellation,
+        Some(stage.context),
         "transcricao Whisper",
         TRANSCRIPTION_TIMEOUT,
         transcriber.transcribe(
@@ -497,15 +494,68 @@ async fn resolve_source_text(
     };
 
     emit_transcription(
-        app,
-        job_id,
-        context,
+        stage.app,
+        stage.job_id,
+        stage.context,
         "Transcricao concluida.",
-        context.progress(35),
+        stage.context.progress(35),
         &transcription.source_text,
         None,
     )?;
     Ok(Some(transcription.source_text))
+}
+
+async fn load_transcriber_for_stage(
+    stage: &SpeechStageContext<'_>,
+    message: &str,
+    progress: u8,
+) -> AppResult<Option<Arc<dyn Transcriber>>> {
+    emit_stage(
+        stage.app,
+        stage.job_id,
+        JobStage::LoadingModels,
+        message,
+        Some(progress),
+        Some(stage.context),
+    )?;
+    cancellable_phase(
+        stage.app,
+        stage.job_id,
+        stage.cancellation,
+        Some(stage.context),
+        "carga do Whisper local",
+        MODEL_LOADING_TIMEOUT,
+        stage
+            .speech
+            .transcriber_for_model_dir(stage.model_dir.to_owned()),
+    )
+    .await
+}
+
+async fn load_synthesizer_for_stage(
+    stage: &SpeechStageContext<'_>,
+    progress: u8,
+) -> AppResult<Option<Arc<dyn VoiceSynthesizer>>> {
+    emit_stage(
+        stage.app,
+        stage.job_id,
+        JobStage::LoadingModels,
+        "Carregando OmniVoice/Candle para síntese.",
+        Some(progress),
+        Some(stage.context),
+    )?;
+    cancellable_phase(
+        stage.app,
+        stage.job_id,
+        stage.cancellation,
+        Some(stage.context),
+        "carga do OmniVoice/Candle",
+        MODEL_LOADING_TIMEOUT,
+        stage
+            .speech
+            .synthesizer_for_model_dir(stage.model_dir.to_owned()),
+    )
+    .await
 }
 
 async fn resolve_target_text(
@@ -618,8 +668,8 @@ struct V14SynthesisJob<'a> {
     job_id: JobId,
     context: &'a FileContext,
     cancellation: &'a CancellationToken,
-    synthesizer: &'a dyn VoiceSynthesizer,
-    transcriber: &'a dyn Transcriber,
+    speech: &'a SpeechRuntime,
+    model_dir: Option<PathBuf>,
     target_text: &'a str,
     source_text: &'a str,
     source_audio: &'a Path,
@@ -636,7 +686,8 @@ struct V14ValidationJob<'a> {
     job_id: JobId,
     context: &'a FileContext,
     cancellation: &'a CancellationToken,
-    transcriber: &'a dyn Transcriber,
+    speech: &'a SpeechRuntime,
+    model_dir: Option<PathBuf>,
     expected_text: &'a str,
     expected_native_tags: &'a [String],
     output_path: &'a Path,
@@ -696,7 +747,8 @@ async fn synthesize_with_v14_guard(job: V14SynthesisJob<'_>) -> AppResult<V14Syn
         job_id: job.job_id,
         context: job.context,
         cancellation: job.cancellation,
-        transcriber: job.transcriber,
+        speech: job.speech,
+        model_dir: job.model_dir.clone(),
         expected_text: job.target_text,
         expected_native_tags: &primary_native_tags,
         output_path: job.output_path,
@@ -748,7 +800,8 @@ async fn synthesize_with_v14_guard(job: V14SynthesisJob<'_>) -> AppResult<V14Syn
             job_id: job.job_id,
             context: job.context,
             cancellation: job.cancellation,
-            transcriber: job.transcriber,
+            speech: job.speech,
+            model_dir: job.model_dir.clone(),
             expected_text: &fallback_target_text,
             expected_native_tags: &fallback_pinned_tags,
             output_path: job.output_path,
@@ -804,6 +857,20 @@ async fn synthesize_v14_once(attempt: V14SynthesisAttempt<'_, '_>) -> AppResult<
         Some(job.context.progress(attempt.progress)),
         Some(job.context),
     )?;
+    job.speech.release_transcriber().await;
+    let speech_stage = SpeechStageContext {
+        app: job.app,
+        job_id: job.job_id,
+        context: job.context,
+        cancellation: job.cancellation,
+        speech: job.speech,
+        model_dir: &job.model_dir,
+    };
+    let synthesizer =
+        load_synthesizer_for_stage(&speech_stage, job.context.progress(attempt.progress)).await?;
+    let Some(synthesizer) = synthesizer else {
+        return Ok(false);
+    };
 
     let synth_result = cancellable_phase(
         job.app,
@@ -812,7 +879,7 @@ async fn synthesize_v14_once(attempt: V14SynthesisAttempt<'_, '_>) -> AppResult<
         Some(job.context),
         "síntese OmniVoice v14",
         SYNTHESIS_TIMEOUT,
-        job.synthesizer.synthesize(SynthesisRequest {
+        synthesizer.synthesize(SynthesisRequest {
             text: attempt.text,
             source_audio: job.source_audio,
             reference_audio: job.reference_audio,
@@ -1006,6 +1073,24 @@ async fn resolve_v14_reference_text(job: &V14SynthesisJob<'_>) -> AppResult<Opti
     } else {
         LanguageCode::Auto
     };
+    let speech_stage = SpeechStageContext {
+        app: job.app,
+        job_id: job.job_id,
+        context: job.context,
+        cancellation: job.cancellation,
+        speech: job.speech,
+        model_dir: &job.model_dir,
+    };
+    let transcriber = load_transcriber_for_stage(
+        &speech_stage,
+        "Carregando Whisper local para referência curta v14.",
+        job.context.progress(63),
+    )
+    .await?;
+    let Some(transcriber) = transcriber else {
+        remove_file_if_exists(&reference_path)?;
+        return Ok(None);
+    };
     let transcription = cancellable_phase(
         job.app,
         job.job_id,
@@ -1013,7 +1098,7 @@ async fn resolve_v14_reference_text(job: &V14SynthesisJob<'_>) -> AppResult<Opti
         Some(job.context),
         "transcrição da referência curta v14",
         TRANSCRIPTION_TIMEOUT,
-        job.transcriber.transcribe(
+        transcriber.transcribe(
             &reference_path,
             reference_language,
             job.options.target_language,
@@ -1116,6 +1201,28 @@ async fn validate_v14_output(job: V14ValidationJob<'_>) -> AppResult<V14OutputVa
         Some(job.context.progress(90)),
         Some(job.context),
     )?;
+    job.speech.release_synthesizer().await;
+    let speech_stage = SpeechStageContext {
+        app: job.app,
+        job_id: job.job_id,
+        context: job.context,
+        cancellation: job.cancellation,
+        speech: job.speech,
+        model_dir: &job.model_dir,
+    };
+    let transcriber = load_transcriber_for_stage(
+        &speech_stage,
+        "Carregando Whisper local para conferência v14.",
+        job.context.progress(90),
+    )
+    .await?;
+    let Some(transcriber) = transcriber else {
+        return Ok(V14OutputValidation {
+            accepted: false,
+            message: "Cancelado durante carga do Whisper de conferência.".to_string(),
+            native_tag_literal_detected: false,
+        });
+    };
 
     let transcription = cancellable_phase(
         job.app,
@@ -1124,8 +1231,7 @@ async fn validate_v14_output(job: V14ValidationJob<'_>) -> AppResult<V14OutputVa
         Some(job.context),
         "conferência Whisper v14 do áudio gerado",
         V14_VALIDATION_TIMEOUT,
-        job.transcriber
-            .transcribe(job.output_path, job.target_language, job.target_language),
+        transcriber.transcribe(job.output_path, job.target_language, job.target_language),
     )
     .await?;
     let Some(transcription) = transcription else {

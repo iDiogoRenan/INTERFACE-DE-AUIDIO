@@ -20,6 +20,7 @@ export function SettingsPanel() {
   const config = useWorkspaceStore((state) => state.config);
   const saveConfig = useWorkspaceStore((state) => state.saveConfig);
   const scan = useWorkspaceStore((state) => state.scan);
+  const appendLog = useWorkspaceStore((state) => state.appendLog);
 
   async function patchConfig(patch: Partial<AppConfig>): Promise<void> {
     await saveConfig({ ...config, ...patch });
@@ -30,6 +31,10 @@ export function SettingsPanel() {
     await scan();
   }
 
+  function reportPathOpenError(message: string): void {
+    appendLog(message, "error");
+  }
+
   return (
     <section className={styles.panel}>
       <div className={styles.pathGrid}>
@@ -38,6 +43,7 @@ export function SettingsPanel() {
           value={config.inputDir}
           mode="directory"
           placeholder="Pasta com áudios originais"
+          onOpenError={reportPathOpenError}
           onChange={(inputDir) => {
             void saveAndScan({ ...config, inputDir });
           }}
@@ -47,6 +53,7 @@ export function SettingsPanel() {
           value={config.outputDir}
           mode="directory"
           placeholder="Pasta para dublagens"
+          onOpenError={reportPathOpenError}
           onChange={(outputDir) => {
             void patchConfig({ outputDir });
           }}
@@ -56,6 +63,7 @@ export function SettingsPanel() {
           value={config.guideAudio}
           mode="file"
           placeholder="Arquivo de referência opcional"
+          onOpenError={reportPathOpenError}
           onChange={(guideAudio) => {
             void patchConfig({ guideAudio });
           }}
@@ -65,6 +73,7 @@ export function SettingsPanel() {
           value={config.approvedDir}
           mode="directory"
           placeholder="Pasta de aprovação final"
+          onOpenError={reportPathOpenError}
           onChange={(approvedDir) => {
             void patchConfig({ approvedDir });
           }}
@@ -74,6 +83,7 @@ export function SettingsPanel() {
           value={config.modelDir}
           mode="directory"
           placeholder="Pasta local de modelos"
+          onOpenError={reportPathOpenError}
           onChange={(modelDir) => {
             void patchConfig({ modelDir });
           }}

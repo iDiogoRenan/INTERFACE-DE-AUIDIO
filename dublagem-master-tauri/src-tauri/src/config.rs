@@ -36,9 +36,8 @@ pub fn save_config(app: &AppHandle, config: &AppConfig) -> AppResult<AppConfig> 
 }
 
 fn with_discovered_models(app: &AppHandle, mut config: AppConfig) -> AppConfig {
-    if config.model_dir.is_none() {
-        config.model_dir = crate::speech::models::discover_model_dir_for_app(app);
-    }
+    config.model_dir =
+        crate::speech::models::model_dir_or_discovered_for_app(app, config.model_dir);
     config.normalize_model_presets()
 }
 

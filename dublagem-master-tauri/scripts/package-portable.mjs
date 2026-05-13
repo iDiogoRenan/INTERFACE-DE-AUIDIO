@@ -1,19 +1,23 @@
-import { cp, mkdir, readdir, readFile, rm, stat } from "node:fs/promises";
+import { createWriteStream } from "node:fs";
+import { cp, mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
+import yazl from "yazl";
 
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const projectRoot = path.resolve(scriptDir, "..");
 const releaseDir = path.join(projectRoot, "src-tauri", "target", "release");
 const portableRoot = path.join(projectRoot, "dist-portable");
 const portableAppDir = path.join(portableRoot, "NSG Gaming Dub 1.0");
+const portableArchive = path.join(portableRoot, "NSG-Gaming-Dub-1.0-portable.zip");
 const executableName = "dublagem-master-tauri.exe";
 const executableSource = path.join(releaseDir, executableName);
 const executableTarget = path.join(portableAppDir, executableName);
 const modelSourceCandidates = [path.join(releaseDir, "models"), path.join(projectRoot, "models")];
 const modelTarget = path.join(portableAppDir, "models");
 const cargoConfigPath = path.join(projectRoot, ".cargo", "config.toml");
+const reproducibleZipDate = new Date("1980-01-01T00:00:00.000Z");
 const cudaRuntimeDllPatterns = [
   /^cublas64_\d+\.dll$/i,
   /^cublasLt64_\d+\.dll$/i,
@@ -33,14 +37,19 @@ await mkdir(portableAppDir, { recursive: true });
 await cp(executableSource, executableTarget);
 await cp(modelSource, modelTarget, { recursive: true, force: true });
 const cudaRuntimeFiles = await copyCudaRuntimeDependencies(portableAppDir);
+await writeDistributionInstructions(portableAppDir);
+await createPortableArchive(portableAppDir, portableArchive);
 
 const modelBytes = await directorySize(modelTarget);
 const cudaRuntimeBytes = await filesSize(cudaRuntimeFiles);
+const archiveBytes = (await stat(portableArchive)).size;
 process.stdout.write(`Portable distribution ready: ${portableAppDir}\n`);
+process.stdout.write(`Portable archive ready: ${portableArchive}\n`);
 process.stdout.write(`Bundled model payload: ${formatGiB(modelBytes)} GiB\n`);
 process.stdout.write(
   `Bundled CUDA runtime: ${cudaRuntimeFiles.length} DLLs, ${formatGiB(cudaRuntimeBytes)} GiB\n`
 );
+process.stdout.write(`Portable archive size: ${formatGiB(archiveBytes)} GiB\n`);
 
 async function firstExistingDirectory(candidates) {
   for (const candidate of candidates) {
@@ -151,6 +160,66 @@ async function copyCudaLicense(cudaRoot, targetDirectory) {
       await cp(source, path.join(targetDirectory, `CUDA_${licenseFile}`));
     }
   }
+}
+
+async function writeDistributionInstructions(targetDirectory) {
+  const instructions = [
+    "NSG Gaming Dub 1.0 - distribuicao portatil",
+    "",
+    "Extraia esta pasta inteira antes de abrir dublagem-master-tauri.exe.",
+    "Nao execute o .exe diretamente de dentro do .zip.",
+    "Nao envie apenas dublagem-master-tauri.exe: os DLLs CUDA e a pasta models devem ficar ao lado dele.",
+    "Requer GPU NVIDIA Turing/RTX 20 ou mais nova e driver NVIDIA R580 ou superior.",
+    ""
+  ].join("\n");
+
+  await writeFile(path.join(targetDirectory, "LEIA-ME-DISTRIBUICAO.txt"), instructions, "utf8");
+}
+
+async function createPortableArchive(sourceDirectory, targetArchive) {
+  await rm(targetArchive, { force: true });
+  await mkdir(path.dirname(targetArchive), { recursive: true });
+
+  const zipFile = new yazl.ZipFile();
+  const output = createWriteStream(targetArchive);
+  const completion = new Promise((resolve, reject) => {
+    output.on("close", resolve);
+    output.on("error", reject);
+    zipFile.outputStream.on("error", reject);
+  });
+
+  zipFile.outputStream.pipe(output);
+  await addDirectoryToArchive(zipFile, sourceDirectory, path.basename(sourceDirectory));
+  zipFile.end();
+  await completion;
+}
+
+async function addDirectoryToArchive(zipFile, sourceDirectory, archiveDirectory) {
+  const entries = (await readdir(sourceDirectory, { withFileTypes: true })).sort((left, right) =>
+    left.name.localeCompare(right.name)
+  );
+
+  for (const entry of entries) {
+    const sourcePath = path.join(sourceDirectory, entry.name);
+    const archivePath = toZipPath(path.join(archiveDirectory, entry.name));
+
+    if (entry.isDirectory()) {
+      await addDirectoryToArchive(zipFile, sourcePath, archivePath);
+      continue;
+    }
+
+    if (entry.isFile()) {
+      zipFile.addFile(sourcePath, archivePath, {
+        compress: false,
+        forceZip64Format: true,
+        mtime: reproducibleZipDate
+      });
+    }
+  }
+}
+
+function toZipPath(filePath) {
+  return filePath.split(path.sep).join("/");
 }
 
 async function isFile(filePath) {

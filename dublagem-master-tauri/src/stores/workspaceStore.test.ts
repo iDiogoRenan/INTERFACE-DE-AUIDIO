@@ -306,6 +306,63 @@ describe("workspaceStore transcription hydration", () => {
     expect(useWorkspaceStore.getState().totalFiles).toBe(2);
   });
 
+  it("follows the file reported by an active dubbing job", () => {
+    useWorkspaceStore.setState({
+      activeJobId: "job-1",
+      isBusy: true,
+      files: [fileA, cachedDubbedFile],
+      selectedPath: fileA.path,
+      sourceText: "manual source for selected only",
+      targetText: "manual target for selected only"
+    });
+
+    applyJobEvent(
+      jobEvent({
+        kind: "stage",
+        stage: "preparing_file",
+        filePath: cachedDubbedFile.path,
+        fileName: cachedDubbedFile.name,
+        fileIndex: 2,
+        totalFiles: 2
+      })
+    );
+
+    const state = useWorkspaceStore.getState();
+    expect(state.selectedPath).toBe(cachedDubbedFile.path);
+    expect(state.sourceText).toBe("Hello from cache.");
+    expect(state.targetText).toBe("Ola do cache.");
+    expect(state.currentFileName).toBe(cachedDubbedFile.name);
+    expect(state.currentFileIndex).toBe(2);
+    expect(state.totalFiles).toBe(2);
+  });
+
+  it("keeps idle job events from stealing the selected file", () => {
+    useWorkspaceStore.setState({
+      isBusy: false,
+      files: [fileA, cachedDubbedFile],
+      selectedPath: fileA.path,
+      sourceText: "manual source for selected only",
+      targetText: "manual target for selected only"
+    });
+
+    applyJobEvent(
+      jobEvent({
+        filePath: cachedDubbedFile.path,
+        sourceText: "Incoming source text.",
+        targetText: "Texto recebido."
+      })
+    );
+
+    const state = useWorkspaceStore.getState();
+    expect(state.selectedPath).toBe(fileA.path);
+    expect(state.sourceText).toBe("manual source for selected only");
+    expect(state.targetText).toBe("manual target for selected only");
+    expect(state.transcriptionDrafts[cachedDubbedFile.path]).toEqual({
+      sourceText: "Incoming source text.",
+      targetText: "Texto recebido."
+    });
+  });
+
   it("keeps submitted manual text when redubbing events replay cached transcription", async () => {
     useWorkspaceStore.setState({ files: [cachedDubbedFile], selectedPath: null });
     useWorkspaceStore.getState().selectFile(cachedDubbedFile.path);

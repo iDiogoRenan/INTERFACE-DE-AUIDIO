@@ -37,3 +37,35 @@
 .control button:hover {
   background: var(--surface-3);
 }
+
+.contextMenu {
+  position: fixed;
+  z-index: 80;
+  inline-size: 156px;
+  border: 1px solid var(--border-strong);
+  background: var(--surface-2);
+  box-shadow: 0 14px 32px rgb(0 0 0 / 0.36);
+  padding: 4px;
+}
+
+.contextMenu button {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  inline-size: 100%;
+  min-block-size: 30px;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 800;
+  padding: 0 8px;
+  text-align: left;
+}
+
+.contextMenu button:hover,
+.contextMenu button:focus-visible {
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+  outline: none;
+}

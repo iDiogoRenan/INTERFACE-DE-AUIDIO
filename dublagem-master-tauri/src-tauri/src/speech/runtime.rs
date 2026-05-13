@@ -15,12 +15,6 @@ pub struct SpeechRuntime {
     synthesizer: Mutex<Option<CachedSynthesizer>>,
 }
 
-pub struct SpeechEngines {
-    pub transcriber: Arc<dyn Transcriber>,
-    pub synthesizer: Arc<dyn VoiceSynthesizer>,
-    pub reused_runtime: bool,
-}
-
 struct CachedModelPaths {
     requested_model_dir: Option<PathBuf>,
     paths: SpeechModelPaths,
@@ -39,34 +33,18 @@ struct CachedSynthesizer {
 
 struct ResolvedModelPaths {
     paths: SpeechModelPaths,
-    was_cached: bool,
 }
 
 struct RuntimeHandle<T: ?Sized> {
     engine: Arc<T>,
-    was_cached: bool,
 }
 
 impl SpeechRuntime {
-    pub async fn engines(&self, model_dir: Option<PathBuf>) -> AppResult<SpeechEngines> {
-        let model_paths = self.model_paths(model_dir).await?;
-        let transcriber = self
-            .transcriber_handle(
-                model_paths.paths.whisper_model_path,
-                model_paths.paths.whisper_vad_model_path,
-            )
-            .await?;
-        let synthesizer = self
-            .synthesizer_handle(model_paths.paths.omnivoice_model_dir)
-            .await?;
-
-        Ok(SpeechEngines {
-            reused_runtime: model_paths.was_cached
-                && transcriber.was_cached
-                && synthesizer.was_cached,
-            transcriber: transcriber.engine,
-            synthesizer: synthesizer.engine,
-        })
+    pub async fn model_paths_for_model_dir(
+        &self,
+        model_dir: Option<PathBuf>,
+    ) -> AppResult<SpeechModelPaths> {
+        Ok(self.model_paths(model_dir).await?.paths)
     }
 
     pub async fn transcriber_for_model_dir(
@@ -83,6 +61,10 @@ impl SpeechRuntime {
             .engine)
     }
 
+    pub async fn release_transcriber(&self) {
+        self.transcriber.lock().await.take();
+    }
+
     pub async fn synthesizer_for_model_dir(
         &self,
         model_dir: Option<PathBuf>,
@@ -94,6 +76,10 @@ impl SpeechRuntime {
             .engine)
     }
 
+    pub async fn release_synthesizer(&self) {
+        self.synthesizer.lock().await.take();
+    }
+
     async fn model_paths(&self, model_dir: Option<PathBuf>) -> AppResult<ResolvedModelPaths> {
         let requested_model_dir = model_dir.map(normalize_existing_path).transpose()?;
         let mut model_cache = self.model_paths.lock().await;
@@ -103,7 +89,6 @@ impl SpeechRuntime {
         {
             return Ok(ResolvedModelPaths {
                 paths: cached.paths.clone(),
-                was_cached: true,
             });
         }
 
@@ -123,7 +108,6 @@ impl SpeechRuntime {
 
         Ok(ResolvedModelPaths {
             paths: resolved_paths,
-            was_cached: false,
         })
     }
 
@@ -140,7 +124,6 @@ impl SpeechRuntime {
         }) {
             return Ok(RuntimeHandle {
                 engine: Arc::clone(&cached.engine),
-                was_cached: true,
             });
         }
 
@@ -153,10 +136,7 @@ impl SpeechRuntime {
             engine: Arc::clone(&engine),
         });
 
-        Ok(RuntimeHandle {
-            engine,
-            was_cached: false,
-        })
+        Ok(RuntimeHandle { engine })
     }
 
     async fn synthesizer_handle(
@@ -171,7 +151,6 @@ impl SpeechRuntime {
         {
             return Ok(RuntimeHandle {
                 engine: Arc::clone(&cached.engine),
-                was_cached: true,
             });
         }
 
@@ -182,10 +161,7 @@ impl SpeechRuntime {
             engine: Arc::clone(&engine),
         });
 
-        Ok(RuntimeHandle {
-            engine,
-            was_cached: false,
-        })
+        Ok(RuntimeHandle { engine })
     }
 }
 
@@ -234,8 +210,6 @@ mod tests {
             .await
             .expect("cached resolution");
 
-        assert!(!first.was_cached);
-        assert!(second.was_cached);
         assert_eq!(first.paths, second.paths);
     }
 }

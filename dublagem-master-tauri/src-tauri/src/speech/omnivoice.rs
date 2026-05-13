@@ -78,6 +78,9 @@ pub struct OmniVoiceCandleSynthesizer {
 impl OmniVoiceCandleSynthesizer {
     #[cfg(feature = "ml")]
     pub async fn preload(model_dir: PathBuf) -> AppResult<Self> {
+        #[cfg(feature = "cuda")]
+        crate::speech::gpu::require_cuda_gpu()?;
+
         let pipeline = load_shared_pipeline(model_dir.clone()).await?;
         Ok(Self {
             model_dir: Some(model_dir),

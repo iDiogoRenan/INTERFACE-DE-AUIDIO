@@ -4,6 +4,7 @@ import {
   ChevronRight,
   FileAudio,
   Filter,
+  FolderOpen,
   FolderInput,
   FolderOutput,
   ListChecks,
@@ -26,6 +27,7 @@ import {
   nativeTagGroups,
   type NativeTag
 } from "../../shared/omnivoice/nativeControls";
+import { openDirectoryLocation, revealFileLocation } from "../../shared/tauri/openLocation";
 import { hasConfiguredInputDirectory } from "../../shared/tauri/configGuards";
 import { pickDirectory } from "../../shared/tauri/pathPicker";
 import type { AppConfig } from "../../shared/tauri/types";
@@ -33,11 +35,18 @@ import { useWorkspaceStore } from "../../stores/workspaceStore";
 import styles from "./ProjectExplorer.module.css";
 
 const TAG_PALETTE_OPEN_STORAGE_KEY = "nsg-gaming-dub.tag-palette-open.v1";
-const TAG_CONTEXT_MENU_WIDTH = 164;
-const TAG_CONTEXT_MENU_HEIGHT = 38;
+const CONTEXT_MENU_WIDTH = 164;
+const CONTEXT_MENU_HEIGHT = 38;
 
 interface TagContextMenuState {
   tag: NativeTag;
+  x: number;
+  y: number;
+}
+
+interface LocationContextMenuState {
+  path: string;
+  target: "directory" | "file";
   x: number;
   y: number;
 }
@@ -72,6 +81,9 @@ export function ProjectExplorer() {
     null
   );
   const [tagContextMenu, setTagContextMenu] = useState<TagContextMenuState | null>(null);
+  const [locationContextMenu, setLocationContextMenu] = useState<LocationContextMenuState | null>(
+    null
+  );
 
   const families = useMemo(
     () => ["all", ...Array.from(new Set(files.map((file) => file.family))).sort()],
@@ -82,12 +94,13 @@ export function ProjectExplorer() {
   const visibleFilePaths = visibleFiles.map((file) => file.path);
 
   useEffect(() => {
-    if (!tagContextMenu) {
+    if (!tagContextMenu && !locationContextMenu) {
       return;
     }
 
     const closeMenu = () => {
       setTagContextMenu(null);
+      setLocationContextMenu(null);
     };
     const closeMenuOnEscape = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
@@ -108,12 +121,52 @@ export function ProjectExplorer() {
       window.removeEventListener("scroll", closeMenu, true);
       window.removeEventListener("keydown", closeMenuOnEscape);
     };
-  }, [tagContextMenu]);
+  }, [tagContextMenu, locationContextMenu]);
 
   function openTagContextMenu(event: ReactMouseEvent<HTMLButtonElement>, tag: NativeTag): void {
     event.preventDefault();
     event.stopPropagation();
-    setTagContextMenu({ tag, ...contextMenuPosition(event.clientX, event.clientY) });
+    setLocationContextMenu(null);
+    setTagContextMenu({
+      tag,
+      ...contextMenuPosition(event.clientX, event.clientY)
+    });
+  }
+
+  function openLocationContextMenu(
+    event: ReactMouseEvent<HTMLElement>,
+    path: string | null,
+    target: LocationContextMenuState["target"]
+  ): void {
+    event.preventDefault();
+    event.stopPropagation();
+    setTagContextMenu(null);
+
+    if (!path) {
+      setLocationContextMenu(null);
+      appendLog("Nenhuma pasta configurada para abrir.", "warning");
+      return;
+    }
+
+    setLocationContextMenu({
+      path,
+      target,
+      ...contextMenuPosition(event.clientX, event.clientY)
+    });
+  }
+
+  async function goToLocation(menu: LocationContextMenuState): Promise<void> {
+    setLocationContextMenu(null);
+    try {
+      if (menu.target === "directory") {
+        await openDirectoryLocation(menu.path);
+        return;
+      }
+
+      await revealFileLocation(menu.path);
+    } catch (unknownError: unknown) {
+      appendLog(locationError(unknownError), "error");
+    }
   }
 
   async function selectWorkspaceDirectory(configKey: WorkspaceDirectoryKey): Promise<void> {
@@ -152,6 +205,7 @@ export function ProjectExplorer() {
             {workspaceDirectoryActions.map((action) => {
               const Icon = action.Icon;
               const isPickingThisDirectory = activeDirectoryPicker === action.configKey;
+              const configuredPath = config[action.configKey];
               return (
                 <HeaderActionTooltip key={action.configKey} label={action.label}>
                   <button
@@ -161,6 +215,9 @@ export function ProjectExplorer() {
                     disabled={activeDirectoryPicker !== null}
                     onClick={() => {
                       void selectWorkspaceDirectory(action.configKey);
+                    }}
+                    onContextMenu={(event) => {
+                      openLocationContextMenu(event, configuredPath, "directory");
                     }}
                   >
                     {isPickingThisDirectory ? (
@@ -210,9 +267,13 @@ export function ProjectExplorer() {
           <button
             key={file.path}
             type="button"
-            className={file.path === selectedPath ? styles.selectedItem : styles.item}
+            className={`${styles.item} ${file.path === selectedPath ? styles.selectedItem : ""}`}
             onClick={() => {
               selectFile(file.path);
+            }}
+            onContextMenu={(event) => {
+              selectFile(file.path);
+              openLocationContextMenu(event, file.path, "file");
             }}
           >
             <FileAudio size={15} />
@@ -310,17 +371,7 @@ export function ProjectExplorer() {
       </section>
 
       {tagContextMenu ? (
-        <div
-          className={styles.tagContextMenu}
-          role="menu"
-          style={{
-            insetInlineStart: tagContextMenu.x,
-            insetBlockStart: tagContextMenu.y
-          }}
-          onClick={(event) => {
-            event.stopPropagation();
-          }}
-        >
+        <div className={styles.contextMenu} role="menu" style={contextMenuStyle(tagContextMenu)}>
           <button
             type="button"
             role="menuitem"
@@ -331,6 +382,25 @@ export function ProjectExplorer() {
           >
             <Pin size={14} />
             {pinnedNativeTags.includes(tagContextMenu.tag) ? "Desfixar tag" : "Fixar tag"}
+          </button>
+        </div>
+      ) : null}
+
+      {locationContextMenu ? (
+        <div
+          className={styles.contextMenu}
+          role="menu"
+          style={contextMenuStyle(locationContextMenu)}
+        >
+          <button
+            type="button"
+            role="menuitem"
+            onClick={() => {
+              void goToLocation(locationContextMenu);
+            }}
+          >
+            <FolderOpen size={14} />
+            Ir para
           </button>
         </div>
       ) : null}
@@ -347,8 +417,15 @@ function contextMenuPosition(
   }
 
   return {
-    x: Math.max(0, Math.min(clientX, window.innerWidth - TAG_CONTEXT_MENU_WIDTH)),
-    y: Math.max(0, Math.min(clientY, window.innerHeight - TAG_CONTEXT_MENU_HEIGHT))
+    x: Math.max(0, Math.min(clientX, window.innerWidth - CONTEXT_MENU_WIDTH)),
+    y: Math.max(0, Math.min(clientY, window.innerHeight - CONTEXT_MENU_HEIGHT))
+  };
+}
+
+function contextMenuStyle(position: Pick<TagContextMenuState, "x" | "y">) {
+  return {
+    insetInlineStart: position.x,
+    insetBlockStart: position.y
   };
 }
 
@@ -431,4 +508,10 @@ function directoryPickerError(unknownError: unknown): string {
       ? unknownError.message
       : "Erro desconhecido ao abrir o seletor de pasta.";
   return `Não foi possível selecionar a pasta: ${details}`;
+}
+
+function locationError(unknownError: unknown): string {
+  const details =
+    unknownError instanceof Error ? unknownError.message : "Erro desconhecido ao abrir a pasta.";
+  return `Não foi possível abrir no Explorador: ${details}`;
 }

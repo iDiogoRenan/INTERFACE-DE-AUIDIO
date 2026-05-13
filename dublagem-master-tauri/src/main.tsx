@@ -1,7 +1,10 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
 import App from "./App";
+import { installFrontendFatalErrorReporter } from "./shared/errors/fatalErrorReporter";
 import "./styles/theme.css";
+
+installFrontendFatalErrorReporter();
 
 const root = document.getElementById("root");
 

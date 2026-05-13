@@ -1,6 +1,7 @@
 mod audio;
 mod commands;
 mod config;
+mod crash_report;
 mod error;
 mod jobs;
 mod output_layout;
@@ -18,12 +19,23 @@ use commands::{
 };
 use state::AppState;
 
+pub use crash_report::crash_report_dir;
+
+pub fn run_whisper_worker_if_requested() -> Option<i32> {
+    speech::whisper::run_worker_if_requested()
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    crash_report::install_panic_reporter();
     tauri::Builder::default()
         .manage(AppState::new())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
+        .setup(|app| {
+            crash_report::register_app_handle(app);
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             load_config,
             save_config,

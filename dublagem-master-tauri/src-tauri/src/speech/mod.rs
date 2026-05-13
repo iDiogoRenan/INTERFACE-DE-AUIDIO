@@ -8,6 +8,7 @@ use std::{
     sync::Arc,
 };
 
+pub(crate) mod gpu;
 pub mod models;
 pub mod omnivoice;
 pub mod runtime;

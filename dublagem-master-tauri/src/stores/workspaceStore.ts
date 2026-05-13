@@ -1,4 +1,5 @@
 import { listen } from "@tauri-apps/api/event";
+import { message as showDialogMessage } from "@tauri-apps/plugin-dialog";
 import { create } from "zustand";
 import {
   createLineMetadata,
@@ -599,6 +600,7 @@ async function registerJobListeners(): Promise<void> {
   await listen<DubbingJobEvent>("job:failed", (event) => {
     applyJobEvent(event.payload);
     appendJobLog(event.payload, "error");
+    void showProcessingFailureDialog(event.payload.message);
     store.setState({
       activeJobId: null,
       isBusy: false,
@@ -610,6 +612,21 @@ async function registerJobListeners(): Promise<void> {
 
 function appendJobLog(payload: DubbingJobEvent, level: LogEntry["level"]): void {
   useWorkspaceStore.getState().appendLog(payload.message, level, payload.timestamp);
+}
+
+async function showProcessingFailureDialog(message: string): Promise<void> {
+  if (!isTauriRuntime()) {
+    return;
+  }
+
+  try {
+    await showDialogMessage(message, {
+      title: "Falha no processamento",
+      kind: "error"
+    });
+  } catch (unknownError) {
+    useWorkspaceStore.getState().appendLog(errorMessage(unknownError), "error");
+  }
 }
 
 function sortLogsByTimestamp(entries: LogEntry[]): LogEntry[] {
@@ -679,21 +696,6 @@ export function applyJobEvent(payload: DubbingJobEvent): void {
     queueProjectMetadataSave(state.config.outputDir, projectMetadata);
   }
 
-  const shouldHydrateSelectedEditor = eventPath === state.selectedPath;
-  if (shouldHydrateSelectedEditor && resolvedSourceText !== null) {
-    update.sourceText = resolvedSourceText;
-  }
-  if (shouldHydrateSelectedEditor && resolvedTargetText !== null) {
-    update.targetText = resolvedTargetText;
-  }
-  if (
-    shouldHydrateSelectedEditor &&
-    payload.outputPath !== null &&
-    (completedStatus === null || hasReviewableOutput(completedStatus))
-  ) {
-    update.lastOutputPath = payload.outputPath;
-    update.lastOutputRevision = state.lastOutputRevision + 1;
-  }
   if (eventPath && completedStatus !== null) {
     const transcriptionBaselines = update.transcriptionBaselines ?? state.transcriptionBaselines;
     const completedTranscription = hasReviewableOutput(completedStatus)
@@ -709,6 +711,47 @@ export function applyJobEvent(payload: DubbingJobEvent): void {
           }
         : file
     );
+  }
+
+  const shouldFollowEventPath =
+    state.isBusy &&
+    payload.filePath !== null &&
+    eventPath !== null &&
+    state.files.some((file) => file.path === eventPath);
+  const effectiveSelectedPath = shouldFollowEventPath ? eventPath : state.selectedPath;
+  const selectedPathChanged = shouldFollowEventPath && eventPath !== state.selectedPath;
+  if (selectedPathChanged) {
+    const nextFiles = update.files ?? state.files;
+    const nextTranscriptionDrafts = update.transcriptionDrafts ?? state.transcriptionDrafts;
+    const nextBaselines = baselineStateForPath(
+      eventPath,
+      update.transcriptionBaselines ?? state.transcriptionBaselines,
+      nextFiles
+    );
+
+    update.selectedPath = eventPath;
+    update.selectedLineIndex = 0;
+    update.linePreviewPath = null;
+    update.transcriptionBaselines = nextBaselines;
+    update.lastOutputPath = outputPathForSelection(eventPath, nextFiles);
+    update.lastOutputRevision = state.lastOutputRevision + 1;
+    Object.assign(update, draftStateForPath(eventPath, nextTranscriptionDrafts, nextFiles));
+  }
+
+  const shouldHydrateSelectedEditor = eventPath === effectiveSelectedPath;
+  if (shouldHydrateSelectedEditor && resolvedSourceText !== null) {
+    update.sourceText = resolvedSourceText;
+  }
+  if (shouldHydrateSelectedEditor && resolvedTargetText !== null) {
+    update.targetText = resolvedTargetText;
+  }
+  if (
+    shouldHydrateSelectedEditor &&
+    payload.outputPath !== null &&
+    (completedStatus === null || hasReviewableOutput(completedStatus))
+  ) {
+    update.lastOutputPath = payload.outputPath;
+    update.lastOutputRevision = state.lastOutputRevision + 1;
   }
 
   if (terminalEvent) {
