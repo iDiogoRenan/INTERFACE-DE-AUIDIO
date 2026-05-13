@@ -168,7 +168,8 @@ async function writeDistributionInstructions(targetDirectory) {
     "",
     "Extraia esta pasta inteira antes de abrir dublagem-master-tauri.exe.",
     "Nao execute o .exe diretamente de dentro do .zip.",
-    "Nao envie apenas dublagem-master-tauri.exe: os DLLs CUDA e a pasta models devem ficar ao lado dele.",
+    "Primeira instalacao: envie a pasta inteira, porque os DLLs CUDA e a pasta models devem ficar ao lado do .exe.",
+    "Atualizacao/hotfix: se a pasta completa ja existe no computador, pode substituir apenas dublagem-master-tauri.exe.",
     "Requer GPU NVIDIA Turing/RTX 20 ou mais nova e driver NVIDIA R580 ou superior.",
     ""
   ].join("\n");
