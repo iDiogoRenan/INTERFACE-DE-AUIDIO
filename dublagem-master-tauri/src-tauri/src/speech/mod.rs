@@ -1,7 +1,8 @@
 use crate::error::{AppError, AppResult};
 use async_trait::async_trait;
 use dublagem_domain::{
-    DubbingOptions, LanguageCode, LineSynthesisOverride, TranscriptionResult, VoiceProfile,
+    DubbingOptions, LanguageCode, LineSynthesisOverride, TimingAlignmentReport,
+    TranscriptionResult, VoiceProfile,
 };
 use std::{
     path::{Path, PathBuf},
@@ -26,7 +27,7 @@ pub trait Transcriber: Send + Sync {
 
 #[async_trait]
 pub trait VoiceSynthesizer: Send + Sync {
-    async fn synthesize(&self, request: SynthesisRequest<'_>) -> AppResult<()>;
+    async fn synthesize(&self, request: SynthesisRequest<'_>) -> AppResult<TimingAlignmentReport>;
 
     async fn generate_voice_pool(&self, output_dir: &Path) -> AppResult<Vec<PathBuf>>;
 }
@@ -34,6 +35,7 @@ pub trait VoiceSynthesizer: Send + Sync {
 #[cfg_attr(not(feature = "ml"), allow(dead_code))]
 pub struct SynthesisRequest<'a> {
     pub text: &'a str,
+    pub source_text: &'a str,
     pub source_audio: &'a Path,
     pub reference_audio: &'a Path,
     pub reference_text: &'a str,

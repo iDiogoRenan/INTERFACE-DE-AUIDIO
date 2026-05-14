@@ -56,10 +56,25 @@ pub struct AudioTimingProfile {
 }
 
 #[cfg(feature = "ml")]
-impl AudioTimingProfile {
-    pub fn target_voice_duration_seconds(self) -> Option<f32> {
-        (self.voice_ms > 0).then_some(self.voice_ms as f32 / 1000.0)
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SpeechWindow {
+    pub start_seconds: f32,
+    pub end_seconds: f32,
+}
+
+#[cfg(feature = "ml")]
+impl SpeechWindow {
+    pub fn duration_seconds(self) -> f32 {
+        (self.end_seconds - self.start_seconds).max(0.0)
     }
+}
+
+#[cfg(feature = "ml")]
+#[derive(Debug, Clone, PartialEq)]
+pub struct SpeechWindowDetection {
+    pub windows: Vec<SpeechWindow>,
+    pub total_duration_seconds: f32,
+    pub sample_rate: u32,
 }
 
 #[cfg(feature = "ml")]
@@ -445,6 +460,52 @@ pub fn audio_timing_profile(path: &Path, pad_ms: u32) -> AppResult<AudioTimingPr
         decoded.sample_rate,
         pad_ms,
     ))
+}
+
+#[cfg(feature = "ml")]
+pub fn speech_windows(
+    path: &Path,
+    pad_ms: u32,
+    maximum_window_seconds: f32,
+) -> AppResult<SpeechWindowDetection> {
+    let decoded = decode_audio_mono_f32(path)?;
+    let total_duration_seconds = decoded.samples.len() as f32 / decoded.sample_rate as f32;
+    let active_ranges = active_sample_blocks(&decoded.samples, decoded.sample_rate, 35.0);
+    let ranges = if active_ranges.is_empty() {
+        match active_sample_range(
+            &decoded.samples,
+            decoded
+                .samples
+                .iter()
+                .fold(0.0_f32, |peak, sample| peak.max(sample.abs())),
+        ) {
+            Some((start, end)) => {
+                let range = start..end.saturating_add(1);
+                std::iter::once(range).collect()
+            }
+            None => Vec::new(),
+        }
+    } else {
+        active_ranges
+    };
+    let ranges =
+        normalize_speech_ranges(ranges, decoded.samples.len(), decoded.sample_rate, pad_ms);
+    let ranges = split_long_speech_ranges(ranges, decoded.sample_rate, maximum_window_seconds);
+    let windows = ranges
+        .into_iter()
+        .filter(|range| range.start < range.end)
+        .map(|range| SpeechWindow {
+            start_seconds: range.start as f32 / decoded.sample_rate as f32,
+            end_seconds: range.end as f32 / decoded.sample_rate as f32,
+        })
+        .filter(|window| window.duration_seconds() > 0.0)
+        .collect::<Vec<_>>();
+
+    Ok(SpeechWindowDetection {
+        windows,
+        total_duration_seconds,
+        sample_rate: decoded.sample_rate,
+    })
 }
 
 pub fn quality_report(samples: &[f32]) -> QualityReport {
@@ -885,7 +946,108 @@ fn concatenate_active_blocks(
 }
 
 #[cfg(feature = "ml")]
-fn write_pcm16_wav_mono(path: &Path, sample_rate: u32, samples: &[f32]) -> AppResult<()> {
+fn normalize_speech_ranges(
+    ranges: Vec<std::ops::Range<usize>>,
+    total_samples: usize,
+    sample_rate: u32,
+    pad_ms: u32,
+) -> Vec<std::ops::Range<usize>> {
+    if total_samples == 0 || sample_rate == 0 {
+        return Vec::new();
+    }
+
+    let edge_pad = ms_to_samples(pad_ms.min(120), sample_rate);
+    let expanded = ranges
+        .into_iter()
+        .filter(|range| range.start < range.end)
+        .map(|range| {
+            range.start.saturating_sub(edge_pad)
+                ..range.end.saturating_add(edge_pad).min(total_samples)
+        })
+        .collect::<Vec<_>>();
+    let merged = merge_speech_ranges(expanded, ms_to_samples(250, sample_rate));
+    merge_short_speech_ranges(
+        merged,
+        ms_to_samples(1_000, sample_rate),
+        ms_to_samples(600, sample_rate),
+    )
+}
+
+#[cfg(feature = "ml")]
+fn merge_speech_ranges(
+    ranges: Vec<std::ops::Range<usize>>,
+    maximum_gap: usize,
+) -> Vec<std::ops::Range<usize>> {
+    let mut merged: Vec<std::ops::Range<usize>> = Vec::new();
+    for range in ranges.into_iter().filter(|range| range.start < range.end) {
+        if let Some(last) = merged.last_mut() {
+            if range.start <= last.end.saturating_add(maximum_gap) {
+                last.end = last.end.max(range.end);
+                continue;
+            }
+        }
+        merged.push(range);
+    }
+    merged
+}
+
+#[cfg(feature = "ml")]
+fn merge_short_speech_ranges(
+    ranges: Vec<std::ops::Range<usize>>,
+    minimum_samples: usize,
+    maximum_gap: usize,
+) -> Vec<std::ops::Range<usize>> {
+    let mut merged: Vec<std::ops::Range<usize>> = Vec::new();
+    for range in ranges.into_iter().filter(|range| range.start < range.end) {
+        if range.end.saturating_sub(range.start) >= minimum_samples {
+            merged.push(range);
+            continue;
+        }
+
+        if let Some(last) = merged.last_mut() {
+            if range.start <= last.end.saturating_add(maximum_gap) {
+                last.end = last.end.max(range.end);
+                continue;
+            }
+        }
+        merged.push(range);
+    }
+    merged
+}
+
+#[cfg(feature = "ml")]
+fn split_long_speech_ranges(
+    ranges: Vec<std::ops::Range<usize>>,
+    sample_rate: u32,
+    maximum_window_seconds: f32,
+) -> Vec<std::ops::Range<usize>> {
+    if sample_rate == 0 {
+        return ranges;
+    }
+
+    let maximum_samples = seconds_to_sample_count(maximum_window_seconds.max(1.0), sample_rate);
+    let mut split = Vec::new();
+    for range in ranges.into_iter().filter(|range| range.start < range.end) {
+        let length = range.end - range.start;
+        if length <= maximum_samples {
+            split.push(range);
+            continue;
+        }
+
+        let parts = length.div_ceil(maximum_samples).max(1);
+        let part_samples = length.div_ceil(parts);
+        let mut start = range.start;
+        while start < range.end {
+            let end = start.saturating_add(part_samples).min(range.end);
+            split.push(start..end);
+            start = end;
+        }
+    }
+    split
+}
+
+#[cfg(feature = "ml")]
+pub fn write_pcm16_wav_mono(path: &Path, sample_rate: u32, samples: &[f32]) -> AppResult<()> {
     let spec = hound::WavSpec {
         channels: 1,
         sample_rate,

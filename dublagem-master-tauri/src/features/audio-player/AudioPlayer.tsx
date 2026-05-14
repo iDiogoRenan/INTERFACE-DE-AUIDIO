@@ -15,6 +15,15 @@ interface AudioPlayerProps {
   title: string;
   path: string | null;
   revision?: number;
+  playbackRequest?: AudioPlaybackRequest | null;
+}
+
+export interface AudioPlaybackRequest {
+  id: number;
+  path: string;
+  startSeconds: number;
+  endSeconds: number | null;
+  autoplay: boolean;
 }
 
 interface PreviewState {
@@ -85,9 +94,16 @@ function reportAudioContextReleaseFailure(unknownError: unknown): void {
   console.error("Falha ao liberar recursos do analisador de audio.", unknownError);
 }
 
-export function AudioPlayer({ title, path, revision = 0 }: AudioPlayerProps) {
+export function AudioPlayer({
+  title,
+  path,
+  revision = 0,
+  playbackRequest = null
+}: AudioPlayerProps) {
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const handledPlaybackRequestIdRef = useRef<number | null>(null);
+  const completedPlaybackRequestIdRef = useRef<number | null>(null);
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
   const [nativeDuration, setNativeDuration] = useState(0);
@@ -264,6 +280,39 @@ export function AudioPlayer({ title, path, revision = 0 }: AudioPlayerProps) {
   }, [renderWaveform]);
 
   useEffect(() => {
+    const audio = audioRef.current;
+    const request = playbackRequest;
+    if (
+      !audio ||
+      !source ||
+      request?.path !== path ||
+      handledPlaybackRequestIdRef.current === request.id
+    ) {
+      return;
+    }
+
+    handledPlaybackRequestIdRef.current = request.id;
+    completedPlaybackRequestIdRef.current = null;
+    const boundedStart = clampTime(request.startSeconds, normalizeDuration(audio.duration));
+    audio.currentTime = boundedStart;
+    setCurrentTime(boundedStart);
+
+    if (!request.autoplay) {
+      return;
+    }
+
+    setPlaybackError(null);
+    void audio
+      .play()
+      .then(() => {
+        setIsPlaying(true);
+      })
+      .catch((unknownError: unknown) => {
+        setPlaybackError({ path, message: errorMessage(unknownError) });
+      });
+  }, [path, playbackRequest, source]);
+
+  useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) {
       return;
@@ -402,7 +451,24 @@ export function AudioPlayer({ title, path, revision = 0 }: AudioPlayerProps) {
             setNativeDuration(normalizeDuration(event.currentTarget.duration));
           }}
           onTimeUpdate={(event) => {
-            setCurrentTime(event.currentTarget.currentTime);
+            const nextTime = event.currentTarget.currentTime;
+            const request = playbackRequest;
+            if (
+              request !== null &&
+              request.endSeconds !== null &&
+              nextTime >= request.endSeconds &&
+              completedPlaybackRequestIdRef.current !== request.id
+            ) {
+              completedPlaybackRequestIdRef.current = request.id;
+              const boundedEnd = clampTime(request.endSeconds, durationSeconds);
+              event.currentTarget.currentTime = boundedEnd;
+              event.currentTarget.pause();
+              setCurrentTime(boundedEnd);
+              setIsPlaying(false);
+              return;
+            }
+
+            setCurrentTime(nextTime);
           }}
           onPause={() => {
             setIsPlaying(false);
@@ -471,6 +537,18 @@ function normalizeDuration(durationSeconds: number): number {
   }
 
   return durationSeconds;
+}
+
+function clampTime(timeSeconds: number, durationSeconds: number): number {
+  if (!Number.isFinite(timeSeconds) || timeSeconds <= 0) {
+    return 0;
+  }
+
+  if (durationSeconds <= 0) {
+    return timeSeconds;
+  }
+
+  return Math.min(timeSeconds, durationSeconds);
 }
 
 function withRevision(source: string, revision: number): string {

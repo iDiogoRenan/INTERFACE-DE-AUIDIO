@@ -104,6 +104,13 @@ pub const OMNIVOICE_MAX_SYNTHESIS_SECONDS: f32 = 30.0;
 pub const MIN_SYNTHESIS_CHUNKS: u32 = 1;
 pub const DEFAULT_MAX_SYNTHESIS_CHUNKS: u32 = MIN_SYNTHESIS_CHUNKS;
 pub const MAX_SYNTHESIS_CHUNKS: u32 = 20;
+pub const DEFAULT_ACCEPT_DURATION_DIFF_PERCENT: f32 = 5.0;
+pub const DEFAULT_LIGHT_STRETCH_DIFF_PERCENT: f32 = 10.0;
+pub const DEFAULT_MAX_STRETCH_DIFF_PERCENT: f32 = 20.0;
+pub const DEFAULT_MAX_TIMING_REGENERATION_ATTEMPTS: u32 = 3;
+pub const DEFAULT_ALIGNMENT_FADE_MS: u32 = 50;
+pub const DEFAULT_ALIGNMENT_CROSSFADE_MS: u32 = 35;
+pub const DEFAULT_MIN_TAIL_MS: u32 = 200;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -299,8 +306,139 @@ pub enum AudioFileStatus {
     Approved,
     Rejected,
     Ignored,
+    AwaitingConfirmation,
+    Cancelled,
+    ChunkLimitExceeded,
+    BatchProcessed,
     MissingSource,
     Failed,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChunkLimitPolicy {
+    WarnAndContinue,
+    #[default]
+    ProcessInBatches,
+    RequireConfirmation,
+    ResegmentFirst,
+    CancelWithRecord,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TimingAlignmentOptions {
+    #[serde(default = "default_accept_duration_diff_percent")]
+    pub accept_duration_diff_percent: f32,
+    #[serde(default = "default_light_stretch_diff_percent")]
+    pub light_stretch_diff_percent: f32,
+    #[serde(default = "default_max_stretch_diff_percent")]
+    pub max_stretch_diff_percent: f32,
+    #[serde(default = "default_max_timing_regeneration_attempts")]
+    pub max_regeneration_attempts: u32,
+    #[serde(default = "default_true")]
+    pub auto_text_adaptation: bool,
+    #[serde(default = "default_true")]
+    pub preserve_original_pauses: bool,
+    #[serde(default = "default_true")]
+    pub prevent_overlap: bool,
+    #[serde(default = "default_alignment_fade_ms")]
+    pub fade_out_ms: u32,
+    #[serde(default = "default_alignment_crossfade_ms")]
+    pub crossfade_ms: u32,
+    #[serde(default = "default_true")]
+    pub normalize_loudness: bool,
+    #[serde(default = "default_true")]
+    pub block_export_on_critical_chunks: bool,
+    #[serde(default = "default_min_tail_ms")]
+    pub min_tail_ms: u32,
+    #[serde(default)]
+    pub chunk_limit_policy: ChunkLimitPolicy,
+}
+
+impl Default for TimingAlignmentOptions {
+    fn default() -> Self {
+        Self {
+            accept_duration_diff_percent: default_accept_duration_diff_percent(),
+            light_stretch_diff_percent: default_light_stretch_diff_percent(),
+            max_stretch_diff_percent: default_max_stretch_diff_percent(),
+            max_regeneration_attempts: default_max_timing_regeneration_attempts(),
+            auto_text_adaptation: true,
+            preserve_original_pauses: true,
+            prevent_overlap: true,
+            fade_out_ms: default_alignment_fade_ms(),
+            crossfade_ms: default_alignment_crossfade_ms(),
+            normalize_loudness: true,
+            block_export_on_critical_chunks: true,
+            min_tail_ms: default_min_tail_ms(),
+            chunk_limit_policy: ChunkLimitPolicy::default(),
+        }
+    }
+}
+
+impl TimingAlignmentOptions {
+    pub fn validate(&self) -> Result<(), String> {
+        validate_range(
+            "acceptDurationDiffPercent",
+            self.accept_duration_diff_percent,
+            0.0,
+            100.0,
+        )?;
+        validate_range(
+            "lightStretchDiffPercent",
+            self.light_stretch_diff_percent,
+            self.accept_duration_diff_percent,
+            100.0,
+        )?;
+        validate_range(
+            "maxStretchDiffPercent",
+            self.max_stretch_diff_percent,
+            self.light_stretch_diff_percent,
+            100.0,
+        )?;
+        validate_integer_range(
+            "maxRegenerationAttempts",
+            self.max_regeneration_attempts,
+            1,
+            10,
+        )?;
+        validate_integer_range("fadeOutMs", self.fade_out_ms, 0, 500)?;
+        validate_integer_range("crossfadeMs", self.crossfade_ms, 0, 500)?;
+        validate_integer_range("minTailMs", self.min_tail_ms, 0, 1_000)?;
+        Ok(())
+    }
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_accept_duration_diff_percent() -> f32 {
+    DEFAULT_ACCEPT_DURATION_DIFF_PERCENT
+}
+
+fn default_light_stretch_diff_percent() -> f32 {
+    DEFAULT_LIGHT_STRETCH_DIFF_PERCENT
+}
+
+fn default_max_stretch_diff_percent() -> f32 {
+    DEFAULT_MAX_STRETCH_DIFF_PERCENT
+}
+
+fn default_max_timing_regeneration_attempts() -> u32 {
+    DEFAULT_MAX_TIMING_REGENERATION_ATTEMPTS
+}
+
+fn default_alignment_fade_ms() -> u32 {
+    DEFAULT_ALIGNMENT_FADE_MS
+}
+
+fn default_alignment_crossfade_ms() -> u32 {
+    DEFAULT_ALIGNMENT_CROSSFADE_MS
+}
+
+fn default_min_tail_ms() -> u32 {
+    DEFAULT_MIN_TAIL_MS
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -320,6 +458,8 @@ pub struct DubbingOptions {
     pub preserve_sentence_boundaries: bool,
     #[serde(default)]
     pub native_synthesis: NativeSynthesisSettings,
+    #[serde(default)]
+    pub timing_alignment: TimingAlignmentOptions,
 }
 
 impl Default for DubbingOptions {
@@ -336,6 +476,7 @@ impl Default for DubbingOptions {
             max_synthesis_chunks: default_max_synthesis_chunks(),
             preserve_sentence_boundaries: false,
             native_synthesis: NativeSynthesisSettings::default(),
+            timing_alignment: TimingAlignmentOptions::default(),
         }
     }
 }
@@ -343,6 +484,7 @@ impl Default for DubbingOptions {
 impl DubbingOptions {
     pub fn validate(&self) -> Result<(), String> {
         self.native_synthesis.validate()?;
+        self.timing_alignment.validate()?;
         validate_integer_range(
             "maxSynthesisChunks",
             self.max_synthesis_chunks,
@@ -658,6 +800,82 @@ pub struct DubbingJobEvent {
     pub target_text: Option<String>,
     pub output_path: Option<PathBuf>,
     pub output_status: Option<AudioFileStatus>,
+    #[serde(default)]
+    pub alignment_report: Option<TimingAlignmentReport>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TimingChunkStatus {
+    Ok,
+    TimeStretched,
+    Regenerated,
+    TextAdapted,
+    OutOfLimit,
+    NeedsManualReview,
+    OverlapRisk,
+    AbruptEndingDetected,
+    BadReference,
+    TtsFailed,
+    ChunkLimitExceeded,
+    AwaitingConfirmation,
+    BatchProcessed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TimingAdjustmentAction {
+    Accepted,
+    TimeStretched,
+    TextAdapted,
+    Regenerated,
+    FadeApplied,
+    LoudnessNormalized,
+    TailPreserved,
+    BatchQueued,
+    ManualReviewRequired,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TimingAlignmentChunkReport {
+    pub segment_id: String,
+    pub audio_id: String,
+    pub chunk_index: usize,
+    pub total_chunks: usize,
+    pub start_original: f64,
+    pub end_original: f64,
+    pub duration_original: f64,
+    pub texto_original_en: String,
+    pub texto_ptbr: String,
+    pub original_segment_path: Option<PathBuf>,
+    pub dubbed_segment_path: Option<PathBuf>,
+    pub duration_generated: Option<f64>,
+    pub duration_difference_percent: Option<f32>,
+    pub statuses: Vec<TimingChunkStatus>,
+    pub actions_applied: Vec<TimingAdjustmentAction>,
+    pub model_used: SpeechModelId,
+    pub attempts: u32,
+    pub failure_reason: Option<String>,
+    pub stretch_ratio: Option<f32>,
+    pub overlap_seconds: Option<f64>,
+    pub abrupt_ending_detected: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TimingAlignmentReport {
+    pub audio_id: String,
+    pub file_name: String,
+    pub model_used: SpeechModelId,
+    pub total_chunks: usize,
+    pub configured_chunk_limit: u32,
+    pub chunk_limit_policy: ChunkLimitPolicy,
+    pub chunk_limit_exceeded: bool,
+    pub processed_in_batches: bool,
+    pub has_critical_chunks: bool,
+    pub warnings: Vec<String>,
+    pub chunks: Vec<TimingAlignmentChunkReport>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

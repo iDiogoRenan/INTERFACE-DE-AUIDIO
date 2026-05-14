@@ -147,12 +147,16 @@
   color: var(--success);
 }
 
-.status[data-status="ignored"] {
+.status[data-status="ignored"],
+.status[data-status="awaiting_confirmation"],
+.status[data-status="chunk_limit_exceeded"],
+.status[data-status="batch_processed"] {
   color: var(--warning);
 }
 
 .status[data-status="failed"],
-.status[data-status="rejected"] {
+.status[data-status="rejected"],
+.status[data-status="cancelled"] {
   color: var(--danger);
 }
 

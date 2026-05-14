@@ -92,11 +92,6 @@ pub fn output_artifact_for_source(
     OutputArtifact::pending()
 }
 
-pub fn copy_to_ignored(source: &Path, output_dir: &Path, file_name: &str) -> AppResult<PathBuf> {
-    let target = ignored_output_path(output_dir, file_name);
-    copy_output_artifact(source, target)
-}
-
 pub fn copy_to_rejected(source: &Path, output_dir: &Path) -> AppResult<PathBuf> {
     let file_name = source
         .file_name()

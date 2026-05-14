@@ -12,7 +12,7 @@ use crate::{
 use chrono::{SecondsFormat, Utc};
 use dublagem_domain::{
     AudioFileStatus, DubbingJobEvent, DubbingOptions, DubbingRequest, JobEventKind, JobId,
-    JobStage, LanguageCode, LineSynthesisOverride, TranslationRequest,
+    JobStage, LanguageCode, LineSynthesisOverride, TimingAlignmentReport, TranslationRequest,
 };
 use std::{
     collections::HashMap,
@@ -235,23 +235,60 @@ async fn run_job(
             }
         };
 
-        if let Some(reason) = ignored_source_audio_reason_for_duration(
+        if let Some(required_chunks) = required_chunks_over_configured_limit(
             source_metadata.duration_seconds,
-            request.options.max_synthesis_chunks,
+            &request.options,
         ) {
-            output_layout::remove_approved_outputs(
-                &request.output_dir,
-                &context.file_name,
-                Some(&source_metadata),
-            )?;
-            let output_path = output_layout::copy_to_ignored(
-                input_path,
-                &request.output_dir,
-                &context.file_name,
-            )?;
-            emit_ignored_file(&app, job_id, &context, reason.clone(), output_path)?;
-            emit_progress(&app, job_id, context.progress(100), Some(&context))?;
-            continue;
+            let message =
+                chunk_limit_message(required_chunks, request.options.max_synthesis_chunks);
+            match request.options.timing_alignment.chunk_limit_policy {
+                dublagem_domain::ChunkLimitPolicy::RequireConfirmation => {
+                    emit_status_file(
+                        &app,
+                        job_id,
+                        &context,
+                        format!("{message} Aguardando confirmação manual antes de processar."),
+                        AudioFileStatus::AwaitingConfirmation,
+                    )?;
+                    emit_progress(&app, job_id, context.progress(100), Some(&context))?;
+                    continue;
+                }
+                dublagem_domain::ChunkLimitPolicy::CancelWithRecord => {
+                    emit_status_file(
+                        &app,
+                        job_id,
+                        &context,
+                        format!("{message} Processamento cancelado pela política configurada."),
+                        AudioFileStatus::Cancelled,
+                    )?;
+                    emit_progress(&app, job_id, context.progress(100), Some(&context))?;
+                    continue;
+                }
+                dublagem_domain::ChunkLimitPolicy::ResegmentFirst => emit_stage(
+                    &app,
+                    job_id,
+                    JobStage::PreparingFile,
+                    format!("{message} O pipeline tentará resegmentar antes da síntese."),
+                    Some(context.progress(8)),
+                    Some(&context),
+                )?,
+                dublagem_domain::ChunkLimitPolicy::ProcessInBatches => emit_stage(
+                    &app,
+                    job_id,
+                    JobStage::PreparingFile,
+                    format!("{message} O processamento continuará em múltiplos lotes temporais."),
+                    Some(context.progress(8)),
+                    Some(&context),
+                )?,
+                dublagem_domain::ChunkLimitPolicy::WarnAndContinue => emit_stage(
+                    &app,
+                    job_id,
+                    JobStage::PreparingFile,
+                    format!("{message} Continuando conforme configurado."),
+                    Some(context.progress(8)),
+                    Some(&context),
+                )?,
+            }
         }
 
         if !speech_engines_validated {
@@ -373,13 +410,13 @@ async fn run_job(
             hooks: synthesis_hooks,
         })
         .await?;
-        match synthesis_result {
-            V14SynthesisOutcome::Accepted => {}
+        let alignment_report = match synthesis_result {
+            V14SynthesisOutcome::Accepted(report) => report,
             V14SynthesisOutcome::Cancelled => {
                 emit_cancelled(&app, job_id, Some(&context))?;
                 return Ok(());
             }
-            V14SynthesisOutcome::Rejected(reason) => {
+            V14SynthesisOutcome::Rejected(reason, report) => {
                 output_layout::remove_ignored_and_rejected(
                     &request.output_dir,
                     &context.file_name,
@@ -398,15 +435,18 @@ async fn run_job(
                     &app,
                     job_id,
                     &context,
-                    reason,
-                    rejected_path,
-                    &source_text,
-                    Some(&target_text),
+                    RejectedFileEvent {
+                        reason,
+                        output_path: rejected_path,
+                        source_text: &source_text,
+                        target_text: Some(&target_text),
+                        alignment_report: report,
+                    },
                 )?;
                 emit_progress(&app, job_id, context.progress(100), Some(&context))?;
                 continue;
             }
-        }
+        };
         output_layout::remove_ignored_and_rejected(&request.output_dir, &context.file_name)?;
 
         emit_stage(
@@ -437,7 +477,8 @@ async fn run_job(
             )
             .with_text(Some(source_text), Some(target_text))
             .with_output_path(output_path)
-            .with_output_status(AudioFileStatus::Dubbed),
+            .with_output_status(AudioFileStatus::Dubbed)
+            .with_alignment_report(Some(alignment_report)),
         )?;
         emit_progress(&app, job_id, context.progress(100), Some(&context))?;
     }
@@ -721,10 +762,10 @@ struct V14OutputValidation {
     native_tag_literal_detected: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 enum V14SynthesisOutcome {
-    Accepted,
-    Rejected(String),
+    Accepted(TimingAlignmentReport),
+    Rejected(String, Option<TimingAlignmentReport>),
     Cancelled,
 }
 
@@ -748,7 +789,7 @@ async fn synthesize_with_v14_guard(job: V14SynthesisJob<'_>) -> AppResult<V14Syn
 
     let primary_native_tags =
         native_tags_for_v14_attempt(job.target_text, job.pinned_tags, job.line_overrides);
-    if !synthesize_v14_once(V14SynthesisAttempt {
+    let Some(primary_report) = synthesize_v14_once(V14SynthesisAttempt {
         job: &job,
         reference_text: &reference_text,
         text: job.target_text,
@@ -758,9 +799,9 @@ async fn synthesize_with_v14_guard(job: V14SynthesisJob<'_>) -> AppResult<V14Syn
         progress: 65,
     })
     .await?
-    {
+    else {
         return Ok(V14SynthesisOutcome::Cancelled);
-    }
+    };
 
     let validation = validate_v14_output(V14ValidationJob {
         app: job.app,
@@ -785,7 +826,10 @@ async fn synthesize_with_v14_guard(job: V14SynthesisJob<'_>) -> AppResult<V14Syn
             Some(job.context.progress(90)),
             Some(job.context),
         )?;
-        return Ok(V14SynthesisOutcome::Accepted);
+        if let Some(reason) = critical_alignment_rejection(&primary_report, job.options) {
+            return Ok(V14SynthesisOutcome::Rejected(reason, Some(primary_report)));
+        }
+        return Ok(V14SynthesisOutcome::Accepted(primary_report));
     }
 
     if validation.native_tag_literal_detected && !primary_native_tags.is_empty() {
@@ -801,7 +845,7 @@ async fn synthesize_with_v14_guard(job: V14SynthesisJob<'_>) -> AppResult<V14Syn
         let fallback_target_text = dublagem_domain::strip_omnivoice_native_tags(job.target_text);
         let fallback_pinned_tags = Vec::<String>::new();
         let fallback_line_overrides = speakable_line_overrides(job.line_overrides);
-        if !synthesize_v14_once(V14SynthesisAttempt {
+        let Some(fallback_report) = synthesize_v14_once(V14SynthesisAttempt {
             job: &job,
             reference_text: &reference_text,
             text: &fallback_target_text,
@@ -811,9 +855,9 @@ async fn synthesize_with_v14_guard(job: V14SynthesisJob<'_>) -> AppResult<V14Syn
             progress: 74,
         })
         .await?
-        {
+        else {
             return Ok(V14SynthesisOutcome::Cancelled);
-        }
+        };
 
         let fallback_validation = validate_v14_output(V14ValidationJob {
             app: job.app,
@@ -841,19 +885,25 @@ async fn synthesize_with_v14_guard(job: V14SynthesisJob<'_>) -> AppResult<V14Syn
                 Some(job.context.progress(90)),
                 Some(job.context),
             )?;
-            return Ok(V14SynthesisOutcome::Accepted);
+            if let Some(reason) = critical_alignment_rejection(&fallback_report, job.options) {
+                return Ok(V14SynthesisOutcome::Rejected(reason, Some(fallback_report)));
+            }
+            return Ok(V14SynthesisOutcome::Accepted(fallback_report));
         }
 
-        return Ok(V14SynthesisOutcome::Rejected(format!(
-            "Síntese v14 reprovada após fallback sem tags: {}",
-            fallback_validation.message
-        )));
+        return Ok(V14SynthesisOutcome::Rejected(
+            format!(
+                "Síntese v14 reprovada após fallback sem tags: {}",
+                fallback_validation.message
+            ),
+            Some(fallback_report),
+        ));
     }
 
-    Ok(V14SynthesisOutcome::Rejected(format!(
-        "Síntese v14 reprovada: {}",
-        validation.message
-    )))
+    Ok(V14SynthesisOutcome::Rejected(
+        format!("Síntese v14 reprovada: {}", validation.message),
+        Some(primary_report),
+    ))
 }
 
 struct V14SynthesisAttempt<'a, 'b> {
@@ -866,7 +916,9 @@ struct V14SynthesisAttempt<'a, 'b> {
     progress: u8,
 }
 
-async fn synthesize_v14_once(attempt: V14SynthesisAttempt<'_, '_>) -> AppResult<bool> {
+async fn synthesize_v14_once(
+    attempt: V14SynthesisAttempt<'_, '_>,
+) -> AppResult<Option<TimingAlignmentReport>> {
     let job = attempt.job;
     remove_file_if_exists(job.output_path)?;
     emit_stage(
@@ -889,7 +941,7 @@ async fn synthesize_v14_once(attempt: V14SynthesisAttempt<'_, '_>) -> AppResult<
     let synthesizer =
         load_synthesizer_for_stage(&speech_stage, job.context.progress(attempt.progress)).await?;
     let Some(synthesizer) = synthesizer else {
-        return Ok(false);
+        return Ok(None);
     };
 
     let synth_result = cancellable_phase(
@@ -901,6 +953,7 @@ async fn synthesize_v14_once(attempt: V14SynthesisAttempt<'_, '_>) -> AppResult<
         SYNTHESIS_TIMEOUT,
         synthesizer.synthesize(SynthesisRequest {
             text: attempt.text,
+            source_text: job.source_text,
             source_audio: job.source_audio,
             reference_audio: job.reference_audio,
             reference_text: attempt.reference_text,
@@ -914,19 +967,47 @@ async fn synthesize_v14_once(attempt: V14SynthesisAttempt<'_, '_>) -> AppResult<
     .await;
 
     match synth_result {
-        Ok(Some(())) => {}
-        Ok(None) => return Ok(false),
-        Err(_) if job.cancellation.is_cancelled() => return Ok(false),
-        Err(error) => return Err(error),
+        Ok(Some(report)) => {
+            if !job.output_path.is_file() {
+                return Err(AppError::Internal(format!(
+                    "síntese OmniVoice finalizou sem escrever o arquivo de saída em {}",
+                    job.output_path.display()
+                )));
+            }
+            Ok(Some(report))
+        }
+        Ok(None) => Ok(None),
+        Err(_) if job.cancellation.is_cancelled() => Ok(None),
+        Err(error) => Err(error),
     }
-    if !job.output_path.is_file() {
-        return Err(AppError::Internal(format!(
-            "síntese OmniVoice finalizou sem escrever o arquivo de saída em {}",
-            job.output_path.display()
-        )));
+}
+
+fn critical_alignment_rejection(
+    report: &TimingAlignmentReport,
+    options: &DubbingOptions,
+) -> Option<String> {
+    if !options.timing_alignment.block_export_on_critical_chunks || !report.has_critical_chunks {
+        return None;
     }
 
-    Ok(true)
+    let critical_count = report
+        .chunks
+        .iter()
+        .filter(|chunk| {
+            chunk.statuses.iter().any(|status| {
+                matches!(
+                    status,
+                    dublagem_domain::TimingChunkStatus::OutOfLimit
+                        | dublagem_domain::TimingChunkStatus::NeedsManualReview
+                        | dublagem_domain::TimingChunkStatus::OverlapRisk
+                        | dublagem_domain::TimingChunkStatus::TtsFailed
+                )
+            })
+        })
+        .count();
+    Some(format!(
+        "Alinhamento temporal bloqueou a exportação: {critical_count} chunk(s) crítico(s) precisam de revisão."
+    ))
 }
 
 fn native_tags_for_v14_attempt(
@@ -1681,6 +1762,7 @@ trait JobEventExt {
     fn with_output_path(self, output_path: impl Into<std::path::PathBuf>) -> Self;
     fn with_output_status(self, status: AudioFileStatus) -> Self;
     fn with_total_files(self, total_files: usize) -> Self;
+    fn with_alignment_report(self, report: Option<TimingAlignmentReport>) -> Self;
 }
 
 impl JobEventExt for DubbingJobEvent {
@@ -1704,6 +1786,11 @@ impl JobEventExt for DubbingJobEvent {
         self.total_files = Some(total_files);
         self
     }
+
+    fn with_alignment_report(mut self, report: Option<TimingAlignmentReport>) -> Self {
+        self.alignment_report = report;
+        self
+    }
 }
 
 fn apply_text_options(
@@ -1725,47 +1812,19 @@ fn apply_text_options(
     Ok(target_text)
 }
 
-fn ignored_source_audio_reason_for_duration(
+fn required_chunks_over_configured_limit(
     duration_seconds: Option<f64>,
-    max_synthesis_chunks: u32,
-) -> Option<String> {
+    options: &DubbingOptions,
+) -> Option<usize> {
     let duration_seconds =
         duration_seconds.filter(|seconds| seconds.is_finite() && *seconds > 0.0)?;
-    let max_duration_seconds =
-        dublagem_domain::max_synthesis_duration_seconds(max_synthesis_chunks);
-
-    if duration_seconds <= max_duration_seconds {
-        return None;
-    }
-
     let required_chunks = output_layout::chunk_count_for_duration_seconds(Some(duration_seconds));
-    Some(format!(
-        "Ignorado: áudio com {duration_seconds:.2}s exige {required_chunks} chunk(s) de {:.2}s, acima do máximo configurado de {}.",
-        dublagem_domain::OMNIVOICE_MAX_SYNTHESIS_SECONDS,
-        max_synthesis_chunks
-    ))
+    (required_chunks > options.max_synthesis_chunks.max(1) as usize).then_some(required_chunks)
 }
 
-fn emit_ignored_file(
-    app: &AppHandle,
-    job_id: JobId,
-    context: &FileContext,
-    reason: String,
-    output_path: PathBuf,
-) -> AppResult<()> {
-    emit(
-        app,
-        EVENT_FILE_COMPLETE,
-        event(
-            job_id,
-            JobEventKind::FileComplete,
-            Some(JobStage::FileComplete),
-            reason,
-            Some(context.progress(100)),
-            Some(context),
-        )
-        .with_output_path(output_path)
-        .with_output_status(AudioFileStatus::Ignored),
+fn chunk_limit_message(required_chunks: usize, configured_limit: u32) -> String {
+    format!(
+        "Este áudio precisa de {required_chunks} chunk(s), acima do limite configurado de {configured_limit}."
     )
 }
 
@@ -1790,14 +1849,12 @@ fn emit_failed_file(
     )
 }
 
-fn emit_rejected_file(
+fn emit_status_file(
     app: &AppHandle,
     job_id: JobId,
     context: &FileContext,
-    reason: String,
-    output_path: PathBuf,
-    source_text: &str,
-    target_text: Option<&str>,
+    message: String,
+    status: AudioFileStatus,
 ) -> AppResult<()> {
     emit(
         app,
@@ -1806,16 +1863,46 @@ fn emit_rejected_file(
             job_id,
             JobEventKind::FileComplete,
             Some(JobStage::FileComplete),
-            reason,
+            message,
+            Some(context.progress(100)),
+            Some(context),
+        )
+        .with_output_status(status),
+    )
+}
+
+struct RejectedFileEvent<'a> {
+    reason: String,
+    output_path: PathBuf,
+    source_text: &'a str,
+    target_text: Option<&'a str>,
+    alignment_report: Option<TimingAlignmentReport>,
+}
+
+fn emit_rejected_file(
+    app: &AppHandle,
+    job_id: JobId,
+    context: &FileContext,
+    rejected: RejectedFileEvent<'_>,
+) -> AppResult<()> {
+    emit(
+        app,
+        EVENT_FILE_COMPLETE,
+        event(
+            job_id,
+            JobEventKind::FileComplete,
+            Some(JobStage::FileComplete),
+            rejected.reason,
             Some(context.progress(100)),
             Some(context),
         )
         .with_text(
-            Some(source_text.to_string()),
-            target_text.map(str::to_string),
+            Some(rejected.source_text.to_string()),
+            rejected.target_text.map(str::to_string),
         )
-        .with_output_path(output_path)
-        .with_output_status(AudioFileStatus::Rejected),
+        .with_output_path(rejected.output_path)
+        .with_output_status(AudioFileStatus::Rejected)
+        .with_alignment_report(rejected.alignment_report),
     )
 }
 
@@ -1936,6 +2023,7 @@ fn event(
         target_text: None,
         output_path: None,
         output_status: None,
+        alignment_report: None,
     }
 }
 
@@ -2079,15 +2167,22 @@ mod tests {
     }
 
     #[test]
-    fn chunk_budget_ignores_only_audio_above_configured_duration() {
-        assert!(ignored_source_audio_reason_for_duration(Some(30.0), 1).is_none());
-        assert!(ignored_source_audio_reason_for_duration(Some(60.0), 2).is_none());
+    fn chunk_budget_reports_over_limit_without_discard_reason() {
+        let options = DubbingOptions {
+            max_synthesis_chunks: 2,
+            ..DubbingOptions::default()
+        };
 
-        let reason =
-            ignored_source_audio_reason_for_duration(Some(60.01), 2).expect("ignored reason");
-
-        assert!(reason.contains("exige 3 chunk(s)"));
-        assert!(reason.contains("máximo configurado de 2"));
+        assert!(required_chunks_over_configured_limit(Some(30.0), &options).is_none());
+        assert!(required_chunks_over_configured_limit(Some(60.0), &options).is_none());
+        assert_eq!(
+            required_chunks_over_configured_limit(Some(60.01), &options),
+            Some(3)
+        );
+        assert_eq!(
+            chunk_limit_message(3, options.max_synthesis_chunks),
+            "Este áudio precisa de 3 chunk(s), acima do limite configurado de 2."
+        );
     }
 
     #[test]

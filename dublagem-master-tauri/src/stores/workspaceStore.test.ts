@@ -817,6 +817,7 @@ function jobEvent(patch: Partial<DubbingJobEvent>): DubbingJobEvent {
     targetText: null,
     outputPath: null,
     outputStatus: null,
+    alignmentReport: null,
     ...patch
   };
 }

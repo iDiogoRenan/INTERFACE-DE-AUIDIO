@@ -457,6 +457,147 @@
   padding: 10px;
 }
 
+.timelinePanel {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+  max-height: 260px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  background: var(--surface-1);
+  padding: 10px;
+}
+
+.timelinePanel header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.timelinePanel header div {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.timelinePanel header span,
+.timelinePanel dt {
+  color: var(--text-muted);
+  font-size: 10px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.timelinePanel header strong {
+  color: var(--text);
+  font-size: 13px;
+}
+
+.timelinePanel header output {
+  border: 1px solid color-mix(in srgb, var(--success) 55%, var(--border));
+  color: var(--success);
+  padding: 5px 8px;
+  font-size: 11px;
+  font-weight: 850;
+}
+
+.timelinePanel header output[data-critical="true"] {
+  border-color: color-mix(in srgb, var(--danger) 60%, var(--border));
+  color: var(--danger);
+}
+
+.timelineWarnings {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  color: var(--warning);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.timelineRows {
+  display: grid;
+  gap: 8px;
+  min-height: 0;
+  overflow: auto;
+}
+
+.timelineRow {
+  display: grid;
+  gap: 8px;
+  border: 1px solid var(--border);
+  background: var(--surface-0);
+  padding: 8px;
+}
+
+.timelineChunkHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.timelineChunkHeader strong,
+.timelineChunkHeader span {
+  font-size: 12px;
+  font-weight: 850;
+}
+
+.timelineChunkHeader span {
+  color: var(--accent);
+}
+
+.timelineRow dl {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(72px, 1fr));
+  gap: 6px;
+  margin: 0;
+}
+
+.timelineRow dd {
+  margin: 2px 0 0;
+  color: var(--text);
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 11px;
+}
+
+.timelineRow p {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.timelineActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.timelineActions button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 30px;
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  color: var(--text);
+  padding: 0 9px;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 750;
+}
+
+.timelineActions button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
 .spin {
   animation: spin 1s linear infinite;
 }

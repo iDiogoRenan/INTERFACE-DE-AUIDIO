@@ -8,8 +8,42 @@ export type AudioFileStatus =
   | "approved"
   | "rejected"
   | "ignored"
+  | "awaiting_confirmation"
+  | "cancelled"
+  | "chunk_limit_exceeded"
+  | "batch_processed"
   | "missing_source"
   | "failed";
+export type ChunkLimitPolicy =
+  | "warn_and_continue"
+  | "process_in_batches"
+  | "require_confirmation"
+  | "resegment_first"
+  | "cancel_with_record";
+export type TimingChunkStatus =
+  | "ok"
+  | "time_stretched"
+  | "regenerated"
+  | "text_adapted"
+  | "out_of_limit"
+  | "needs_manual_review"
+  | "overlap_risk"
+  | "abrupt_ending_detected"
+  | "bad_reference"
+  | "tts_failed"
+  | "chunk_limit_exceeded"
+  | "awaiting_confirmation"
+  | "batch_processed";
+export type TimingAdjustmentAction =
+  | "accepted"
+  | "time_stretched"
+  | "text_adapted"
+  | "regenerated"
+  | "fade_applied"
+  | "loudness_normalized"
+  | "tail_preserved"
+  | "batch_queued"
+  | "manual_review_required";
 export type JobEventKind =
   | "stage"
   | "transcription"
@@ -47,6 +81,7 @@ export interface DubbingOptions {
   maxSynthesisChunks: number;
   preserveSentenceBoundaries: boolean;
   nativeSynthesis: NativeSynthesisSettings;
+  timingAlignment: TimingAlignmentOptions;
 }
 
 export interface NativeSynthesisSettings {
@@ -70,6 +105,22 @@ export interface NativeSynthesisSettings {
 
 export interface SpeechModelPreset {
   nativeSynthesis: NativeSynthesisSettings;
+}
+
+export interface TimingAlignmentOptions {
+  acceptDurationDiffPercent: number;
+  lightStretchDiffPercent: number;
+  maxStretchDiffPercent: number;
+  maxRegenerationAttempts: number;
+  autoTextAdaptation: boolean;
+  preserveOriginalPauses: boolean;
+  preventOverlap: boolean;
+  fadeOutMs: number;
+  crossfadeMs: number;
+  normalizeLoudness: boolean;
+  blockExportOnCriticalChunks: boolean;
+  minTailMs: number;
+  chunkLimitPolicy: ChunkLimitPolicy;
 }
 
 export interface AppConfig {
@@ -187,6 +238,45 @@ export interface DubbingJobEvent {
   targetText: string | null;
   outputPath: string | null;
   outputStatus: AudioFileStatus | null;
+  alignmentReport: TimingAlignmentReport | null;
+}
+
+export interface TimingAlignmentChunkReport {
+  segmentId: string;
+  audioId: string;
+  chunkIndex: number;
+  totalChunks: number;
+  startOriginal: number;
+  endOriginal: number;
+  durationOriginal: number;
+  textoOriginalEn: string;
+  textoPtbr: string;
+  originalSegmentPath: string | null;
+  dubbedSegmentPath: string | null;
+  durationGenerated: number | null;
+  durationDifferencePercent: number | null;
+  statuses: TimingChunkStatus[];
+  actionsApplied: TimingAdjustmentAction[];
+  modelUsed: SpeechModelId;
+  attempts: number;
+  failureReason: string | null;
+  stretchRatio: number | null;
+  overlapSeconds: number | null;
+  abruptEndingDetected: boolean;
+}
+
+export interface TimingAlignmentReport {
+  audioId: string;
+  fileName: string;
+  modelUsed: SpeechModelId;
+  totalChunks: number;
+  configuredChunkLimit: number;
+  chunkLimitPolicy: ChunkLimitPolicy;
+  chunkLimitExceeded: boolean;
+  processedInBatches: boolean;
+  hasCriticalChunks: boolean;
+  warnings: string[];
+  chunks: TimingAlignmentChunkReport[];
 }
 
 export const defaultOptions: DubbingOptions = {
@@ -217,5 +307,20 @@ export const defaultOptions: DubbingOptions = {
     outputGainDb: 0,
     sibilanceReduction: 0,
     artifactReduction: 0
+  },
+  timingAlignment: {
+    acceptDurationDiffPercent: 5,
+    lightStretchDiffPercent: 10,
+    maxStretchDiffPercent: 20,
+    maxRegenerationAttempts: 3,
+    autoTextAdaptation: true,
+    preserveOriginalPauses: true,
+    preventOverlap: true,
+    fadeOutMs: 50,
+    crossfadeMs: 35,
+    normalizeLoudness: true,
+    blockExportOnCriticalChunks: true,
+    minTailMs: 200,
+    chunkLimitPolicy: "process_in_batches"
   }
 };

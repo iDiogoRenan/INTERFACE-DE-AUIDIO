@@ -3,14 +3,18 @@ use super::SynthesisHooks;
 use super::{ptbr_voice_profiles, SynthesisRequest, VoiceSynthesizer};
 #[cfg(feature = "ml")]
 use crate::audio::{
-    active_sample_range, audio_timing_profile, ms_to_samples, short_reference_waveform,
-    AudioTimingProfile,
+    active_sample_range, audio_timing_profile, decode_audio_mono_f32, ms_to_samples,
+    short_reference_waveform, speech_windows, write_pcm16_wav_mono, AudioTimingProfile,
+    DecodedAudio as SourceDecodedAudio, SpeechWindow,
 };
 use crate::error::{AppError, AppResult};
 use async_trait::async_trait;
+use dublagem_domain::TimingAlignmentReport;
 #[cfg(feature = "ml")]
 use dublagem_domain::{
-    DubbingOptions, LanguageCode, LineSynthesisOverride, NativeSynthesisSettings, VoiceMode,
+    ChunkLimitPolicy, DubbingOptions, LanguageCode, LineSynthesisOverride, NativeSynthesisSettings,
+    SpeechModelId, TimingAdjustmentAction, TimingAlignmentChunkReport, TimingChunkStatus,
+    VoiceMode, OMNIVOICE_MAX_SYNTHESIS_SECONDS,
 };
 #[cfg(feature = "ml")]
 use omnivoice_infer::{
@@ -28,6 +32,10 @@ use std::sync::{Arc, Mutex};
 
 #[cfg(feature = "ml")]
 const SEGMENT_CROSSFADE_MS: u32 = 35;
+#[cfg(feature = "ml")]
+const MAX_TEMPORAL_CHUNK_SECONDS: f32 = 12.0;
+#[cfg(feature = "ml")]
+const MIN_TEMPORAL_CHUNK_SECONDS: f32 = 1.0;
 
 #[cfg(feature = "ml")]
 struct ShortReferencePrompt {
@@ -41,6 +49,7 @@ type SharedPhase3Pipeline = Arc<Mutex<Phase3Pipeline>>;
 #[cfg(feature = "ml")]
 struct OwnedSynthesisRequest {
     text: String,
+    source_text: String,
     source_audio: PathBuf,
     reference_audio: PathBuf,
     reference_text: String,
@@ -56,6 +65,7 @@ impl OwnedSynthesisRequest {
     fn from_request(request: SynthesisRequest<'_>) -> Self {
         Self {
             text: request.text.to_string(),
+            source_text: request.source_text.to_string(),
             source_audio: request.source_audio.to_path_buf(),
             reference_audio: request.reference_audio.to_path_buf(),
             reference_text: request.reference_text.to_string(),
@@ -98,7 +108,7 @@ impl OmniVoiceCandleSynthesizer {
 
 #[async_trait]
 impl VoiceSynthesizer for OmniVoiceCandleSynthesizer {
-    async fn synthesize(&self, request: SynthesisRequest<'_>) -> AppResult<()> {
+    async fn synthesize(&self, request: SynthesisRequest<'_>) -> AppResult<TimingAlignmentReport> {
         let Some(model_dir) = &self.model_dir else {
             return Err(AppError::SpeechEngineUnavailable(
                 "pasta de modelos não configurada. Selecione a pasta em Ajustes antes de dublar."
@@ -133,7 +143,10 @@ impl VoiceSynthesizer for OmniVoiceCandleSynthesizer {
 }
 
 #[cfg(feature = "ml")]
-async fn synthesize_with_model(model_dir: &Path, request: SynthesisRequest<'_>) -> AppResult<()> {
+async fn synthesize_with_model(
+    model_dir: &Path,
+    request: SynthesisRequest<'_>,
+) -> AppResult<TimingAlignmentReport> {
     let model_dir = model_dir.to_path_buf();
     let request = OwnedSynthesisRequest::from_request(request);
 
@@ -149,7 +162,7 @@ async fn synthesize_with_model(model_dir: &Path, request: SynthesisRequest<'_>) 
 async fn synthesize_with_pipeline(
     pipeline: SharedPhase3Pipeline,
     request: SynthesisRequest<'_>,
-) -> AppResult<()> {
+) -> AppResult<TimingAlignmentReport> {
     let request = OwnedSynthesisRequest::from_request(request);
 
     tauri::async_runtime::spawn_blocking(move || {
@@ -163,7 +176,10 @@ async fn synthesize_with_pipeline(
 }
 
 #[cfg(not(feature = "ml"))]
-async fn synthesize_with_model(_model_dir: &Path, _request: SynthesisRequest<'_>) -> AppResult<()> {
+async fn synthesize_with_model(
+    _model_dir: &Path,
+    _request: SynthesisRequest<'_>,
+) -> AppResult<TimingAlignmentReport> {
     Err(AppError::SpeechEngineUnavailable(
         "compile com --features ml para habilitar Candle/OmniVoice".to_string(),
     ))
@@ -257,11 +273,10 @@ async fn generate_pool_with_model(_model_dir: &Path, output_dir: &Path) -> AppRe
 fn synthesize_blocking_with_pipeline(
     pipeline: &Phase3Pipeline,
     request: OwnedSynthesisRequest,
-) -> AppResult<()> {
+) -> AppResult<TimingAlignmentReport> {
     let timing = audio_timing_profile(&request.source_audio, request.options.pad_ms)?;
-    let target_duration = timing.target_voice_duration_seconds();
-    validate_omnivoice_duration(target_duration)?;
-    let segments = synthesis_segments_for_request(&request, target_duration)?;
+    let total_duration_seconds = timing.total_ms as f32 / 1000.0;
+    let segments = synthesis_segments_for_request(&request, timing)?;
     if segments.is_empty() {
         return Err(AppError::InvalidConfig(
             "texto destino vazio; não há conteúdo para síntese".to_string(),
@@ -287,29 +302,53 @@ fn synthesize_blocking_with_pipeline(
     } else {
         None
     };
-    let mut segment_audio = Vec::with_capacity(segments.len());
+    let chunk_limit_exceeded =
+        segments.len() > request.options.max_synthesis_chunks.max(1) as usize;
+    let processed_in_batches = chunk_limit_exceeded
+        && matches!(
+            request.options.timing_alignment.chunk_limit_policy,
+            ChunkLimitPolicy::ProcessInBatches
+        );
+    let mut placed_segments = Vec::with_capacity(segments.len());
+    let mut chunk_reports = Vec::with_capacity(segments.len());
+    let source_audio = decode_audio_mono_f32(&request.source_audio)?;
+    let artifact_dir = alignment_artifact_dir(&request.output_path);
+    std::fs::create_dir_all(&artifact_dir)?;
+    let artifact_context = SegmentArtifactContext {
+        dir: artifact_dir.as_path(),
+        source_audio: &source_audio,
+    };
 
     for (index, segment) in segments.iter().enumerate() {
         if request.hooks.is_cancelled() {
             return Err(AppError::Internal("síntese cancelada".to_string()));
         }
 
-        let audio = synthesize_segment(
+        let result = synthesize_aligned_segment(
             pipeline,
-            &segment.text,
-            segment.duration_seconds,
-            voice_clone_prompt_for(&segment.settings, voice_clone_prompt.as_ref())?,
             &request.options,
-            &segment.settings,
+            segment,
+            voice_clone_prompt_for(&segment.settings, voice_clone_prompt.as_ref())?,
+            chunk_limit_exceeded,
+            processed_in_batches,
+            artifact_context,
         )?;
-        let audio = apply_segment_audio_polish(audio, &segment.settings);
-        segment_audio.push(audio);
+        placed_segments.push(PlacedTimelineSegment {
+            start_seconds: segment.start_seconds,
+            audio: result.audio,
+        });
+        chunk_reports.push(result.report);
         request.hooks.report(index + 1, segments.len());
     }
 
     let level_settings = audio_level_settings(&segments);
-    let audio = concatenate_segments(segment_audio)?;
-    let audio = apply_original_timing(audio, timing, level_settings);
+    let audio = compose_timeline_audio(
+        placed_segments,
+        total_duration_seconds,
+        timing,
+        level_settings,
+        &request.options,
+    )?;
 
     if let Some(parent) = request
         .output_path
@@ -319,8 +358,28 @@ fn synthesize_blocking_with_pipeline(
         std::fs::create_dir_all(parent)?;
     }
     audio
-        .write_wav(request.output_path)
-        .map_err(map_omnivoice_error)
+        .write_wav(&request.output_path)
+        .map_err(map_omnivoice_error)?;
+
+    let warnings = timing_alignment_warnings(
+        segments.len(),
+        request.options.max_synthesis_chunks,
+        request.options.timing_alignment.chunk_limit_policy,
+    );
+    let has_critical_chunks = chunk_reports.iter().any(chunk_report_is_critical);
+    Ok(TimingAlignmentReport {
+        audio_id: request_audio_id(&request),
+        file_name: request_file_name(&request),
+        model_used: SpeechModelId::OmniVoice,
+        total_chunks: segments.len(),
+        configured_chunk_limit: request.options.max_synthesis_chunks,
+        chunk_limit_policy: request.options.timing_alignment.chunk_limit_policy,
+        chunk_limit_exceeded,
+        processed_in_batches,
+        has_critical_chunks,
+        warnings,
+        chunks: chunk_reports,
+    })
 }
 
 #[cfg(feature = "ml")]
@@ -330,6 +389,38 @@ struct SynthesisSegmentPlan {
     duration_seconds: Option<f32>,
     settings: NativeSynthesisSettings,
     original_duration_seconds: Option<f32>,
+    audio_id: String,
+    source_text: String,
+    start_seconds: f32,
+    end_seconds: f32,
+    chunk_index: usize,
+    total_chunks: usize,
+}
+
+#[cfg(feature = "ml")]
+#[derive(Debug)]
+struct AlignedSegmentResult {
+    audio: DecodedAudio,
+    report: TimingAlignmentChunkReport,
+}
+
+#[cfg(feature = "ml")]
+struct PlacedTimelineSegment {
+    start_seconds: f32,
+    audio: DecodedAudio,
+}
+
+#[cfg(feature = "ml")]
+#[derive(Clone, Copy)]
+struct SegmentArtifactContext<'a> {
+    dir: &'a Path,
+    source_audio: &'a SourceDecodedAudio,
+}
+
+#[cfg(feature = "ml")]
+struct SegmentArtifactPaths {
+    original: PathBuf,
+    dubbed: PathBuf,
 }
 
 #[cfg(feature = "ml")]
@@ -389,28 +480,314 @@ impl AudioLevelSettings {
 #[cfg(feature = "ml")]
 fn synthesis_segments_for_request(
     request: &OwnedSynthesisRequest,
-    target_duration: Option<f32>,
+    timing: AudioTimingProfile,
 ) -> AppResult<Vec<SynthesisSegmentPlan>> {
-    let mut segments = if request.line_overrides.is_empty() {
+    let windows = source_speech_windows(request, timing)?;
+    synthesis_segments_for_windows(request, windows)
+}
+
+#[cfg(feature = "ml")]
+fn synthesis_segments_for_windows(
+    request: &OwnedSynthesisRequest,
+    windows: Vec<SpeechWindow>,
+) -> AppResult<Vec<SynthesisSegmentPlan>> {
+    let textual_segments = if request.line_overrides.is_empty() {
         global_synthesis_segments(request)
     } else {
         line_override_synthesis_segments(request)
     };
-    if segments.is_empty() && !request.text.trim().is_empty() {
-        segments = global_synthesis_segments(request);
+    let textual_segments = if textual_segments.is_empty() && !request.text.trim().is_empty() {
+        global_synthesis_segments(request)
+    } else {
+        textual_segments
+    };
+    if textual_segments.is_empty() || windows.is_empty() {
+        return Ok(Vec::new());
     }
 
-    let single_segment = segments.len() == 1;
-    for segment in &mut segments {
-        segment.duration_seconds = effective_duration(
-            &segment.settings,
-            single_segment.then_some(target_duration).flatten(),
-        );
+    let target_count = alignment_chunk_count(request, &textual_segments, &windows);
+    let windows = rebalance_speech_windows(windows, target_count);
+    let target_texts = rebalance_text_units(
+        textual_segments
+            .iter()
+            .map(|segment| segment.text.clone())
+            .collect(),
+        windows.len(),
+    );
+    let source_texts =
+        rebalance_text_units(split_text_candidates(&request.source_text), windows.len());
+    let total_chunks = windows.len();
+
+    let mut segments = Vec::with_capacity(total_chunks);
+    for (index, window) in windows.into_iter().enumerate() {
+        let settings_index = scaled_source_index(index, textual_segments.len(), total_chunks);
+        let settings = textual_segments
+            .get(settings_index)
+            .map(|segment| segment.settings.clone())
+            .unwrap_or_else(|| request.options.native_synthesis.clone());
+        let duration_seconds = window.duration_seconds();
+        let mut segment = SynthesisSegmentPlan {
+            text: naturalized_terminal_punctuation(
+                target_texts
+                    .get(index)
+                    .map(String::as_str)
+                    .unwrap_or_default(),
+            ),
+            duration_seconds: Some(duration_seconds),
+            settings,
+            original_duration_seconds: Some(duration_seconds),
+            audio_id: request_audio_id(request),
+            source_text: source_texts.get(index).cloned().unwrap_or_default(),
+            start_seconds: window.start_seconds,
+            end_seconds: window.end_seconds,
+            chunk_index: index + 1,
+            total_chunks,
+        };
         validate_omnivoice_duration(segment.duration_seconds)?;
-        segment.original_duration_seconds = segment.duration_seconds.or(target_duration);
+        if segment.text.trim().is_empty() {
+            segment.text = naturalized_terminal_punctuation(&request.text);
+        }
+        segments.push(segment);
     }
 
     Ok(segments)
+}
+
+#[cfg(feature = "ml")]
+fn source_speech_windows(
+    request: &OwnedSynthesisRequest,
+    timing: AudioTimingProfile,
+) -> AppResult<Vec<SpeechWindow>> {
+    let detection = speech_windows(
+        &request.source_audio,
+        request.options.pad_ms,
+        MAX_TEMPORAL_CHUNK_SECONDS,
+    )?;
+    if !detection.windows.is_empty() {
+        return Ok(detection.windows);
+    }
+
+    let total_seconds = (timing.total_ms as f32 / 1000.0).max(MIN_TEMPORAL_CHUNK_SECONDS);
+    let start_seconds = timing.leading_silence_ms as f32 / 1000.0;
+    let end_seconds = (total_seconds - timing.trailing_silence_ms as f32 / 1000.0)
+        .max(start_seconds + MIN_TEMPORAL_CHUNK_SECONDS)
+        .min(total_seconds);
+    Ok(vec![SpeechWindow {
+        start_seconds,
+        end_seconds,
+    }])
+}
+
+#[cfg(feature = "ml")]
+fn alignment_chunk_count(
+    request: &OwnedSynthesisRequest,
+    textual_segments: &[SynthesisSegmentPlan],
+    windows: &[SpeechWindow],
+) -> usize {
+    if windows.is_empty() {
+        return 0;
+    }
+
+    let minimum_chunks = minimum_chunks_for_duration(windows);
+    let preferred_chunks = if request.line_overrides.is_empty() {
+        textual_segments
+            .first()
+            .map(|segment| split_text_candidates_with_soft_boundaries(&segment.text).len())
+            .unwrap_or(1)
+            .max(1)
+    } else {
+        textual_segments.len().max(1)
+    };
+
+    preferred_chunks
+        .max(minimum_chunks)
+        .min(windows.len())
+        .max(1)
+}
+
+#[cfg(feature = "ml")]
+fn minimum_chunks_for_duration(windows: &[SpeechWindow]) -> usize {
+    let (Some(first), Some(last)) = (windows.first(), windows.last()) else {
+        return 0;
+    };
+
+    let span_seconds = (last.end_seconds - first.start_seconds).max(0.0);
+    (span_seconds / OMNIVOICE_MAX_SYNTHESIS_SECONDS)
+        .ceil()
+        .max(1.0) as usize
+}
+
+#[cfg(feature = "ml")]
+fn rebalance_speech_windows(windows: Vec<SpeechWindow>, target_count: usize) -> Vec<SpeechWindow> {
+    if target_count == 0 || windows.len() <= target_count {
+        return windows;
+    }
+
+    (0..target_count)
+        .filter_map(|index| {
+            let start = index * windows.len() / target_count;
+            let end = if index + 1 == target_count {
+                windows.len()
+            } else {
+                (index + 1) * windows.len() / target_count
+            };
+            let group = &windows[start..end.max(start + 1).min(windows.len())];
+            let first = group.first()?;
+            let last = group.last()?;
+            Some(SpeechWindow {
+                start_seconds: first.start_seconds,
+                end_seconds: last.end_seconds,
+            })
+        })
+        .collect()
+}
+
+#[cfg(feature = "ml")]
+fn split_text_candidates(text: &str) -> Vec<String> {
+    split_text_candidates_by_boundaries(text, false)
+}
+
+#[cfg(feature = "ml")]
+fn split_text_candidates_with_soft_boundaries(text: &str) -> Vec<String> {
+    split_text_candidates_by_boundaries(text, true)
+}
+
+#[cfg(feature = "ml")]
+fn split_text_candidates_by_boundaries(text: &str, include_soft_boundaries: bool) -> Vec<String> {
+    let mut candidates = Vec::new();
+    let mut current = String::new();
+    for character in text.chars() {
+        current.push(character);
+        if matches!(character, '.' | '!' | '?' | '…' | '\n')
+            || (include_soft_boundaries && matches!(character, ',' | ';' | ':'))
+        {
+            push_text_candidate(&mut candidates, &mut current);
+        }
+    }
+    push_text_candidate(&mut candidates, &mut current);
+    if candidates.is_empty() && !text.trim().is_empty() {
+        candidates.push(text.split_whitespace().collect::<Vec<_>>().join(" "));
+    }
+    merge_tiny_text_units(candidates)
+}
+
+#[cfg(feature = "ml")]
+fn push_text_candidate(candidates: &mut Vec<String>, current: &mut String) {
+    let candidate = current.split_whitespace().collect::<Vec<_>>().join(" ");
+    if !candidate.is_empty() {
+        candidates.push(candidate);
+    }
+    current.clear();
+}
+
+#[cfg(feature = "ml")]
+fn rebalance_text_units(mut units: Vec<String>, target_count: usize) -> Vec<String> {
+    if target_count == 0 {
+        return Vec::new();
+    }
+    units.retain(|unit| !unit.trim().is_empty());
+    if units.is_empty() {
+        return vec![String::new(); target_count];
+    }
+    if units.len() == target_count {
+        return units;
+    }
+    if units.len() > target_count {
+        return combine_text_units(units, target_count);
+    }
+
+    split_text_units(units.join(" "), target_count)
+}
+
+#[cfg(feature = "ml")]
+fn combine_text_units(units: Vec<String>, target_count: usize) -> Vec<String> {
+    (0..target_count)
+        .map(|index| {
+            let start = index * units.len() / target_count;
+            let end = if index + 1 == target_count {
+                units.len()
+            } else {
+                (index + 1) * units.len() / target_count
+            };
+            units[start..end.min(units.len())]
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .collect()
+}
+
+#[cfg(feature = "ml")]
+fn split_text_units(text: String, target_count: usize) -> Vec<String> {
+    let soft_units = split_text_candidates_with_soft_boundaries(&text);
+    if soft_units.len() >= target_count {
+        return combine_text_units(soft_units, target_count);
+    }
+
+    let words = text.split_whitespace().collect::<Vec<_>>();
+    if words.is_empty() {
+        return vec![String::new(); target_count];
+    }
+
+    (0..target_count)
+        .map(|index| {
+            let start = index * words.len() / target_count;
+            let end = if index + 1 == target_count {
+                words.len()
+            } else {
+                (index + 1) * words.len() / target_count
+            };
+            words[start..end.min(words.len())].join(" ")
+        })
+        .collect()
+}
+
+#[cfg(feature = "ml")]
+fn merge_tiny_text_units(units: Vec<String>) -> Vec<String> {
+    let mut merged: Vec<String> = Vec::new();
+    for unit in units {
+        if word_count(&unit) < 3 && !merged.is_empty() {
+            if let Some(previous) = merged.last_mut() {
+                previous.push(' ');
+                previous.push_str(unit.trim());
+            }
+            continue;
+        }
+
+        merged.push(unit);
+    }
+
+    if merged.len() > 1 && merged.last().is_some_and(|unit| word_count(unit) < 3) {
+        if let Some(tail) = merged.pop() {
+            if let Some(previous) = merged.last_mut() {
+                previous.push(' ');
+                previous.push_str(tail.trim());
+            }
+        }
+    }
+
+    if merged.len() > 1 && merged.first().is_some_and(|unit| word_count(unit) < 3) {
+        let head = merged.remove(0);
+        if let Some(first) = merged.first_mut() {
+            *first = format!("{} {}", head.trim(), first.trim());
+        }
+    }
+
+    merged
+}
+
+#[cfg(feature = "ml")]
+fn word_count(text: &str) -> usize {
+    text.split_whitespace().count()
+}
+
+#[cfg(feature = "ml")]
+fn scaled_source_index(index: usize, source_len: usize, target_len: usize) -> usize {
+    if source_len <= 1 || target_len == 0 {
+        return 0;
+    }
+    (index * source_len / target_len).min(source_len - 1)
 }
 
 #[cfg(feature = "ml")]
@@ -428,6 +805,12 @@ fn global_synthesis_segments(request: &OwnedSynthesisRequest) -> Vec<SynthesisSe
         duration_seconds: None,
         settings: request.options.native_synthesis.clone(),
         original_duration_seconds: None,
+        audio_id: request_audio_id(request),
+        source_text: request.source_text.clone(),
+        start_seconds: 0.0,
+        end_seconds: 0.0,
+        chunk_index: 1,
+        total_chunks: 1,
     }]
 }
 
@@ -453,6 +836,12 @@ fn line_override_synthesis_segments(request: &OwnedSynthesisRequest) -> Vec<Synt
                 duration_seconds: None,
                 settings: line.settings.clone(),
                 original_duration_seconds: None,
+                audio_id: request_audio_id(request),
+                source_text: String::new(),
+                start_seconds: 0.0,
+                end_seconds: 0.0,
+                chunk_index: line.line_index + 1,
+                total_chunks: 1,
             }
         })
         .filter(|segment| !segment.text.is_empty())
@@ -518,14 +907,6 @@ fn naturalized_terminal_punctuation(text: &str) -> String {
 }
 
 #[cfg(feature = "ml")]
-fn effective_duration(
-    settings: &NativeSynthesisSettings,
-    inferred_duration: Option<f32>,
-) -> Option<f32> {
-    settings.duration_seconds.or(inferred_duration)
-}
-
-#[cfg(feature = "ml")]
 fn validate_omnivoice_duration(duration_seconds: Option<f32>) -> AppResult<()> {
     let Some(duration_seconds) = duration_seconds else {
         return Ok(());
@@ -581,6 +962,708 @@ fn synthesize_segment(
         })?;
 
     Ok(DecodedAudio::new(audio.samples, audio.sample_rate))
+}
+
+#[cfg(feature = "ml")]
+fn synthesize_aligned_segment(
+    pipeline: &Phase3Pipeline,
+    options: &DubbingOptions,
+    segment: &SynthesisSegmentPlan,
+    voice_clone_prompt: Option<&VoiceClonePrompt>,
+    chunk_limit_exceeded: bool,
+    processed_in_batches: bool,
+    artifacts: SegmentArtifactContext<'_>,
+) -> AppResult<AlignedSegmentResult> {
+    let max_attempts = options.timing_alignment.max_regeneration_attempts.max(1);
+    let mut text = segment.text.clone();
+    let mut attempt = 1;
+
+    loop {
+        let audio = synthesize_segment(
+            pipeline,
+            &text,
+            segment.duration_seconds,
+            voice_clone_prompt,
+            options,
+            &segment.settings,
+        )?;
+        let audio = apply_segment_audio_polish(audio, &segment.settings);
+        let fit = fit_segment_audio(audio, segment, options)?;
+        let should_retry =
+            fit.critical && options.timing_alignment.auto_text_adaptation && attempt < max_attempts;
+
+        if should_retry {
+            text = adapt_text_for_timing(&text, fit.generated_duration_seconds, segment, attempt);
+            attempt += 1;
+            continue;
+        }
+
+        let mut statuses = fit.statuses;
+        let mut actions = fit.actions;
+        if attempt > 1 {
+            push_unique_status(&mut statuses, TimingChunkStatus::Regenerated);
+            push_unique_action(&mut actions, TimingAdjustmentAction::Regenerated);
+            push_unique_status(&mut statuses, TimingChunkStatus::TextAdapted);
+            push_unique_action(&mut actions, TimingAdjustmentAction::TextAdapted);
+        }
+        if chunk_limit_exceeded {
+            push_unique_status(&mut statuses, TimingChunkStatus::ChunkLimitExceeded);
+        }
+        if processed_in_batches {
+            push_unique_status(&mut statuses, TimingChunkStatus::BatchProcessed);
+            push_unique_action(&mut actions, TimingAdjustmentAction::BatchQueued);
+        }
+        let artifact_paths = write_segment_artifacts(segment, artifacts, &fit.audio)?;
+
+        let report = TimingAlignmentChunkReport {
+            segment_id: format!(
+                "{}#{}",
+                request_safe_stem(segment.audio_id.as_str()).unwrap_or("segment"),
+                segment.chunk_index
+            ),
+            audio_id: segment.audio_id.clone(),
+            chunk_index: segment.chunk_index,
+            total_chunks: segment.total_chunks,
+            start_original: f64::from(segment.start_seconds),
+            end_original: f64::from(segment.end_seconds),
+            duration_original: f64::from(
+                segment
+                    .original_duration_seconds
+                    .or(segment.duration_seconds)
+                    .unwrap_or_default(),
+            ),
+            texto_original_en: segment.source_text.clone(),
+            texto_ptbr: text,
+            original_segment_path: Some(artifact_paths.original),
+            dubbed_segment_path: Some(artifact_paths.dubbed),
+            duration_generated: Some(f64::from(fit.generated_duration_seconds)),
+            duration_difference_percent: Some(fit.duration_difference_percent),
+            statuses,
+            actions_applied: actions,
+            model_used: SpeechModelId::OmniVoice,
+            attempts: attempt,
+            failure_reason: fit.failure_reason,
+            stretch_ratio: fit.stretch_ratio,
+            overlap_seconds: None,
+            abrupt_ending_detected: fit.abrupt_ending_detected,
+        };
+
+        return Ok(AlignedSegmentResult {
+            audio: fit.audio,
+            report,
+        });
+    }
+}
+
+#[cfg(feature = "ml")]
+fn write_segment_artifacts(
+    segment: &SynthesisSegmentPlan,
+    artifacts: SegmentArtifactContext<'_>,
+    dubbed_audio: &DecodedAudio,
+) -> AppResult<SegmentArtifactPaths> {
+    let original = segment_artifact_path(artifacts.dir, segment, "original");
+    let dubbed = segment_artifact_path(artifacts.dir, segment, "dubbed");
+
+    if let Some(parent) = original
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+    {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    write_source_segment_artifact(&original, segment, artifacts.source_audio)?;
+    dubbed_audio
+        .write_wav(&dubbed)
+        .map_err(map_omnivoice_error)?;
+
+    Ok(SegmentArtifactPaths { original, dubbed })
+}
+
+#[cfg(feature = "ml")]
+fn write_source_segment_artifact(
+    path: &Path,
+    segment: &SynthesisSegmentPlan,
+    source_audio: &SourceDecodedAudio,
+) -> AppResult<()> {
+    if source_audio.sample_rate == 0 {
+        return Err(AppError::Internal(
+            "segmento original sem taxa de amostragem".to_string(),
+        ));
+    }
+
+    let sample_count = source_audio.samples.len();
+    let start =
+        seconds_to_sample_index(segment.start_seconds, source_audio.sample_rate).min(sample_count);
+    let end = seconds_to_sample_index(segment.end_seconds, source_audio.sample_rate)
+        .min(sample_count)
+        .max(start);
+
+    write_pcm16_wav_mono(
+        path,
+        source_audio.sample_rate,
+        &source_audio.samples[start..end],
+    )
+}
+
+#[cfg(feature = "ml")]
+fn segment_artifact_path(
+    artifact_dir: &Path,
+    segment: &SynthesisSegmentPlan,
+    suffix: &str,
+) -> PathBuf {
+    artifact_dir.join(format!(
+        "{:04}-{}.wav",
+        segment.chunk_index,
+        sanitize_artifact_component(suffix)
+    ))
+}
+
+#[cfg(feature = "ml")]
+fn alignment_artifact_dir(output_path: &Path) -> PathBuf {
+    let stem = output_path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .map(sanitize_artifact_component)
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "audio".to_string());
+    let parent = output_path
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+
+    parent.join(format!("{stem}.alignment_chunks"))
+}
+
+#[cfg(feature = "ml")]
+fn sanitize_artifact_component(value: &str) -> String {
+    value
+        .chars()
+        .map(|character| match character {
+            'A'..='Z' | 'a'..='z' | '0'..='9' | '-' | '_' => character,
+            _ => '_',
+        })
+        .collect::<String>()
+        .trim_matches('_')
+        .to_string()
+}
+
+#[cfg(feature = "ml")]
+fn seconds_to_sample_index(seconds: f32, sample_rate: u32) -> usize {
+    (seconds.max(0.0) * sample_rate as f32).round() as usize
+}
+
+#[cfg(feature = "ml")]
+#[derive(Debug)]
+struct FittedSegmentAudio {
+    audio: DecodedAudio,
+    generated_duration_seconds: f32,
+    duration_difference_percent: f32,
+    statuses: Vec<TimingChunkStatus>,
+    actions: Vec<TimingAdjustmentAction>,
+    stretch_ratio: Option<f32>,
+    failure_reason: Option<String>,
+    critical: bool,
+    abrupt_ending_detected: bool,
+}
+
+#[cfg(feature = "ml")]
+fn fit_segment_audio(
+    mut audio: DecodedAudio,
+    segment: &SynthesisSegmentPlan,
+    options: &DubbingOptions,
+) -> AppResult<FittedSegmentAudio> {
+    if audio.sample_rate == 0 {
+        return Err(AppError::SpeechEngineUnavailable(
+            "OmniVoice retornou áudio sem taxa de amostragem.".to_string(),
+        ));
+    }
+
+    let original_duration_seconds = segment.duration_seconds.unwrap_or_else(|| {
+        (segment.end_seconds - segment.start_seconds).max(MIN_TEMPORAL_CHUNK_SECONDS)
+    });
+    let generated_duration_seconds = audio.samples.len() as f32 / audio.sample_rate as f32;
+    let duration_difference_percent =
+        duration_difference_percent(generated_duration_seconds, original_duration_seconds);
+    let mut statuses = Vec::new();
+    let mut actions = Vec::new();
+    let mut critical = false;
+    let mut failure_reason = None;
+
+    remove_dc_offset(&mut audio.samples);
+    let mut samples = trim_leading_silence(audio.samples);
+    if options.timing_alignment.normalize_loudness {
+        normalize_peak(&mut samples, 0.92);
+        actions.push(TimingAdjustmentAction::LoudnessNormalized);
+    }
+
+    let target_samples = seconds_to_samples(original_duration_seconds, audio.sample_rate);
+    let accept = options.timing_alignment.accept_duration_diff_percent;
+    let maximum_stretch = options.timing_alignment.max_stretch_diff_percent;
+    let stretch_required = duration_difference_percent > accept || samples.len() > target_samples;
+    let mut stretch_ratio = None;
+
+    if stretch_required {
+        if duration_difference_percent > maximum_stretch {
+            critical = true;
+            failure_reason = Some(format!(
+                "diferença de duração {:.1}% acima do limite configurado de {:.1}%",
+                duration_difference_percent, maximum_stretch
+            ));
+            statuses.push(TimingChunkStatus::OutOfLimit);
+            statuses.push(TimingChunkStatus::NeedsManualReview);
+            actions.push(TimingAdjustmentAction::ManualReviewRequired);
+        } else {
+            statuses.push(TimingChunkStatus::TimeStretched);
+        }
+
+        let source_len = samples.len().max(1);
+        samples = time_stretch_preserving_pitch(&samples, target_samples, audio.sample_rate);
+        stretch_ratio = Some(target_samples as f32 / source_len as f32);
+        actions.push(TimingAdjustmentAction::TimeStretched);
+    }
+
+    if samples.len() < target_samples {
+        samples.resize(target_samples, 0.0);
+        actions.push(TimingAdjustmentAction::TailPreserved);
+    }
+    if samples.len() > target_samples {
+        critical = true;
+        statuses.push(TimingChunkStatus::OverlapRisk);
+        failure_reason.get_or_insert_with(|| {
+            "áudio gerado continuou maior que a janela original após ajuste".to_string()
+        });
+        samples.truncate(target_samples);
+    }
+
+    let abrupt_ending_detected = detect_abrupt_ending(
+        &samples,
+        audio.sample_rate,
+        options.timing_alignment.min_tail_ms,
+    );
+    if abrupt_ending_detected {
+        statuses.push(TimingChunkStatus::AbruptEndingDetected);
+    }
+    apply_short_fades(
+        &mut samples,
+        audio.sample_rate,
+        options.timing_alignment.fade_out_ms,
+    );
+    if options.timing_alignment.fade_out_ms > 0 {
+        actions.push(TimingAdjustmentAction::FadeApplied);
+    }
+    if statuses.is_empty() {
+        statuses.push(TimingChunkStatus::Ok);
+        actions.push(TimingAdjustmentAction::Accepted);
+    }
+
+    Ok(FittedSegmentAudio {
+        audio: DecodedAudio::new(samples, audio.sample_rate),
+        generated_duration_seconds,
+        duration_difference_percent,
+        statuses,
+        actions,
+        stretch_ratio,
+        failure_reason,
+        critical,
+        abrupt_ending_detected,
+    })
+}
+
+#[cfg(feature = "ml")]
+fn compose_timeline_audio(
+    placed_segments: Vec<PlacedTimelineSegment>,
+    total_duration_seconds: f32,
+    timing: AudioTimingProfile,
+    level_settings: AudioLevelSettings,
+    options: &DubbingOptions,
+) -> AppResult<DecodedAudio> {
+    let Some(first) = placed_segments.first() else {
+        return Err(AppError::SpeechEngineUnavailable(
+            "OmniVoice não gerou segmentos temporais.".to_string(),
+        ));
+    };
+    let sample_rate = first.audio.sample_rate;
+    if sample_rate == 0 {
+        return Err(AppError::SpeechEngineUnavailable(
+            "segmento temporal sem taxa de amostragem".to_string(),
+        ));
+    }
+
+    let mut samples = vec![0.0; seconds_to_samples(total_duration_seconds, sample_rate)];
+    for segment in placed_segments {
+        if segment.audio.sample_rate != sample_rate {
+            return Err(AppError::SpeechEngineUnavailable(format!(
+                "OmniVoice retornou taxas de amostragem inconsistentes: {} e {}",
+                sample_rate, segment.audio.sample_rate
+            )));
+        }
+        let start = seconds_to_samples(segment.start_seconds, sample_rate);
+        mix_segment_into_timeline(
+            &mut samples,
+            start,
+            segment.audio.samples,
+            ms_to_samples(options.timing_alignment.crossfade_ms, sample_rate),
+        );
+    }
+
+    if level_settings.match_source_loudness {
+        match_source_loudness(
+            &mut samples,
+            timing.rms_amplitude,
+            timing.peak_amplitude * 0.98,
+            level_settings.loudness_match_strength,
+        );
+    } else {
+        normalize_peak(&mut samples, timing.peak_amplitude * 0.96);
+    }
+    apply_output_gain(&mut samples, level_settings.output_gain_db, 0.98);
+    Ok(DecodedAudio::new(samples, sample_rate))
+}
+
+#[cfg(feature = "ml")]
+fn mix_segment_into_timeline(
+    timeline: &mut Vec<f32>,
+    start: usize,
+    mut segment: Vec<f32>,
+    crossfade_samples: usize,
+) {
+    if segment.is_empty() {
+        return;
+    }
+    let required = start.saturating_add(segment.len());
+    if required > timeline.len() {
+        timeline.resize(required, 0.0);
+    }
+
+    let fade = crossfade_samples.min(segment.len() / 4);
+    if fade > 0 {
+        for index in 0..fade {
+            let scale = (index + 1) as f32 / (fade + 1) as f32;
+            segment[index] = sanitize_sample(segment[index] * scale);
+            let tail_index = segment.len() - 1 - index;
+            segment[tail_index] = sanitize_sample(segment[tail_index] * scale);
+        }
+    }
+
+    for (offset, sample) in segment.into_iter().enumerate() {
+        let target = start + offset;
+        timeline[target] = sanitize_sample(timeline[target] + sample);
+    }
+}
+
+#[cfg(feature = "ml")]
+fn duration_difference_percent(generated: f32, original: f32) -> f32 {
+    if original <= f32::EPSILON || !generated.is_finite() || !original.is_finite() {
+        return 100.0;
+    }
+    ((generated / original) - 1.0).abs() * 100.0
+}
+
+#[cfg(feature = "ml")]
+fn seconds_to_samples(seconds: f32, sample_rate: u32) -> usize {
+    (seconds.max(0.0) * sample_rate as f32).round().max(1.0) as usize
+}
+
+#[cfg(feature = "ml")]
+fn adapt_text_for_timing(
+    text: &str,
+    generated_duration_seconds: f32,
+    segment: &SynthesisSegmentPlan,
+    attempt: u32,
+) -> String {
+    let target_duration_seconds = segment.duration_seconds.unwrap_or_default();
+    if generated_duration_seconds > target_duration_seconds {
+        shorten_timing_text(text, attempt)
+    } else {
+        lengthen_timing_text(text, attempt)
+    }
+}
+
+#[cfg(feature = "ml")]
+fn shorten_timing_text(text: &str, attempt: u32) -> String {
+    let mut shortened = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    for (needle, replacement) in [
+        (" por favor", ""),
+        (" neste momento", " agora"),
+        (" exatamente", ""),
+        (" realmente", ""),
+        (" simplesmente", ""),
+        (" absolutamente", ""),
+    ] {
+        shortened = shortened.replace(needle, replacement);
+    }
+    if attempt >= 2 {
+        shortened = shortened
+            .split(',')
+            .next()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or(shortened.trim())
+            .to_string();
+    }
+    naturalized_terminal_punctuation(&shortened)
+}
+
+#[cfg(feature = "ml")]
+fn lengthen_timing_text(text: &str, attempt: u32) -> String {
+    let trimmed = text.trim().trim_end_matches(['.', '!', '?', '…']).trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    if attempt >= 2 {
+        format!("{trimmed}...")
+    } else {
+        format!("{trimmed}.")
+    }
+}
+
+#[cfg(feature = "ml")]
+fn time_stretch_preserving_pitch(samples: &[f32], target_len: usize, sample_rate: u32) -> Vec<f32> {
+    if samples.is_empty() || target_len == 0 {
+        return Vec::new();
+    }
+    if samples.len().abs_diff(target_len) <= 1 || sample_rate == 0 {
+        return resize_with_padding(samples, target_len);
+    }
+    if samples.len() < ms_to_samples(120, sample_rate) {
+        return resample_for_duration(samples, target_len);
+    }
+
+    let window_len =
+        ms_to_samples(40, sample_rate).clamp(128, samples.len().saturating_div(2).max(128));
+    let overlap = window_len / 2;
+    let synthesis_hop = (window_len - overlap).max(1);
+    let stretch = target_len as f32 / samples.len() as f32;
+    let analysis_hop = ((synthesis_hop as f32 / stretch).round() as usize).max(1);
+    let search = ms_to_samples(12, sample_rate);
+    let mut output = vec![0.0; target_len.saturating_add(window_len)];
+    let mut weights = vec![0.0; output.len()];
+    let mut source_pos = 0usize;
+    let mut target_pos = 0usize;
+
+    while target_pos < target_len && source_pos < samples.len() {
+        let candidate = if target_pos == 0 {
+            source_pos
+        } else {
+            best_overlap_position(samples, &output, source_pos, target_pos, overlap, search)
+        };
+        overlap_add_window(
+            samples,
+            candidate,
+            &mut output,
+            &mut weights,
+            target_pos,
+            window_len,
+        );
+        source_pos = source_pos.saturating_add(analysis_hop);
+        target_pos = target_pos.saturating_add(synthesis_hop);
+    }
+
+    for (sample, weight) in output.iter_mut().zip(weights.iter()) {
+        if *weight > f32::EPSILON {
+            *sample = sanitize_sample(*sample / *weight);
+        }
+    }
+    output.truncate(target_len);
+    resize_with_padding(&output, target_len)
+}
+
+#[cfg(feature = "ml")]
+fn best_overlap_position(
+    samples: &[f32],
+    output: &[f32],
+    predicted: usize,
+    target_pos: usize,
+    overlap: usize,
+    search: usize,
+) -> usize {
+    let start = predicted.saturating_sub(search);
+    let end = predicted
+        .saturating_add(search)
+        .min(samples.len().saturating_sub(overlap + 1));
+    let mut best = predicted.min(end);
+    let mut best_score = f32::MIN;
+    for candidate in start..=end {
+        let score = overlap_score(samples, output, candidate, target_pos, overlap);
+        if score > best_score {
+            best_score = score;
+            best = candidate;
+        }
+    }
+    best
+}
+
+#[cfg(feature = "ml")]
+fn overlap_score(
+    samples: &[f32],
+    output: &[f32],
+    source_pos: usize,
+    target_pos: usize,
+    overlap: usize,
+) -> f32 {
+    let mut score = 0.0;
+    for index in 0..overlap {
+        let source = samples.get(source_pos + index).copied().unwrap_or_default();
+        let target = output.get(target_pos + index).copied().unwrap_or_default();
+        score += source * target;
+    }
+    score
+}
+
+#[cfg(feature = "ml")]
+fn overlap_add_window(
+    samples: &[f32],
+    source_pos: usize,
+    output: &mut [f32],
+    weights: &mut [f32],
+    target_pos: usize,
+    window_len: usize,
+) {
+    for index in 0..window_len {
+        let Some(sample) = samples.get(source_pos + index).copied() else {
+            break;
+        };
+        let Some(target) = output.get_mut(target_pos + index) else {
+            break;
+        };
+        let weight = hann_weight(index, window_len);
+        *target += sample * weight;
+        if let Some(total_weight) = weights.get_mut(target_pos + index) {
+            *total_weight += weight;
+        }
+    }
+}
+
+#[cfg(feature = "ml")]
+fn hann_weight(index: usize, len: usize) -> f32 {
+    if len <= 1 {
+        return 1.0;
+    }
+    0.5 - 0.5 * ((std::f32::consts::TAU * index as f32) / (len - 1) as f32).cos()
+}
+
+#[cfg(feature = "ml")]
+fn resize_with_padding(samples: &[f32], target_len: usize) -> Vec<f32> {
+    let mut output = samples
+        .iter()
+        .copied()
+        .map(sanitize_sample)
+        .collect::<Vec<_>>();
+    output.resize(target_len, 0.0);
+    output.truncate(target_len);
+    output
+}
+
+#[cfg(feature = "ml")]
+fn resample_for_duration(samples: &[f32], target_len: usize) -> Vec<f32> {
+    if samples.is_empty() || target_len == 0 {
+        return Vec::new();
+    }
+    if target_len == 1 {
+        return vec![samples[0]];
+    }
+    let scale = (samples.len() - 1) as f32 / (target_len - 1) as f32;
+    (0..target_len)
+        .map(|index| {
+            let position = index as f32 * scale;
+            let left = position.floor() as usize;
+            let right = (left + 1).min(samples.len() - 1);
+            let fraction = position - left as f32;
+            sanitize_sample(samples[left] + (samples[right] - samples[left]) * fraction)
+        })
+        .collect()
+}
+
+#[cfg(feature = "ml")]
+fn detect_abrupt_ending(samples: &[f32], sample_rate: u32, min_tail_ms: u32) -> bool {
+    if samples.is_empty() || sample_rate == 0 {
+        return false;
+    }
+    let tail_samples = ms_to_samples(min_tail_ms.max(50), sample_rate).min(samples.len());
+    let tail = &samples[samples.len() - tail_samples..];
+    let tail_rms = rms_level(tail);
+    let last_peak = tail
+        .iter()
+        .rev()
+        .take(ms_to_samples(20, sample_rate).max(1))
+        .fold(0.0_f32, |peak, sample| peak.max(sample.abs()));
+    tail_rms > 0.035 && last_peak > 0.08
+}
+
+#[cfg(feature = "ml")]
+fn apply_short_fades(samples: &mut [f32], sample_rate: u32, fade_ms: u32) {
+    let fade_samples = ms_to_samples(fade_ms, sample_rate).min(samples.len() / 3);
+    if fade_samples == 0 {
+        return;
+    }
+    for index in 0..fade_samples {
+        let fade_in = (index + 1) as f32 / (fade_samples + 1) as f32;
+        samples[index] = sanitize_sample(samples[index] * fade_in);
+        let tail_index = samples.len() - 1 - index;
+        samples[tail_index] = sanitize_sample(samples[tail_index] * fade_in);
+    }
+}
+
+#[cfg(feature = "ml")]
+fn push_unique_status(statuses: &mut Vec<TimingChunkStatus>, status: TimingChunkStatus) {
+    if !statuses.contains(&status) {
+        statuses.push(status);
+    }
+}
+
+#[cfg(feature = "ml")]
+fn push_unique_action(actions: &mut Vec<TimingAdjustmentAction>, action: TimingAdjustmentAction) {
+    if !actions.contains(&action) {
+        actions.push(action);
+    }
+}
+
+#[cfg(feature = "ml")]
+fn timing_alignment_warnings(
+    total_chunks: usize,
+    configured_chunk_limit: u32,
+    policy: ChunkLimitPolicy,
+) -> Vec<String> {
+    if total_chunks <= configured_chunk_limit.max(1) as usize {
+        return Vec::new();
+    }
+    vec![format!(
+        "Este áudio precisa de {total_chunks} chunks, acima do limite configurado de {configured_chunk_limit}; política aplicada: {policy:?}."
+    )]
+}
+
+#[cfg(feature = "ml")]
+fn chunk_report_is_critical(report: &TimingAlignmentChunkReport) -> bool {
+    report.statuses.iter().any(|status| {
+        matches!(
+            status,
+            TimingChunkStatus::OutOfLimit
+                | TimingChunkStatus::NeedsManualReview
+                | TimingChunkStatus::OverlapRisk
+                | TimingChunkStatus::TtsFailed
+        )
+    })
+}
+
+#[cfg(feature = "ml")]
+fn request_audio_id(request: &OwnedSynthesisRequest) -> String {
+    request.source_audio.to_string_lossy().to_string()
+}
+
+#[cfg(feature = "ml")]
+fn request_file_name(request: &OwnedSynthesisRequest) -> String {
+    request
+        .source_audio
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("audio")
+        .to_string()
+}
+
+#[cfg(feature = "ml")]
+fn request_safe_stem(value: &str) -> Option<&str> {
+    let trimmed = value.trim();
+    (!trimmed.is_empty()).then_some(trimmed)
 }
 
 #[cfg(feature = "ml")]
@@ -687,6 +1770,7 @@ fn prepare_short_reference(
 }
 
 #[cfg(feature = "ml")]
+#[allow(dead_code)]
 fn concatenate_segments(segments: Vec<DecodedAudio>) -> AppResult<DecodedAudio> {
     let mut segments = segments.into_iter();
     let Some(first) = segments.next() else {
@@ -711,6 +1795,7 @@ fn concatenate_segments(segments: Vec<DecodedAudio>) -> AppResult<DecodedAudio> 
 }
 
 #[cfg(feature = "ml")]
+#[allow(dead_code)]
 fn append_segment_with_crossfade(samples: &mut Vec<f32>, mut next: Vec<f32>, sample_rate: u32) {
     if samples.is_empty() || next.is_empty() || sample_rate == 0 {
         samples.extend(next.into_iter().map(sanitize_sample));
@@ -754,6 +1839,7 @@ fn apply_segment_audio_polish(
 }
 
 #[cfg(feature = "ml")]
+#[allow(dead_code)]
 fn apply_original_timing(
     audio: DecodedAudio,
     timing: AudioTimingProfile,
@@ -1039,11 +2125,25 @@ mod tests {
     use super::*;
     use dublagem_domain::OMNIVOICE_MAX_SYNTHESIS_SECONDS;
 
+    fn synthesis_segments_for_test(
+        request: &OwnedSynthesisRequest,
+        duration_seconds: f32,
+    ) -> AppResult<Vec<SynthesisSegmentPlan>> {
+        synthesis_segments_for_windows(
+            request,
+            vec![SpeechWindow {
+                start_seconds: 0.0,
+                end_seconds: duration_seconds,
+            }],
+        )
+    }
+
     #[test]
     fn whole_file_synthesis_uses_single_omnivoice_segment() {
         let request = OwnedSynthesisRequest {
             text: "Primeira frase. Segunda frase longa para simular um arquivo maior. Terceira frase para garantir que o texto permaneça em uma única síntese dentro do limite oficial. Quarta frase para preservar pontuação natural."
                 .to_string(),
+            source_text: "Original first sentence. Original second sentence.".to_string(),
             source_audio: PathBuf::from("source.wav"),
             reference_audio: PathBuf::from("source.wav"),
             reference_text: "Original first sentence. Original second sentence.".to_string(),
@@ -1054,7 +2154,7 @@ mod tests {
             hooks: SynthesisHooks::default(),
         };
 
-        let segments = synthesis_segments_for_request(&request, Some(30.0)).unwrap();
+        let segments = synthesis_segments_for_test(&request, 30.0).unwrap();
 
         assert_eq!(segments.len(), 1);
         assert_eq!(segments[0].duration_seconds, Some(30.0));
@@ -1066,6 +2166,7 @@ mod tests {
     fn whole_file_synthesis_preserves_inline_native_tags() {
         let request = OwnedSynthesisRequest {
             text: "[sigh] Ola [question-ah]?".to_string(),
+            source_text: "Original.".to_string(),
             source_audio: PathBuf::from("source.wav"),
             reference_audio: PathBuf::from("source.wav"),
             reference_text: "Original.".to_string(),
@@ -1076,7 +2177,7 @@ mod tests {
             hooks: SynthesisHooks::default(),
         };
 
-        let segments = synthesis_segments_for_request(&request, Some(2.0)).unwrap();
+        let segments = synthesis_segments_for_test(&request, 2.0).unwrap();
 
         assert_eq!(segments[0].text, "[sigh] Ola [question-ah]?");
     }
@@ -1085,6 +2186,7 @@ mod tests {
     fn pinned_tags_are_applied_to_whole_file_synthesis() {
         let request = OwnedSynthesisRequest {
             text: "Ola mundo".to_string(),
+            source_text: "Original.".to_string(),
             source_audio: PathBuf::from("source.wav"),
             reference_audio: PathBuf::from("source.wav"),
             reference_text: "Original.".to_string(),
@@ -1095,7 +2197,7 @@ mod tests {
             hooks: SynthesisHooks::default(),
         };
 
-        let segments = synthesis_segments_for_request(&request, Some(2.0)).unwrap();
+        let segments = synthesis_segments_for_test(&request, 2.0).unwrap();
 
         assert_eq!(segments[0].text, "[sigh] Ola mundo.");
     }
@@ -1104,6 +2206,7 @@ mod tests {
     fn whole_file_synthesis_accepts_long_form_duration_for_chunked_inference() {
         let request = OwnedSynthesisRequest {
             text: "Texto acima do limite.".to_string(),
+            source_text: "Original.".to_string(),
             source_audio: PathBuf::from("source.wav"),
             reference_audio: PathBuf::from("source.wav"),
             reference_text: "Original.".to_string(),
@@ -1114,8 +2217,7 @@ mod tests {
             hooks: SynthesisHooks::default(),
         };
 
-        let result =
-            synthesis_segments_for_request(&request, Some(OMNIVOICE_MAX_SYNTHESIS_SECONDS + 0.01));
+        let result = synthesis_segments_for_test(&request, OMNIVOICE_MAX_SYNTHESIS_SECONDS + 0.01);
 
         let segments = result.expect("long form segment");
         assert_eq!(segments.len(), 1);
@@ -1123,6 +2225,90 @@ mod tests {
             segments[0].duration_seconds,
             Some(OMNIVOICE_MAX_SYNTHESIS_SECONDS + 0.01)
         );
+    }
+
+    #[test]
+    fn whole_file_synthesis_merges_excess_acoustic_windows_for_single_text_unit() {
+        let request = OwnedSynthesisRequest {
+            text: "Fique em guarda enquanto a névoa baixa".to_string(),
+            source_text: "Stay alert while the fog drops.".to_string(),
+            source_audio: PathBuf::from("source.wav"),
+            reference_audio: PathBuf::from("source.wav"),
+            reference_text: "Stay alert while the fog drops.".to_string(),
+            output_path: PathBuf::from("out.wav"),
+            options: DubbingOptions::default(),
+            pinned_tags: Vec::new(),
+            line_overrides: Vec::new(),
+            hooks: SynthesisHooks::default(),
+        };
+
+        let segments = synthesis_segments_for_windows(
+            &request,
+            vec![
+                SpeechWindow {
+                    start_seconds: 0.0,
+                    end_seconds: 2.0,
+                },
+                SpeechWindow {
+                    start_seconds: 2.2,
+                    end_seconds: 4.0,
+                },
+                SpeechWindow {
+                    start_seconds: 4.4,
+                    end_seconds: 6.0,
+                },
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(segments.len(), 1);
+        assert_eq!(segments[0].start_seconds, 0.0);
+        assert_eq!(segments[0].end_seconds, 6.0);
+        assert_eq!(segments[0].text, "Fique em guarda enquanto a névoa baixa.");
+    }
+
+    #[test]
+    fn whole_file_synthesis_prefers_comma_boundary_without_repeated_words() {
+        let request = OwnedSynthesisRequest {
+            text: "Uno com a natureza, mas nunca vi uma meditação tão poderosa antes.".to_string(),
+            source_text: "One with nature, but I have never seen meditation this powerful before."
+                .to_string(),
+            source_audio: PathBuf::from("source.wav"),
+            reference_audio: PathBuf::from("source.wav"),
+            reference_text: "One with nature.".to_string(),
+            output_path: PathBuf::from("out.wav"),
+            options: DubbingOptions::default(),
+            pinned_tags: Vec::new(),
+            line_overrides: Vec::new(),
+            hooks: SynthesisHooks::default(),
+        };
+
+        let segments = synthesis_segments_for_windows(
+            &request,
+            vec![
+                SpeechWindow {
+                    start_seconds: 0.0,
+                    end_seconds: 2.0,
+                },
+                SpeechWindow {
+                    start_seconds: 2.3,
+                    end_seconds: 4.0,
+                },
+                SpeechWindow {
+                    start_seconds: 4.4,
+                    end_seconds: 6.0,
+                },
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(segments.len(), 2);
+        assert_eq!(segments[0].text, "Uno com a natureza.");
+        assert_eq!(
+            segments[1].text,
+            "mas nunca vi uma meditação tão poderosa antes."
+        );
+        assert!(!segments[0].text.contains("nunca"));
     }
 
     #[test]
@@ -1135,6 +2321,7 @@ mod tests {
         };
         let request = OwnedSynthesisRequest {
             text: "Primeira frase. Segunda frase.".to_string(),
+            source_text: "Original first sentence. Original second sentence.".to_string(),
             source_audio: PathBuf::from("source.wav"),
             reference_audio: PathBuf::from("source.wav"),
             reference_text: "Original first sentence. Original second sentence.".to_string(),
@@ -1161,10 +2348,23 @@ mod tests {
             hooks: SynthesisHooks::default(),
         };
 
-        let segments = synthesis_segments_for_request(&request, Some(12.0)).unwrap();
+        let segments = synthesis_segments_for_windows(
+            &request,
+            vec![
+                SpeechWindow {
+                    start_seconds: 0.0,
+                    end_seconds: 6.0,
+                },
+                SpeechWindow {
+                    start_seconds: 7.0,
+                    end_seconds: 12.0,
+                },
+            ],
+        )
+        .unwrap();
 
         assert_eq!(segments.len(), 2);
-        assert_eq!(segments[0].duration_seconds, None);
+        assert_eq!(segments[0].duration_seconds, Some(6.0));
         assert_eq!(segments[0].text, "[sigh] Primeira frase.");
         assert_eq!(segments[0].settings.speed, Some(1.2));
         assert_eq!(segments[1].settings, request.options.native_synthesis);
@@ -1272,6 +2472,7 @@ mod tests {
         let base_settings = NativeSynthesisSettings::default();
         let request = OwnedSynthesisRequest {
             text: "Fallback sem marcador.".to_string(),
+            source_text: "Original.".to_string(),
             source_audio: PathBuf::from("source.wav"),
             reference_audio: PathBuf::from("source.wav"),
             reference_text: "Original.".to_string(),
@@ -1289,7 +2490,7 @@ mod tests {
             hooks: SynthesisHooks::default(),
         };
 
-        let segments = synthesis_segments_for_request(&request, Some(2.0)).unwrap();
+        let segments = synthesis_segments_for_test(&request, 2.0).unwrap();
 
         assert_eq!(segments[0].text, "Ola mundo.");
     }

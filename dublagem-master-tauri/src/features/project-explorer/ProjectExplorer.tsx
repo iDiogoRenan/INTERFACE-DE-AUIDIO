@@ -496,6 +496,10 @@ function statusLabel(status: string): string {
     approved: "Aprovado",
     rejected: "Rejeitado",
     ignored: "Ignorado",
+    awaiting_confirmation: "Aguardando",
+    cancelled: "Cancelado",
+    chunk_limit_exceeded: "Limite excedido",
+    batch_processed: "Em lote",
     missing_source: "Sem origem",
     failed: "Falhou"
   };

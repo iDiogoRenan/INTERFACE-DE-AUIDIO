@@ -159,6 +159,7 @@ pub async fn preview_synthesis_line(
     synthesizer
         .synthesize(SynthesisRequest {
             text: &request.text,
+            source_text: "",
             source_audio: &request.source_audio,
             reference_audio,
             reference_text: "",

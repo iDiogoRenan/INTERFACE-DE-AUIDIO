@@ -30,7 +30,8 @@ import {
   type NativeSynthesisSettings,
   type ProjectFileMetadata,
   type ProjectLineMetadata,
-  type ProjectMetadata
+  type ProjectMetadata,
+  type TimingAlignmentReport
 } from "../shared/tauri/types";
 
 export interface LogEntry {
@@ -76,6 +77,7 @@ interface WorkspaceState {
   isCancelling: boolean;
   lastOutputPath: string | null;
   lastOutputRevision: number;
+  lastAlignmentReport: TimingAlignmentReport | null;
   linePreviewPath: string | null;
   progress: number;
   isBusy: boolean;
@@ -169,6 +171,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => {
       totalFiles: requestedInputPaths.length,
       lastOutputPath: null,
       lastOutputRevision: state.lastOutputRevision + 1,
+      lastAlignmentReport: null,
       submittedDubbingDrafts:
         includeSelectedDraft && selectedPath
           ? submittedDraft
@@ -247,6 +250,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => {
     isCancelling: false,
     lastOutputPath: null,
     lastOutputRevision: 0,
+    lastAlignmentReport: null,
     linePreviewPath: null,
     progress: 0,
     isBusy: false,
@@ -316,6 +320,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => {
         selectedLineIndex: 0,
         lastOutputPath: outputPathForSelection(nextSelectedPath, files),
         lastOutputRevision: stateNextOutputRevision(get()),
+        lastAlignmentReport: null,
         transcriptionDrafts,
         transcriptionBaselines,
         ...draftStateForPath(nextSelectedPath, transcriptionDrafts, files)
@@ -334,6 +339,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => {
           linePreviewPath: null,
           lastOutputPath: outputPathForSelection(path, state.files),
           lastOutputRevision: state.lastOutputRevision + 1,
+          lastAlignmentReport: null,
           transcriptionBaselines,
           ...draftStateForPath(path, state.transcriptionDrafts, state.files)
         };
@@ -476,7 +482,8 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => {
           return {
             linePreviewPath,
             lastOutputPath: linePreviewPath,
-            lastOutputRevision
+            lastOutputRevision,
+            lastAlignmentReport: null
           };
         });
         state.appendLog("Prévia da linha gerada.", "success");
@@ -666,6 +673,9 @@ export function applyJobEvent(payload: DubbingJobEvent): void {
   }
   if (payload.totalFiles !== null) {
     update.totalFiles = payload.totalFiles;
+  }
+  if (payload.alignmentReport !== null) {
+    update.lastAlignmentReport = payload.alignmentReport;
   }
 
   const transcriptionPatch: Partial<TranscriptionDraft> = {};
