@@ -2,7 +2,7 @@ import { expect, test } from "@playwright/test";
 
 test("loads the desktop workspace shell", async ({ page }) => {
   await page.goto("/");
-  await expect(page.getByRole("heading", { name: "NSG Gaming Dub 1.0" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "NSG Gaming Dub" })).toBeVisible();
   await expect(page.getByRole("tab", { name: /Dublagem/u })).toBeVisible();
   await expect(page.getByRole("tab", { name: /Validação/u })).toBeVisible();
   await expect(page.getByRole("tab", { name: /Ajustes/u })).toBeVisible();
@@ -35,10 +35,10 @@ test("shows native OmniVoice tag and line property controls", async ({ page }) =
   await expect(page.getByText("Nivel da trilha")).toHaveCount(0);
   await expect(page.getByText("Remover voz original")).toHaveCount(0);
   await expect(page.getByText("Redução de sibilância")).toBeVisible();
-  await expect(page.getByRole("button", { name: "Salvar padrão global" })).toBeDisabled();
+  await expect(page.getByRole("button", { name: "Salvar ajustes globais" })).toBeDisabled();
   await expect(page.getByRole("button", { name: "Regenerar resultado" })).toBeDisabled();
 
-  await page.getByText("Ajustes nativos").click();
+  await page.getByRole("button", { name: /Ajustes nativos globais/u }).click();
   const sidebar = page.getByRole("complementary", { name: "Propriedades da linha" });
   const sidebarBox = await sidebar.boundingBox();
   const actionBox = await page.getByRole("button", { name: "Regenerar resultado" }).boundingBox();

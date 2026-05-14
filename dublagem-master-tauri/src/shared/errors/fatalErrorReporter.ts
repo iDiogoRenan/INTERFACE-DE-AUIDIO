@@ -4,6 +4,8 @@ import { isTauriRuntime } from "../tauri/client";
 let installed = false;
 let dialogOpen = false;
 
+const resizeObserverLoopMessage = "ResizeObserver loop completed with undelivered notifications.";
+
 export function installFrontendFatalErrorReporter(): void {
   if (installed || typeof window === "undefined") {
     return;
@@ -11,9 +13,17 @@ export function installFrontendFatalErrorReporter(): void {
   installed = true;
 
   window.addEventListener("error", (event) => {
+    if (isResizeObserverLoopNotification(event)) {
+      event.preventDefault();
+      return;
+    }
     void reportFrontendFatalError("Erro fatal na interface", event.error ?? event.message);
   });
   window.addEventListener("unhandledrejection", (event) => {
+    if (isRecoverableFrontendNotification(event.reason)) {
+      event.preventDefault();
+      return;
+    }
     void reportFrontendFatalError("Promessa rejeitada sem tratamento", event.reason);
   });
 }
@@ -44,4 +54,24 @@ function errorMessage(reason: unknown): string {
     return reason.stack ?? reason.message;
   }
   return String(reason);
+}
+
+function isResizeObserverLoopNotification(event: ErrorEvent): boolean {
+  return (
+    isResizeObserverLoopMessage(event.message) || isRecoverableFrontendNotification(event.error)
+  );
+}
+
+function isRecoverableFrontendNotification(reason: unknown): boolean {
+  if (reason instanceof Error) {
+    return isResizeObserverLoopMessage(reason.message);
+  }
+  if (typeof reason === "string") {
+    return isResizeObserverLoopMessage(reason);
+  }
+  return false;
+}
+
+function isResizeObserverLoopMessage(message: string): boolean {
+  return message.trim() === resizeObserverLoopMessage;
 }

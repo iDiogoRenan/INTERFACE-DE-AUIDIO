@@ -1,8 +1,9 @@
 # _patch_accent_fix.py — v5.1 COMPATÍVEL COM ACCENT_FIX1
 # Core INTOCADO do omni11. Adições: palatização (checkbox) + vírgula (checkbox)
 
-import os, re, gc, time, traceback, difflib, unicodedata
-from dataclasses import dataclass
+import os, re, gc, time, traceback, difflib, unicodedata, json, math
+from dataclasses import dataclass, field
+from enum import Enum
 from typing import Callable, Optional
 import numpy as np
 import soundfile as sf
@@ -28,6 +29,87 @@ OMNIVOICE_MAX_SYNTHESIS_SECONDS = 30.0
 REFERENCE_TARGET_SECONDS = 8.0
 REFERENCE_MAX_SECONDS = 10.0
 REFERENCE_MIN_SECONDS = 3.0
+TEMPORAL_CHUNK_TARGET_MIN_SECONDS = 2.0
+TEMPORAL_CHUNK_TARGET_MAX_SECONDS = 8.0
+TEMPORAL_CHUNK_HARD_MAX_SECONDS = 12.0
+TEMPORAL_MIN_TAIL_MS = 180
+
+
+class ChunkLimitBehavior(str, Enum):
+    WARN_AND_CONTINUE = "warn_and_continue"
+    PROCESS_IN_BATCHES = "process_in_batches"
+    REQUIRE_CONFIRMATION = "require_confirmation"
+    RESEGMENT_FIRST = "resegment_first"
+    CANCEL_EXPLICITLY = "cancel_explicitly"
+
+
+@dataclass(frozen=True)
+class TemporalAlignmentSettings:
+    accept_diff_percent: float = 5.0
+    light_stretch_percent: float = 10.0
+    max_stretch_percent: float = 20.0
+    max_regeneration_attempts: int = 3
+    auto_text_adaptation: bool = True
+    preserve_original_pauses: bool = True
+    avoid_overlap: bool = True
+    fade_out_ms: int = 50
+    fade_in_ms: int = 8
+    min_tail_ms: int = TEMPORAL_MIN_TAIL_MS
+    target_min_chunk_seconds: float = TEMPORAL_CHUNK_TARGET_MIN_SECONDS
+    target_max_chunk_seconds: float = TEMPORAL_CHUNK_TARGET_MAX_SECONDS
+    hard_max_chunk_seconds: float = TEMPORAL_CHUNK_HARD_MAX_SECONDS
+    max_chunks_per_audio: int = 20
+    max_chunks_per_batch: int = 20
+    chunk_limit_behavior: ChunkLimitBehavior = ChunkLimitBehavior.PROCESS_IN_BATCHES
+    block_critical_export: bool = True
+
+
+@dataclass
+class TemporalDubbingChunk:
+    segment_id: str
+    audio_id: str
+    chunk_index: int
+    total_chunks: int
+    start_original: float
+    end_original: float
+    duration_original: float
+    texto_original_en: str
+    texto_ptbr: str
+    arquivo_original_segmento: str
+    arquivo_dublado_bruto: str = ""
+    arquivo_dublado_ajustado: str = ""
+    duration_generated: float = 0.0
+    diff_percent: float = 0.0
+    status: str = "aguardando"
+    actions: list[str] = field(default_factory=list)
+    model_used: str = "OmniVoice"
+    attempts: int = 0
+    failure_reason: str = ""
+    stretch_applied: float = 1.0
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "segment_id": self.segment_id,
+            "audio_id": self.audio_id,
+            "chunk_index": self.chunk_index,
+            "total_chunks": self.total_chunks,
+            "start_original": self.start_original,
+            "end_original": self.end_original,
+            "duration_original": self.duration_original,
+            "texto_original_en": self.texto_original_en,
+            "texto_ptbr": self.texto_ptbr,
+            "arquivo_original_segmento": self.arquivo_original_segmento,
+            "arquivo_dublado_bruto": self.arquivo_dublado_bruto,
+            "arquivo_dublado_ajustado": self.arquivo_dublado_ajustado,
+            "duration_generated": self.duration_generated,
+            "diff_percent": self.diff_percent,
+            "status": self.status,
+            "actions": list(self.actions),
+            "model_used": self.model_used,
+            "attempts": self.attempts,
+            "failure_reason": self.failure_reason,
+            "stretch_applied": self.stretch_applied,
+        }
 
 
 @dataclass(frozen=True)

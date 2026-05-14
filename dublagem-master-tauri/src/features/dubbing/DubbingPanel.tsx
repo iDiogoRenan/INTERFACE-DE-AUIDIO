@@ -667,6 +667,8 @@ interface AutoSizingLineTextareaProps {
 
 function AutoSizingLineTextarea({ value, onFocus, onChange }: AutoSizingLineTextareaProps) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const resizeAnimationFrameRef = useRef<number | null>(null);
+  const observedInlineSizeRef = useRef<number | null>(null);
 
   useLayoutEffect(() => {
     const textarea = textareaRef.current;
@@ -674,17 +676,30 @@ function AutoSizingLineTextarea({ value, onFocus, onChange }: AutoSizingLineText
       return;
     }
 
-    const observer = new ResizeObserver(() => {
-      resizeLineTextarea(textarea);
+    observedInlineSizeRef.current = textarea.getBoundingClientRect().width;
+
+    const observer = new ResizeObserver((entries) => {
+      const [entry] = entries;
+      const nextInlineSize = resizeObserverInlineSize(entry);
+      const previousInlineSize = observedInlineSizeRef.current;
+      if (previousInlineSize !== null && Math.abs(nextInlineSize - previousInlineSize) < 0.5) {
+        return;
+      }
+
+      observedInlineSizeRef.current = nextInlineSize;
+      queueTextareaResize(textarea, resizeAnimationFrameRef);
     });
     observer.observe(textarea);
 
     return () => {
       observer.disconnect();
+      cancelQueuedTextareaResize(resizeAnimationFrameRef);
+      observedInlineSizeRef.current = null;
     };
   }, []);
 
   useLayoutEffect(() => {
+    cancelQueuedTextareaResize(resizeAnimationFrameRef);
     resizeLineTextarea(textareaRef.current);
   }, [value]);
 
@@ -699,6 +714,29 @@ function AutoSizingLineTextarea({ value, onFocus, onChange }: AutoSizingLineText
       }}
     />
   );
+}
+
+function resizeObserverInlineSize(entry: ResizeObserverEntry): number {
+  return entry.contentBoxSize[0]?.inlineSize ?? entry.contentRect.width;
+}
+
+function queueTextareaResize(
+  textarea: HTMLTextAreaElement,
+  frameRef: { current: number | null }
+): void {
+  cancelQueuedTextareaResize(frameRef);
+  frameRef.current = requestAnimationFrame(() => {
+    frameRef.current = null;
+    resizeLineTextarea(textarea);
+  });
+}
+
+function cancelQueuedTextareaResize(frameRef: { current: number | null }): void {
+  if (frameRef.current === null) {
+    return;
+  }
+  cancelAnimationFrame(frameRef.current);
+  frameRef.current = null;
 }
 
 function resizeLineTextarea(textarea: HTMLTextAreaElement | null): void {
