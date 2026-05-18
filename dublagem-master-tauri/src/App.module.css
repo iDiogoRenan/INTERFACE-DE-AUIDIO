@@ -14,8 +14,10 @@
 
 .workspace {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   grid-template-rows: auto minmax(0, 1fr);
   block-size: 100%;
+  box-sizing: border-box;
   min-width: 0;
   min-height: 0;
   overflow: hidden;
@@ -27,6 +29,7 @@
   justify-content: space-between;
   gap: 18px;
   min-block-size: var(--workspace-header-block-size);
+  box-sizing: border-box;
   border-bottom: 1px solid var(--border);
   background: var(--surface-1);
   padding: 18px 22px;
@@ -176,7 +179,10 @@
 
 .content {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   grid-template-rows: minmax(0, 1fr);
+  box-sizing: border-box;
+  min-width: 0;
   min-height: 0;
   overflow: auto;
   padding: 18px;

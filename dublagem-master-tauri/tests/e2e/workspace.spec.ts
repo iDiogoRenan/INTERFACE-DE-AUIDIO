@@ -17,6 +17,39 @@ test("keeps dubbing controls and job status reachable in a short window", async 
   await expect(page.getByText("Fila sem arquivo ativo")).toBeVisible();
 });
 
+test("keeps audio players fluid without horizontal overflow", async ({ page }) => {
+  await page.setViewportSize({ width: 1600, height: 960 });
+  await page.goto("/");
+
+  const metrics = await page.evaluate(() => {
+    const players = document.querySelector('[aria-label="Reprodutores de áudio"]');
+    const firstPlayer = players?.firstElementChild;
+    const sidebar = document.querySelector('[aria-label="Propriedades da linha"]');
+    if (!players || !firstPlayer || !sidebar) {
+      throw new Error("Expected audio player layout regions were not rendered.");
+    }
+
+    const playerBox = firstPlayer.getBoundingClientRect();
+    const playersBox = players.getBoundingClientRect();
+    const sidebarBox = sidebar.getBoundingClientRect();
+
+    return {
+      viewportWidth: window.innerWidth,
+      documentWidth: document.documentElement.scrollWidth,
+      firstPlayerHeight: playerBox.height,
+      firstPlayerWidth: playerBox.width,
+      playersRight: playersBox.right,
+      sidebarLeft: sidebarBox.left
+    };
+  });
+
+  expect(metrics.documentWidth).toBeLessThanOrEqual(metrics.viewportWidth);
+  expect(metrics.firstPlayerWidth).toBeGreaterThan(380);
+  expect(metrics.firstPlayerHeight).toBeGreaterThanOrEqual(120);
+  expect(metrics.firstPlayerHeight).toBeLessThanOrEqual(180);
+  expect(metrics.playersRight).toBeLessThanOrEqual(metrics.sidebarLeft);
+});
+
 test("shows native OmniVoice tag and line property controls", async ({ page }) => {
   await page.setViewportSize({ width: 1600, height: 960 });
   await page.goto("/");
@@ -188,6 +221,53 @@ test("lets the execution log use the remaining desktop height", async ({ page })
 
   const viewportHeight = await page.evaluate(() => window.innerHeight);
   expect(logBox.y + logBox.height).toBeGreaterThan(viewportHeight - 30);
+});
+
+test("collapses the execution log to free the dubbing workspace", async ({ page }) => {
+  await page.setViewportSize({ width: 1600, height: 960 });
+  await page.goto("/");
+
+  const logBox = page.getByRole("region", { name: "Registro de execução" });
+  const editorBox = page.getByRole("region", { name: "Transcrição editável" });
+  const sidebarBox = page.getByRole("complementary", { name: "Propriedades da linha" });
+  const dubbingAction = page.getByRole("button", { name: "Dublar selecionado" });
+  const collapseButton = page.getByRole("button", { name: "Recolher logs" });
+  await expect(collapseButton).toHaveAttribute("aria-expanded", "true");
+
+  const expandedBox = await logBox.boundingBox();
+  const expandedEditorBox = await editorBox.boundingBox();
+  const expandedSidebarBox = await sidebarBox.boundingBox();
+  const expandedActionBox = await dubbingAction.boundingBox();
+  if (!expandedBox || !expandedEditorBox || !expandedSidebarBox || !expandedActionBox) {
+    throw new Error("Expanded dubbing workspace geometry was not available.");
+  }
+
+  await collapseButton.click();
+  await expect(page.getByRole("button", { name: "Expandir logs" })).toHaveAttribute(
+    "aria-expanded",
+    "false"
+  );
+
+  const collapsedBox = await logBox.boundingBox();
+  const collapsedEditorBox = await editorBox.boundingBox();
+  const collapsedSidebarBox = await sidebarBox.boundingBox();
+  const collapsedActionBox = await dubbingAction.boundingBox();
+  if (!collapsedBox || !collapsedEditorBox || !collapsedSidebarBox || !collapsedActionBox) {
+    throw new Error("Collapsed dubbing workspace geometry was not available.");
+  }
+
+  const viewportHeight = await page.evaluate(() => window.innerHeight);
+  expect(collapsedBox.height).toBeLessThan(expandedBox.height - 40);
+  expect(collapsedBox.height).toBeLessThanOrEqual(56);
+  expect(collapsedBox.y + collapsedBox.height).toBeGreaterThanOrEqual(viewportHeight - 30);
+  expect(collapsedEditorBox.y).toBeLessThanOrEqual(expandedEditorBox.y + 8);
+  expect(collapsedActionBox.y).toBeLessThanOrEqual(expandedActionBox.y + 8);
+  expect(collapsedSidebarBox.height).toBeGreaterThan(expandedSidebarBox.height + 200);
+  expect(
+    Math.abs(
+      collapsedSidebarBox.y + collapsedSidebarBox.height - (collapsedBox.y + collapsedBox.height)
+    )
+  ).toBeLessThanOrEqual(1);
 });
 
 test("shows timestamps in execution log entries", async ({ page }) => {

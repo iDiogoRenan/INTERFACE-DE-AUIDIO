@@ -10,7 +10,6 @@ import {
   Circle,
   Download,
   Loader2,
-  Pencil,
   Pin,
   Play,
   RotateCcw,
@@ -18,16 +17,8 @@ import {
   Undo2,
   Wand2
 } from "lucide-react";
-import {
-  useCallback,
-  useEffect,
-  useId,
-  useLayoutEffect,
-  useRef,
-  useState,
-  type ReactNode
-} from "react";
-import { AudioPlayer, type AudioPlaybackRequest } from "../audio-player/AudioPlayer";
+import { useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import { AudioPlayer } from "../audio-player/AudioPlayer";
 import {
   effectiveNativeTags,
   isNativeTag,
@@ -46,12 +37,10 @@ import type {
   JobStage,
   NativeSynthesisSettings,
   ProjectLineMetadata,
-  TimingAlignmentChunkReport,
-  TimingAlignmentReport,
-  TimingChunkStatus,
   VoiceMode
 } from "../../shared/tauri/types";
 import { dubbingActionCopy } from "./dubbingAction";
+import { TimingAlignmentReportPanel } from "./TimingAlignmentReportPanel";
 import styles from "./DubbingPanel.module.css";
 
 const pipelineStages: { stage: JobStage; label: string }[] = [
@@ -131,14 +120,7 @@ export function DubbingPanel() {
   const lastOutputRevision = useWorkspaceStore((state) => state.lastOutputRevision);
   const lastAlignmentReport = useWorkspaceStore((state) => state.lastAlignmentReport);
   const logs = useWorkspaceStore((state) => state.logs);
-  const playbackRequestIdRef = useRef(0);
-  const comparisonTimeoutRef = useRef<number | null>(null);
-  const [sourcePlaybackRequest, setSourcePlaybackRequest] = useState<AudioPlaybackRequest | null>(
-    null
-  );
-  const [dubbedPlaybackRequest, setDubbedPlaybackRequest] = useState<AudioPlaybackRequest | null>(
-    null
-  );
+  const [isLogPanelCollapsed, setLogPanelCollapsed] = useState(false);
   const selectedFile = files.find((file) => file.path === selectedPath) ?? null;
   const lineMetadata = selectedLineMetadata({
     ...useWorkspaceStore.getState(),
@@ -157,75 +139,9 @@ export function DubbingPanel() {
     transcriptionBaseline !== undefined &&
     (sourceText !== transcriptionBaseline.sourceText ||
       targetText !== transcriptionBaseline.targetText);
-  const clearPendingComparison = useCallback(() => {
-    if (comparisonTimeoutRef.current === null) {
-      return;
-    }
-
-    window.clearTimeout(comparisonTimeoutRef.current);
-    comparisonTimeoutRef.current = null;
-  }, []);
-
-  useEffect(() => {
-    clearPendingComparison();
-  }, [clearPendingComparison, selectedPath]);
-
-  useEffect(() => {
-    clearPendingComparison();
-  }, [clearPendingComparison, lastOutputPath, lastOutputRevision]);
-
-  useEffect(
-    () => () => {
-      clearPendingComparison();
-    },
-    [clearPendingComparison]
-  );
 
   const handleStartDubbing = () => {
     void startDubbing();
-  };
-  const createChunkPlaybackRequest = (
-    chunk: TimingAlignmentChunkReport,
-    path: string
-  ): AudioPlaybackRequest => {
-    playbackRequestIdRef.current += 1;
-    return {
-      id: playbackRequestIdRef.current,
-      path,
-      startSeconds: chunk.startOriginal,
-      endSeconds: chunk.endOriginal > chunk.startOriginal ? chunk.endOriginal : null,
-      autoplay: true
-    };
-  };
-  const playOriginalChunk = (chunk: TimingAlignmentChunkReport) => {
-    if (!selectedPath) {
-      return;
-    }
-
-    clearPendingComparison();
-    setSourcePlaybackRequest(createChunkPlaybackRequest(chunk, selectedPath));
-  };
-  const playDubbedChunk = (chunk: TimingAlignmentChunkReport) => {
-    if (!lastOutputPath) {
-      appendLog("Nenhum áudio dublado disponível para ouvir este chunk.", "warning");
-      return;
-    }
-
-    clearPendingComparison();
-    setDubbedPlaybackRequest(createChunkPlaybackRequest(chunk, lastOutputPath));
-  };
-  const compareChunk = (chunk: TimingAlignmentChunkReport) => {
-    if (!selectedPath || !lastOutputPath) {
-      appendLog("Comparação A/B exige áudio original e áudio dublado disponíveis.", "warning");
-      return;
-    }
-
-    clearPendingComparison();
-    setSourcePlaybackRequest(createChunkPlaybackRequest(chunk, selectedPath));
-    comparisonTimeoutRef.current = window.setTimeout(() => {
-      comparisonTimeoutRef.current = null;
-      setDubbedPlaybackRequest(createChunkPlaybackRequest(chunk, lastOutputPath));
-    }, comparisonDelayMs(chunk));
   };
   const handleStartDubbingAndSave = () => {
     void startSelectedDubbingWithSaveDialog({
@@ -237,16 +153,11 @@ export function DubbingPanel() {
   };
 
   return (
-    <div className={styles.layout}>
+    <div className={styles.layout} data-log-collapsed={isLogPanelCollapsed}>
       <div className={styles.mainColumn}>
         <section className={styles.players} aria-label="Reprodutores de áudio">
-          <AudioPlayer title="Origem" path={selectedPath} playbackRequest={sourcePlaybackRequest} />
-          <AudioPlayer
-            title="Resultado"
-            path={lastOutputPath}
-            revision={lastOutputRevision}
-            playbackRequest={dubbedPlaybackRequest}
-          />
+          <AudioPlayer title="Origem" path={selectedPath} />
+          <AudioPlayer title="Resultado" path={lastOutputPath} revision={lastOutputRevision} />
         </section>
 
         <section className={styles.editorGrid} aria-label="Transcrição editável">
@@ -320,18 +231,13 @@ export function DubbingPanel() {
           </div>
         </section>
 
-        <TimingAlignmentTimeline
+        <TimingAlignmentReportPanel
           report={lastAlignmentReport}
           isBusy={isBusy}
           onRegenerate={handleStartDubbing}
           onEditChunk={(chunkIndex) => {
             setSelectedLineIndex(Math.max(0, chunkIndex - 1));
           }}
-          canPlayOriginal={selectedPath !== null}
-          canPlayDubbed={lastOutputPath !== null}
-          onPlayOriginal={playOriginalChunk}
-          onPlayDubbed={playDubbedChunk}
-          onCompare={compareChunk}
           onAcceptChunk={(chunk) => {
             appendLog(
               `Chunk ${String(chunk.chunkIndex)} aceito manualmente no relatório temporal.`,
@@ -392,173 +298,41 @@ export function DubbingPanel() {
         </p>
       </section>
 
-      <section className={styles.logPanel} aria-label="Registro de execução">
-        {logs.map((entry) => (
-          <p key={entry.id} data-level={entry.level}>
-            <time className={styles.logTimestamp} dateTime={entry.timestamp}>
-              {formatLogTimestamp(entry.timestamp)}
-            </time>
-            <span>{entry.message}</span>
-          </p>
-        ))}
+      <section
+        className={styles.logPanel}
+        data-collapsed={isLogPanelCollapsed}
+        aria-label="Registro de execução"
+      >
+        <header className={styles.logHeader}>
+          <div>
+            <span>Registro de execução</span>
+            <strong>{logs.length === 1 ? "1 evento" : `${String(logs.length)} eventos`}</strong>
+          </div>
+          <button
+            type="button"
+            aria-expanded={!isLogPanelCollapsed}
+            onClick={() => {
+              setLogPanelCollapsed((current) => !current);
+            }}
+          >
+            {isLogPanelCollapsed ? <ChevronRight size={14} /> : <ChevronDown size={14} />}
+            {isLogPanelCollapsed ? "Expandir logs" : "Recolher logs"}
+          </button>
+        </header>
+        {!isLogPanelCollapsed ? (
+          <div className={styles.logEntries}>
+            {logs.map((entry) => (
+              <p key={entry.id} data-level={entry.level}>
+                <time className={styles.logTimestamp} dateTime={entry.timestamp}>
+                  {formatLogTimestamp(entry.timestamp)}
+                </time>
+                <span>{entry.message}</span>
+              </p>
+            ))}
+          </div>
+        ) : null}
       </section>
     </div>
-  );
-}
-
-interface TimingAlignmentTimelineProps {
-  report: TimingAlignmentReport | null;
-  isBusy: boolean;
-  onRegenerate: () => void;
-  onEditChunk: (chunkIndex: number) => void;
-  canPlayOriginal: boolean;
-  canPlayDubbed: boolean;
-  onPlayOriginal: (chunk: TimingAlignmentChunkReport) => void;
-  onPlayDubbed: (chunk: TimingAlignmentChunkReport) => void;
-  onCompare: (chunk: TimingAlignmentChunkReport) => void;
-  onAcceptChunk: (chunk: TimingAlignmentChunkReport) => void;
-}
-
-function TimingAlignmentTimeline({
-  report,
-  isBusy,
-  onRegenerate,
-  onEditChunk,
-  canPlayOriginal,
-  canPlayDubbed,
-  onPlayOriginal,
-  onPlayDubbed,
-  onCompare,
-  onAcceptChunk
-}: TimingAlignmentTimelineProps) {
-  if (!report) {
-    return null;
-  }
-
-  return (
-    <section className={styles.timelinePanel} aria-label="Timeline de chunks">
-      <header>
-        <div>
-          <span>Sincronização temporal</span>
-          <strong>
-            {report.totalChunks} chunk(s) · limite {report.configuredChunkLimit}
-          </strong>
-        </div>
-        <output data-critical={report.hasCriticalChunks}>
-          {report.hasCriticalChunks ? "Revisão" : "OK"}
-        </output>
-      </header>
-
-      {report.warnings.length > 0 && (
-        <ul className={styles.timelineWarnings}>
-          {report.warnings.map((warning) => (
-            <li key={warning}>{warning}</li>
-          ))}
-        </ul>
-      )}
-
-      <div className={styles.timelineRows}>
-        {report.chunks.map((chunk) => (
-          <article key={chunk.segmentId} className={styles.timelineRow}>
-            <div className={styles.timelineChunkHeader}>
-              <strong>
-                {chunk.chunkIndex}/{chunk.totalChunks}
-              </strong>
-              <span>{statusLabelForChunk(chunk.statuses)}</span>
-            </div>
-            <dl>
-              <div>
-                <dt>Início</dt>
-                <dd>{formatSeconds(chunk.startOriginal)}</dd>
-              </div>
-              <div>
-                <dt>Fim</dt>
-                <dd>{formatSeconds(chunk.endOriginal)}</dd>
-              </div>
-              <div>
-                <dt>Origem</dt>
-                <dd>{formatSeconds(chunk.durationOriginal)}</dd>
-              </div>
-              <div>
-                <dt>Gerado</dt>
-                <dd>
-                  {chunk.durationGenerated === null ? "-" : formatSeconds(chunk.durationGenerated)}
-                </dd>
-              </div>
-              <div>
-                <dt>Dif.</dt>
-                <dd>
-                  {chunk.durationDifferencePercent === null
-                    ? "-"
-                    : `${chunk.durationDifferencePercent.toFixed(1)}%`}
-                </dd>
-              </div>
-              <div>
-                <dt>Stretch</dt>
-                <dd>{chunk.stretchRatio === null ? "-" : `${chunk.stretchRatio.toFixed(2)}x`}</dd>
-              </div>
-            </dl>
-            <p>{chunk.textoPtbr}</p>
-            <div className={styles.timelineActions}>
-              <button
-                type="button"
-                disabled={!canPlayOriginal}
-                onClick={() => {
-                  onPlayOriginal(chunk);
-                }}
-              >
-                <Play size={14} />
-                Original
-              </button>
-              <button
-                type="button"
-                disabled={!canPlayDubbed}
-                onClick={() => {
-                  onPlayDubbed(chunk);
-                }}
-              >
-                <Play size={14} />
-                Dublado
-              </button>
-              <button
-                type="button"
-                disabled={!canPlayOriginal || !canPlayDubbed}
-                onClick={() => {
-                  onCompare(chunk);
-                }}
-              >
-                <ChevronRight size={14} />
-                A/B
-              </button>
-              <button type="button" disabled={isBusy} onClick={onRegenerate}>
-                <RotateCcw size={14} />
-                Reprocessar
-              </button>
-              <button
-                type="button"
-                disabled={isBusy}
-                onClick={() => {
-                  onEditChunk(chunk.chunkIndex);
-                }}
-              >
-                <Pencil size={14} />
-                Editar
-              </button>
-              <button
-                type="button"
-                disabled={isBusy}
-                onClick={() => {
-                  onAcceptChunk(chunk);
-                }}
-              >
-                <Check size={14} />
-                Aceitar
-              </button>
-            </div>
-          </article>
-        ))}
-      </div>
-    </section>
   );
 }
 
@@ -578,11 +352,6 @@ function formatLogTimestamp(timestamp: string): string {
     return timestamp;
   }
   return logTimestampFormatter.format(date).replace(",", "");
-}
-
-function comparisonDelayMs(chunk: TimingAlignmentChunkReport): number {
-  const durationMs = Math.max(0, chunk.endOriginal - chunk.startOriginal) * 1000;
-  return Math.max(500, durationMs + 250);
 }
 
 interface TaggedLineEditorProps {
@@ -1461,43 +1230,6 @@ function formatDecibels(value: number): string {
 function formatReduction(value: number): string {
   const percent = Math.round(value * 100);
   return percent === 0 ? "desligado" : `-${String(percent)}%`;
-}
-
-function formatSeconds(value: number): string {
-  return `${value.toFixed(2)}s`;
-}
-
-function statusLabelForChunk(statuses: TimingChunkStatus[]): string {
-  const priority = [
-    "needs_manual_review",
-    "overlap_risk",
-    "out_of_limit",
-    "abrupt_ending_detected",
-    "time_stretched",
-    "text_adapted",
-    "regenerated",
-    "batch_processed",
-    "chunk_limit_exceeded",
-    "ok"
-  ] satisfies TimingChunkStatus[];
-  const fallbackStatus: TimingChunkStatus = statuses.length > 0 ? statuses[0] : "ok";
-  const status = priority.find((item) => statuses.includes(item)) ?? fallbackStatus;
-  const labels: Record<TimingChunkStatus, string> = {
-    ok: "OK",
-    time_stretched: "Stretch",
-    regenerated: "Regenerado",
-    text_adapted: "Texto adaptado",
-    out_of_limit: "Fora do limite",
-    needs_manual_review: "Revisão",
-    overlap_risk: "Risco de overlap",
-    abrupt_ending_detected: "Final abrupto",
-    bad_reference: "Referência ruim",
-    tts_failed: "Falha TTS",
-    chunk_limit_exceeded: "Acima do limite",
-    awaiting_confirmation: "Aguardando",
-    batch_processed: "Lote"
-  };
-  return labels[status];
 }
 
 interface NativeCheckboxProps {

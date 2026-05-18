@@ -1,16 +1,26 @@
 .layout {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 290px;
-  grid-template-rows: minmax(0, 1fr) auto minmax(86px, 0.34fr);
+  grid-template-columns: minmax(0, 1fr) clamp(250px, 18vw, 290px);
+  grid-template-rows: minmax(520px, 0.72fr) max-content minmax(70px, 0.52fr);
   gap: 14px;
+  inline-size: 100%;
+  max-inline-size: 100%;
   block-size: 100%;
   min-block-size: 100%;
+  box-sizing: border-box;
   min-height: 0;
+  overflow: hidden;
+}
+
+.layout[data-log-collapsed="true"] {
+  grid-template-rows: clamp(480px, 52vh, 520px) minmax(0, 1fr) max-content max-content;
 }
 
 .mainColumn {
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr) auto;
+  grid-column: 1;
+  grid-template-rows: auto clamp(210px, 22vh, 300px) auto auto;
+  align-content: start;
   gap: 14px;
   min-width: 0;
   min-height: 0;
@@ -19,11 +29,16 @@
 .players,
 .editorGrid {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 14px;
 }
 
+.players {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: start;
+}
+
 .editorGrid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   min-height: 0;
 }
 
@@ -55,7 +70,8 @@
 .editorHeading > span,
 .collapsibleHeader span,
 .controlGroup > span,
-.numberField span {
+.numberField span,
+.logHeader span {
   color: var(--text-muted);
   font-size: 11px;
   font-weight: 800;
@@ -214,6 +230,7 @@
 
 .lineSidebar {
   display: grid;
+  grid-column: 2;
   grid-template-rows: minmax(0, 1fr) auto;
   align-self: stretch;
   min-width: 0;
@@ -457,154 +474,13 @@
   padding: 10px;
 }
 
-.timelinePanel {
-  display: grid;
-  gap: 10px;
-  min-width: 0;
-  max-height: 260px;
-  overflow: hidden;
-  border: 1px solid var(--border);
-  background: var(--surface-1);
-  padding: 10px;
-}
-
-.timelinePanel header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-}
-
-.timelinePanel header div {
-  display: grid;
-  gap: 3px;
-  min-width: 0;
-}
-
-.timelinePanel header span,
-.timelinePanel dt {
-  color: var(--text-muted);
-  font-size: 10px;
-  font-weight: 800;
-  text-transform: uppercase;
-}
-
-.timelinePanel header strong {
-  color: var(--text);
-  font-size: 13px;
-}
-
-.timelinePanel header output {
-  border: 1px solid color-mix(in srgb, var(--success) 55%, var(--border));
-  color: var(--success);
-  padding: 5px 8px;
-  font-size: 11px;
-  font-weight: 850;
-}
-
-.timelinePanel header output[data-critical="true"] {
-  border-color: color-mix(in srgb, var(--danger) 60%, var(--border));
-  color: var(--danger);
-}
-
-.timelineWarnings {
-  display: grid;
-  gap: 4px;
-  margin: 0;
-  padding: 0;
-  list-style: none;
-  color: var(--warning);
-  font-size: 12px;
-  font-weight: 700;
-}
-
-.timelineRows {
-  display: grid;
-  gap: 8px;
-  min-height: 0;
-  overflow: auto;
-}
-
-.timelineRow {
-  display: grid;
-  gap: 8px;
-  border: 1px solid var(--border);
-  background: var(--surface-0);
-  padding: 8px;
-}
-
-.timelineChunkHeader {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-}
-
-.timelineChunkHeader strong,
-.timelineChunkHeader span {
-  font-size: 12px;
-  font-weight: 850;
-}
-
-.timelineChunkHeader span {
-  color: var(--accent);
-}
-
-.timelineRow dl {
-  display: grid;
-  grid-template-columns: repeat(6, minmax(72px, 1fr));
-  gap: 6px;
-  margin: 0;
-}
-
-.timelineRow dd {
-  margin: 2px 0 0;
-  color: var(--text);
-  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
-  font-size: 11px;
-}
-
-.timelineRow p {
-  margin: 0;
-  color: var(--text-muted);
-  font-size: 12px;
-  line-height: 1.35;
-  overflow-wrap: anywhere;
-}
-
-.timelineActions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-}
-
-.timelineActions button {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 6px;
-  min-height: 30px;
-  border: 1px solid var(--border);
-  background: var(--surface-2);
-  color: var(--text);
-  padding: 0 9px;
-  cursor: pointer;
-  font-size: 12px;
-  font-weight: 750;
-}
-
-.timelineActions button:disabled {
-  cursor: not-allowed;
-  opacity: 0.45;
-}
-
 .spin {
   animation: spin 1s linear infinite;
 }
 
 .jobStatus {
   display: grid;
-  grid-column: 1 / -1;
+  grid-column: 1 / 2;
   gap: 10px;
   border: 1px solid var(--border);
   background: var(--surface-1);
@@ -693,15 +569,77 @@
 }
 
 .logPanel {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: 8px;
   min-height: 0;
-  overflow: auto;
-  grid-column: 1 / -1;
+  overflow: hidden;
+  grid-column: 1 / 2;
   border: 1px solid var(--border);
   background: var(--surface-1);
   padding: 8px 12px;
 }
 
-.logPanel p {
+.logPanel[data-collapsed="true"] {
+  grid-template-rows: auto;
+}
+
+.layout[data-log-collapsed="true"] .jobStatus {
+  grid-row: 3;
+}
+
+.layout[data-log-collapsed="true"] .lineSidebar {
+  grid-row: 1 / -1;
+}
+
+.layout[data-log-collapsed="true"] .logPanel {
+  grid-row: 4;
+}
+
+.logHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-width: 0;
+}
+
+.logHeader div {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.logHeader strong {
+  color: var(--text);
+  font-size: 12px;
+}
+
+.logHeader button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 30px;
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  color: var(--text);
+  padding: 0 10px;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 750;
+}
+
+.logHeader button:hover {
+  border-color: var(--border-strong);
+}
+
+.logEntries {
+  min-height: 0;
+  overflow: auto;
+}
+
+.logEntries p {
   display: grid;
   grid-template-columns: max-content minmax(0, 1fr);
   gap: 10px;
@@ -713,7 +651,7 @@
   line-height: 1.35;
 }
 
-.logPanel p span {
+.logEntries p span {
   min-width: 0;
   overflow-wrap: anywhere;
 }
@@ -723,11 +661,11 @@
   font-variant-numeric: tabular-nums;
 }
 
-.logPanel p[data-level="error"] {
+.logEntries p[data-level="error"] {
   color: var(--danger);
 }
 
-.logPanel p[data-level="success"] {
+.logEntries p[data-level="success"] {
   color: var(--success);
 }
 
@@ -737,16 +675,38 @@
   }
 }
 
+@media (max-height: 1000px) {
+  .layout {
+    grid-template-rows: minmax(0, 1fr) max-content minmax(70px, 0.24fr);
+  }
+
+  .layout[data-log-collapsed="true"] {
+    grid-template-rows: clamp(430px, 52vh, 500px) minmax(0, 1fr) max-content max-content;
+  }
+
+  .mainColumn {
+    grid-template-rows: auto clamp(170px, 22vh, 210px) auto auto;
+  }
+}
+
 @media (max-height: 760px) {
   .layout {
-    grid-template-rows: minmax(0, 1fr) auto minmax(70px, 0.24fr);
+    grid-template-rows: minmax(0, 1fr) max-content minmax(64px, 0.24fr);
     gap: 10px;
+  }
+
+  .layout[data-log-collapsed="true"] {
+    grid-template-rows: minmax(0, 1fr) minmax(0, 0.24fr) max-content max-content;
   }
 
   .mainColumn,
   .players,
   .editorGrid {
     gap: 10px;
+  }
+
+  .mainColumn {
+    grid-template-rows: auto clamp(170px, 30vh, 260px) auto auto;
   }
 
   .lineRow textarea {
@@ -764,7 +724,17 @@
     grid-template-columns: minmax(0, 1fr);
   }
 
+  .jobStatus,
+  .logPanel {
+    grid-column: 1;
+  }
+
   .lineSidebar {
+    grid-column: 1;
+    grid-row: auto;
+  }
+
+  .layout[data-log-collapsed="true"] .lineSidebar {
     grid-row: auto;
   }
 }
