@@ -8,6 +8,38 @@ test("loads the desktop workspace shell", async ({ page }) => {
   await expect(page.getByRole("tab", { name: /Ajustes/u })).toBeVisible();
 });
 
+test("keeps workspace header tabs inside a narrow window", async ({ page }) => {
+  await page.setViewportSize({ width: 1120, height: 720 });
+  await page.goto("/");
+
+  const metrics = await page.evaluate(() => {
+    const tabs = Array.from(document.querySelectorAll('[role="tab"]'));
+    if (tabs.length !== 3) {
+      throw new Error("Expected the three workspace tabs to be rendered.");
+    }
+
+    return {
+      documentWidth: document.documentElement.scrollWidth,
+      tabBoxes: tabs.map((tab) => {
+        const rect = tab.getBoundingClientRect();
+        return {
+          left: rect.left,
+          right: rect.right,
+          width: rect.width
+        };
+      }),
+      viewportWidth: window.innerWidth
+    };
+  });
+
+  expect(metrics.documentWidth).toBeLessThanOrEqual(metrics.viewportWidth);
+  for (const tabBox of metrics.tabBoxes) {
+    expect(tabBox.left).toBeGreaterThanOrEqual(0);
+    expect(tabBox.right).toBeLessThanOrEqual(metrics.viewportWidth);
+    expect(tabBox.width).toBeGreaterThan(96);
+  }
+});
+
 test("keeps dubbing controls and job status reachable in a short window", async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 420 });
   await page.goto("/");
@@ -230,6 +262,8 @@ test("collapses the execution log to free the dubbing workspace", async ({ page 
   const logBox = page.getByRole("region", { name: "Registro de execução" });
   const editorBox = page.getByRole("region", { name: "Transcrição editável" });
   const sidebarBox = page.getByRole("complementary", { name: "Propriedades da linha" });
+  const listButton = page.getByRole("button", { name: /Dublar lista/u });
+  const tagPaletteHeader = page.getByRole("button", { name: /Paleta de marcadores/u });
   const dubbingAction = page.getByRole("button", { name: "Dublar selecionado" });
   const collapseButton = page.getByRole("button", { name: "Recolher logs" });
   await expect(collapseButton).toHaveAttribute("aria-expanded", "true");
@@ -237,8 +271,17 @@ test("collapses the execution log to free the dubbing workspace", async ({ page 
   const expandedBox = await logBox.boundingBox();
   const expandedEditorBox = await editorBox.boundingBox();
   const expandedSidebarBox = await sidebarBox.boundingBox();
+  const expandedListButtonBox = await listButton.boundingBox();
+  const expandedTagPaletteHeaderBox = await tagPaletteHeader.boundingBox();
   const expandedActionBox = await dubbingAction.boundingBox();
-  if (!expandedBox || !expandedEditorBox || !expandedSidebarBox || !expandedActionBox) {
+  if (
+    !expandedBox ||
+    !expandedEditorBox ||
+    !expandedSidebarBox ||
+    !expandedListButtonBox ||
+    !expandedTagPaletteHeaderBox ||
+    !expandedActionBox
+  ) {
     throw new Error("Expanded dubbing workspace geometry was not available.");
   }
 
@@ -251,8 +294,17 @@ test("collapses the execution log to free the dubbing workspace", async ({ page 
   const collapsedBox = await logBox.boundingBox();
   const collapsedEditorBox = await editorBox.boundingBox();
   const collapsedSidebarBox = await sidebarBox.boundingBox();
+  const collapsedListButtonBox = await listButton.boundingBox();
+  const collapsedTagPaletteHeaderBox = await tagPaletteHeader.boundingBox();
   const collapsedActionBox = await dubbingAction.boundingBox();
-  if (!collapsedBox || !collapsedEditorBox || !collapsedSidebarBox || !collapsedActionBox) {
+  if (
+    !collapsedBox ||
+    !collapsedEditorBox ||
+    !collapsedSidebarBox ||
+    !collapsedListButtonBox ||
+    !collapsedTagPaletteHeaderBox ||
+    !collapsedActionBox
+  ) {
     throw new Error("Collapsed dubbing workspace geometry was not available.");
   }
 
@@ -260,13 +312,43 @@ test("collapses the execution log to free the dubbing workspace", async ({ page 
   expect(collapsedBox.height).toBeLessThan(expandedBox.height - 40);
   expect(collapsedBox.height).toBeLessThanOrEqual(56);
   expect(collapsedBox.y + collapsedBox.height).toBeGreaterThanOrEqual(viewportHeight - 30);
+  expect(
+    Math.abs(collapsedBox.y + collapsedBox.height - (expandedBox.y + expandedBox.height))
+  ).toBeLessThanOrEqual(1);
   expect(collapsedEditorBox.y).toBeLessThanOrEqual(expandedEditorBox.y + 8);
   expect(collapsedActionBox.y).toBeLessThanOrEqual(expandedActionBox.y + 8);
-  expect(collapsedSidebarBox.height).toBeGreaterThan(expandedSidebarBox.height + 200);
   expect(
     Math.abs(
       collapsedSidebarBox.y + collapsedSidebarBox.height - (collapsedBox.y + collapsedBox.height)
     )
+  ).toBeLessThanOrEqual(1);
+  expect(Math.abs(collapsedSidebarBox.height - expandedSidebarBox.height)).toBeLessThanOrEqual(1);
+  expect(Math.abs(collapsedListButtonBox.y - expandedListButtonBox.y)).toBeLessThanOrEqual(1);
+  expect(
+    Math.abs(collapsedTagPaletteHeaderBox.y - expandedTagPaletteHeaderBox.y)
+  ).toBeLessThanOrEqual(1);
+
+  await page.getByRole("button", { name: "Expandir logs" }).click();
+  await expect(page.getByRole("button", { name: "Recolher logs" })).toHaveAttribute(
+    "aria-expanded",
+    "true"
+  );
+
+  const reexpandedBox = await logBox.boundingBox();
+  const reexpandedListButtonBox = await listButton.boundingBox();
+  const reexpandedTagPaletteHeaderBox = await tagPaletteHeader.boundingBox();
+  if (!reexpandedBox || !reexpandedListButtonBox || !reexpandedTagPaletteHeaderBox) {
+    throw new Error("Re-expanded dubbing workspace geometry was not available.");
+  }
+
+  expect(reexpandedBox.height).toBeGreaterThan(collapsedBox.height + 40);
+  expect(reexpandedBox.y).toBeLessThan(collapsedBox.y - 40);
+  expect(
+    Math.abs(reexpandedBox.y + reexpandedBox.height - (collapsedBox.y + collapsedBox.height))
+  ).toBeLessThanOrEqual(1);
+  expect(Math.abs(reexpandedListButtonBox.y - expandedListButtonBox.y)).toBeLessThanOrEqual(1);
+  expect(
+    Math.abs(reexpandedTagPaletteHeaderBox.y - expandedTagPaletteHeaderBox.y)
   ).toBeLessThanOrEqual(1);
 });
 

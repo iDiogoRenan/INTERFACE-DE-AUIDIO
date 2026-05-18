@@ -13,6 +13,7 @@
 }
 
 .workspace {
+  container-type: inline-size;
   display: grid;
   grid-template-columns: minmax(0, 1fr);
   grid-template-rows: auto minmax(0, 1fr);
@@ -150,6 +151,9 @@
 
 .tabs {
   display: inline-flex;
+  flex: 0 0 auto;
+  max-inline-size: 100%;
+  min-width: 0;
   border: 1px solid var(--border);
   background: var(--surface-0);
 }
@@ -166,6 +170,7 @@
   padding: 0 12px;
   cursor: pointer;
   font-weight: 750;
+  white-space: nowrap;
 }
 
 .tabs button:last-child {
@@ -190,4 +195,27 @@
 
 .content[hidden] {
   display: none;
+}
+
+@container (max-width: 900px) {
+  .topbar {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    align-content: center;
+    gap: 10px;
+    padding: 14px 18px;
+  }
+
+  .tabs {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    justify-self: end;
+    inline-size: min(100%, 360px);
+  }
+
+  .tabs button {
+    justify-content: center;
+    min-width: 0;
+    padding: 0 10px;
+  }
 }

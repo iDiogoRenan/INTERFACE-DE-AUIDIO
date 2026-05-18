@@ -1,7 +1,7 @@
 .layout {
   display: grid;
   grid-template-columns: minmax(0, 1fr) clamp(250px, 18vw, 290px);
-  grid-template-rows: minmax(520px, 0.72fr) max-content minmax(70px, 0.52fr);
+  grid-template-rows: clamp(480px, 52vh, 520px) minmax(0, 1fr) max-content clamp(150px, 18vh, 220px);
   gap: 14px;
   inline-size: 100%;
   max-inline-size: 100%;
@@ -231,6 +231,7 @@
 .lineSidebar {
   display: grid;
   grid-column: 2;
+  grid-row: 1 / -1;
   grid-template-rows: minmax(0, 1fr) auto;
   align-self: stretch;
   min-width: 0;
@@ -481,6 +482,7 @@
 .jobStatus {
   display: grid;
   grid-column: 1 / 2;
+  grid-row: 3;
   gap: 10px;
   border: 1px solid var(--border);
   background: var(--surface-1);
@@ -575,6 +577,7 @@
   min-height: 0;
   overflow: hidden;
   grid-column: 1 / 2;
+  grid-row: 4;
   border: 1px solid var(--border);
   background: var(--surface-1);
   padding: 8px 12px;
@@ -582,18 +585,6 @@
 
 .logPanel[data-collapsed="true"] {
   grid-template-rows: auto;
-}
-
-.layout[data-log-collapsed="true"] .jobStatus {
-  grid-row: 3;
-}
-
-.layout[data-log-collapsed="true"] .lineSidebar {
-  grid-row: 1 / -1;
-}
-
-.layout[data-log-collapsed="true"] .logPanel {
-  grid-row: 4;
 }
 
 .logHeader {
@@ -677,11 +668,15 @@
 
 @media (max-height: 1000px) {
   .layout {
-    grid-template-rows: minmax(0, 1fr) max-content minmax(70px, 0.24fr);
+    grid-template-rows: clamp(410px, 48vh, 470px) minmax(0, 1fr) max-content clamp(
+        96px,
+        13vh,
+        128px
+      );
   }
 
   .layout[data-log-collapsed="true"] {
-    grid-template-rows: clamp(430px, 52vh, 500px) minmax(0, 1fr) max-content max-content;
+    grid-template-rows: clamp(410px, 48vh, 470px) minmax(0, 1fr) max-content max-content;
   }
 
   .mainColumn {
@@ -697,6 +692,24 @@
 
   .layout[data-log-collapsed="true"] {
     grid-template-rows: minmax(0, 1fr) minmax(0, 0.24fr) max-content max-content;
+  }
+
+  .jobStatus,
+  .logPanel,
+  .lineSidebar {
+    grid-row: auto;
+  }
+
+  .layout[data-log-collapsed="true"] .jobStatus {
+    grid-row: 3;
+  }
+
+  .layout[data-log-collapsed="true"] .lineSidebar {
+    grid-row: 1 / -1;
+  }
+
+  .layout[data-log-collapsed="true"] .logPanel {
+    grid-row: 4;
   }
 
   .mainColumn,
